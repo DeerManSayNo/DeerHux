@@ -6,7 +6,7 @@ import { getAgentDir, defineTool, type ToolDefinition } from "@earendil-works/pi
 import { Type, type TSchema } from "typebox";
 import type { McpServerConfig, McpTransport } from "./mcp-config";
 
-interface JsonRpcRequest { jsonrpc: "2.0"; id: number; method: string; params?: unknown }
+interface JsonRpcRequest { jsonrpc: "2.0"; id?: number; method: string; params?: unknown }
 interface JsonRpcResponse { jsonrpc?: "2.0"; id?: number; result?: unknown; error?: { code?: number; message?: string; data?: unknown } }
 interface McpTool { name: string; description?: string; inputSchema?: unknown }
 interface RuntimeImage { type: "image"; data: string; mimeType: string }
@@ -132,11 +132,17 @@ function buildMcpEnv(serverEnv?: Record<string, string>): NodeJS.ProcessEnv {
   };
 }
 
-class StdioMcpClient {
+export class StdioMcpClient {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private nextId = 1;
   private buffer = "";
-  private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private pending = new Map<number, {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+    signal?: AbortSignal;
+    onAbort?: () => void;
+  }>();
   private stderr = "";
   /** Detected transport format: "line" (newline-delimited JSON, MCP 2024-11-05+) or "cl" (Content-Length prefix, legacy). */
   private transportFormat: "line" | "cl" | null = null;
@@ -160,6 +166,7 @@ class StdioMcpClient {
       const error = new Error(`MCP server ${this.server.name} failed to start: ${err.message}${this.stderr ? `: ${this.stderr}` : ""}`);
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
+        if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
         pending.reject(error);
       }
       this.pending.clear();
@@ -169,6 +176,7 @@ class StdioMcpClient {
       const error = new Error(`MCP server ${this.server.name} exited (${signal ?? code ?? "unknown"})${this.stderr ? `: ${this.stderr}` : ""}`);
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
+        if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
         pending.reject(error);
       }
       this.pending.clear();
@@ -193,8 +201,8 @@ class StdioMcpClient {
     })).filter((tool) => tool.name);
   }
 
-  async callTool(name: string, args: unknown): Promise<unknown> {
-    return this.request("tools/call", { name, arguments: isRecord(args) ? args : {} }, 5 * 60_000);
+  async callTool(name: string, args: unknown, signal?: AbortSignal): Promise<unknown> {
+    return this.request("tools/call", { name, arguments: isRecord(args) ? args : {} }, 5 * 60_000, signal);
   }
 
   close(): void {
@@ -202,6 +210,7 @@ class StdioMcpClient {
     this.proc = null;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
+      if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
       pending.reject(new Error(`MCP server ${this.server.name} closed`));
     }
     this.pending.clear();
@@ -220,22 +229,40 @@ class StdioMcpClient {
     proc.stdin.write(`Content-Length: ${body.length}\r\n\r\n${json}\n`);
   }
 
-  private request(method: string, params?: unknown, timeoutMs = 20_000): Promise<unknown> {
+  private request(method: string, params?: unknown, timeoutMs = 20_000, signal?: AbortSignal): Promise<unknown> {
     if (!this.proc) throw new Error(`MCP server ${this.server.name} is not running`);
+    signal?.throwIfAborted();
     const id = this.nextId++;
     const message: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
     this.writeMessage(message);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const cancelRequest = (reason: string, error: Error) => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
         this.pending.delete(id);
-        reject(new Error(`MCP request timed out: ${this.server.name}/${method}`));
+        clearTimeout(pending.timer);
+        if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
+        this.notify("notifications/cancelled", { requestId: id, reason });
+        reject(error);
+      };
+      const timer = setTimeout(() => {
+        cancelRequest(
+          `Request timed out after ${timeoutMs}ms`,
+          new Error(`MCP request timed out: ${this.server.name}/${method}`),
+        );
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      const onAbort = () => cancelRequest(
+        "Parent agent turn aborted",
+        new DOMException(`MCP request aborted: ${this.server.name}/${method}`, "AbortError"),
+      );
+      this.pending.set(id, { resolve, reject, timer, signal, onAbort });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
   }
 
   private notify(method: string, params?: unknown): void {
-    this.writeMessage({ jsonrpc: "2.0", id: 0, method, params });
+    this.writeMessage({ jsonrpc: "2.0", method, params });
   }
 
   private onData(chunk: Buffer): void {
@@ -295,6 +322,7 @@ class StdioMcpClient {
     if (!pending) return;
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
+    if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
     if (message.error) {
       pending.reject(new Error(message.error.message || `MCP error ${message.error.code ?? "unknown"}`));
     } else {
@@ -472,8 +500,8 @@ export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpS
           promptSnippet: `${name}: MCP tool ${toolName} from ${server.name}.`,
           parameters: (isRecord(mcpTool.inputSchema) ? mcpTool.inputSchema : Type.Object({})) as TSchema,
           executionMode: "sequential" as const,
-          execute: async (_toolCallId, params) => {
-            const result = await client.callTool(toolName, params);
+          execute: async (_toolCallId, params, signal) => {
+            const result = await client.callTool(toolName, params, signal);
             const isError = isRecord(result) && result.isError === true;
             return {
               content: [{ type: "text" as const, text: mcpContentToText(result) }],

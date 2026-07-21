@@ -6,6 +6,12 @@ export type CollaborationWorkerStatus = "pending" | "running" | "complete" | "ab
 export type SubagentTaskMode = "ask" | "code" | "parallel" | "review" | "custom";
 export type SubagentRunPlacement = "foreground" | "background";
 export type SubagentCapability = "readonly" | "isolated_coding" | "review";
+export type WorkerSessionState =
+  | "running"
+  | "complete_memory_destroyed"
+  | "reopenable_from_jsonl"
+  | "expired"
+  | "deleted";
 
 /**
  * Subagent worker 间调度编排模式（正交于 CollaborationRunMode 的隔离方式）。
@@ -57,6 +63,10 @@ export interface CollaborationWorkerState extends CollaborationWorkerSpec {
   diffStats?: string;
   appliedFiles?: string[];
   conflictFiles?: string[];
+  workerSessionState?: WorkerSessionState;
+  canContinue?: boolean;
+  continueUnavailableReason?: string;
+  continueExpiresAt?: string;
   /** 当前正在执行的工具（worker 运行期间实时更新）；无工具执行时为 undefined */
   activeTool?: WorkerToolActivity;
   /** 最近的工具调用历史（含执行结果），最多保留 8 条，新的在前 */
@@ -83,6 +93,9 @@ export interface CollaborationRunState {
   updatedAt: string;
   summary?: string;
   error?: string;
+  canContinue?: boolean;
+  continueUnavailableReason?: string;
+  continueExpiresAt?: string;
   /** 继承自父 session 的 model。worker 创建后立即切到它，避免 worker 用
    *  modelRegistry 的默认 model（实测会拿到超时的 openai/gpt-4）导致整个
    *  subagent 任务卡在 waitForCollaborationRun 直到全部 worker 超时。 */
@@ -135,6 +148,9 @@ export interface CollaborationRunSnapshot {
   events?: CollaborationRunEvent[];
   summary?: string;
   error?: string;
+  canContinue?: boolean;
+  continueUnavailableReason?: string;
+  continueExpiresAt?: string;
   createdAt: string;
   updatedAt: string;
 }

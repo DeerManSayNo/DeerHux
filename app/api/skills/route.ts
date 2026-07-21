@@ -100,7 +100,7 @@ export async function GET(req: Request) {
 
     return NextResponse.json({ skills: injectBuiltinSkills(skillsWithMeta), diagnostics });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -183,7 +183,7 @@ export async function DELETE(req: Request) {
 
     return NextResponse.json({ success: true });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -240,6 +240,6 @@ export async function PATCH(req: Request) {
     writeFileSync(filePath, updated, "utf8");
     return NextResponse.json({ success: true });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

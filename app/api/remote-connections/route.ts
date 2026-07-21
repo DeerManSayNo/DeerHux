@@ -41,6 +41,7 @@ export async function GET() {
       connections,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error), connections: [] }, { status: 500 });
+    console.error("[api/remote-connections] error:", error);
+    return NextResponse.json({ error: "Internal server error", connections: [] }, { status: 500 });
   }
 }

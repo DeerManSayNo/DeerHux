@@ -12,6 +12,9 @@ export async function POST(req: Request) {
   try {
     const body = await req.json() as { cwd?: string; [key: string]: unknown };
     const { cwd, ...command } = body;
+    const commandSignal = command.type === "prompt"
+      ? AbortSignal.any([req.signal, AbortSignal.timeout(40_000)])
+      : req.signal;
 
     if (!cwd || typeof cwd !== "string") {
       return NextResponse.json({ error: "cwd is required" }, { status: 400 });
@@ -26,6 +29,7 @@ export async function POST(req: Request) {
     const tempKey = `__new__${Date.now()}`;
     const mode = agentMode === undefined ? undefined : normalizeAgentMode(agentMode);
     const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, undefined, mode);
+    commandSignal.throwIfAborted();
 
     addAllowedRoot(cwd);
 
@@ -48,11 +52,14 @@ export async function POST(req: Request) {
       await session.send({ type: "set_role", roleId });
     }
 
-    const result = await session.send(promptCommand);
+    const result = await session.send(promptCommand, commandSignal);
     forceRefreshSessionList();
 
     return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      return NextResponse.json({ error: "会话启动超时，本次发送已安全取消" }, { status: 504 });
+    }
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

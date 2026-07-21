@@ -16,6 +16,8 @@ export interface SubagentPlan {
   workers: CollaborationWorkerSpec[];
 }
 
+export const MAX_WORKERS_PER_RUN = 5;
+
 export function planSubagentTask(params: {
   message: string;
   taskMode?: SubagentTaskMode;
@@ -76,9 +78,9 @@ function normalizeWorkers(workers: CollaborationWorkerSpec[] | undefined, taskMo
         if (worker.dependsOn?.length) return worker;
         const prev = explicit[index - 1];
         return prev ? { ...worker, dependsOn: [prev.name] } : worker;
-      }).slice(0, 10);
+      }).slice(0, MAX_WORKERS_PER_RUN);
     }
-    return explicit.slice(0, 10);
+    return explicit.slice(0, MAX_WORKERS_PER_RUN);
   }
 
   if (taskMode === "parallel") {
@@ -86,6 +88,8 @@ function normalizeWorkers(workers: CollaborationWorkerSpec[] | undefined, taskMo
       { name: "方案 A", task: `独立尝试完成目标，优先选择最小可行改动。\n\n目标：${message}` },
       { name: "方案 B", task: `独立尝试完成目标，可以采用不同实现路径，并说明取舍。\n\n目标：${message}` },
       { name: "方案 C", task: `独立尝试完成目标，重点关注稳定性、测试和回归风险。\n\n目标：${message}` },
+      { name: "方案 D", task: `独立尝试完成目标，重点关注边界条件、异常路径和长期维护成本。\n\n目标：${message}` },
+      { name: "方案 E", task: `独立尝试完成目标，从更激进或不同抽象层次的实现路径出发，并说明风险。\n\n目标：${message}` },
     ];
   }
   if (taskMode === "review") {

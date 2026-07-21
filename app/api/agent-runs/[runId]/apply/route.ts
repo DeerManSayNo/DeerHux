@@ -21,6 +21,6 @@ export async function POST(
     const result = await applyCollaborationPatches(runId, body.workerNames.map((name) => String(name).trim()), files);
     return NextResponse.json(result);
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

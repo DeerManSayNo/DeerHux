@@ -13,8 +13,9 @@ npm run dev   # 端口 30141
 ```
 
 类型检查：`node_modules/.bin/tsc --noEmit`  
-代码检查：`node node_modules/next/dist/bin/next lint`  
+代码检查：`npm run lint`（Next 16 已移除 `next lint` 子命令，对应 `package.json` 中的 `eslint .`）  
 **开发期间绝不要运行 `next build`** —— 会污染 `.next/` 目录并导致 `npm run dev` 无法正常工作。
+`next build` 仅用于 release 流程（`npm run release`），开发期间禁止运行。
 
 ---
 

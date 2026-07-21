@@ -48,16 +48,22 @@ export function useAgentStatus(
       return;
     }
 
+    const abortController = new AbortController();
+
     const poll = () => {
-      fetch(`/api/agent/${encodeURIComponent(sessionId)}`, { cache: "no-store" })
+      fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
+        cache: "no-store",
+        signal: abortController.signal,
+      })
         .then((r) => r.json())
         .then((d: { running?: boolean; status?: ServerStatus }) => {
           if (d.status) {
             setServerStatus(d.status);
           }
         })
-        .catch(() => {
-          // ignore errors — will retry next interval
+        .catch((err: unknown) => {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          // ignore other errors — will retry next interval
         });
     };
 
@@ -66,6 +72,7 @@ export function useAgentStatus(
     timerRef.current = setInterval(poll, POLL_INTERVAL_MS);
 
     return () => {
+      abortController.abort();
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;

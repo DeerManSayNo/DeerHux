@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, unlinkSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 
@@ -22,11 +22,28 @@ function readConfig(): TavilyConfig {
   }
 }
 
+const IS_POSIX = process.platform !== "win32";
+
+function tryChmod(filePath: string, mode: number): void {
+  if (!IS_POSIX) return;
+  try { chmodSync(filePath, mode); } catch { /* best effort */ }
+}
+
 function writeConfig(config: TavilyConfig): void {
   if (!existsSync(TAVILY_CONFIG_DIR)) {
     mkdirSync(TAVILY_CONFIG_DIR, { recursive: true });
   }
-  writeFileSync(TAVILY_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", "utf8");
+  tryChmod(TAVILY_CONFIG_DIR, 0o700);
+  // Atomic write: temp file + rename to avoid truncated config on interrupt
+  const tmpPath = `${TAVILY_CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmpPath, JSON.stringify(config, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+    renameSync(tmpPath, TAVILY_CONFIG_PATH);
+    tryChmod(TAVILY_CONFIG_PATH, 0o600);
+  } catch (e) {
+    try { unlinkSync(tmpPath); } catch { /* best effort cleanup */ }
+    throw e;
+  }
 }
 
 function maskApiKey(key: string): string {
@@ -44,8 +61,8 @@ export async function GET() {
       apiKey: key ? maskApiKey(key) : "",
       hasKey: !!key,
     });
-  } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+  } catch (_e) {
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -63,7 +80,7 @@ export async function POST(req: Request) {
       configured: true,
       apiKey: maskApiKey(apiKey),
     });
-  } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+  } catch (_e) {
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

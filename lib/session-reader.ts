@@ -11,6 +11,12 @@ import { invalidateSessionIndex, scheduleSessionIndexRebuild } from "./session/s
 const SESSION_LIST_TTL_MS = 30_000;
 /** Min interval between background refreshes to avoid thundering herd under load. */
 const BACKGROUND_REFRESH_COOLDOWN_MS = 8_000;
+
+// ── R17：JSONL 解析大小 / 条目上限 ────────────────────────────────
+/** 单个 session 文件的最大字节数（50 MB）。超过拒绝解析，防 OOM。 */
+const MAX_SESSION_FILE_SIZE = 50 * 1024 * 1024;
+/** 单个 session 文件的最大条目数（10,000）。超过拒绝解析。 */
+const MAX_SESSION_ENTRIES = 10_000;
 /** Debounce window: batch rapid invalidate() calls into a single background refresh. */
 const INVALIDATE_DEBOUNCE_MS = 2_000;
 
@@ -220,8 +226,12 @@ export async function resolveSessionPath(sessionId: string): Promise<string | nu
   return getPathCache().get(sessionId) ?? null;
 }
 
-export function cacheSessionPath(sessionId: string, filePath: string): void {
-  getPathCache().set(sessionId, filePath);
+export function cacheSessionPath(sessionId: string, filePath: string, aliases: readonly string[] = []): void {
+  const cache = getPathCache();
+  cache.set(sessionId, filePath);
+  for (const alias of aliases) {
+    if (alias && alias !== sessionId) cache.set(alias, filePath);
+  }
 }
 
 export function invalidateSessionPathCache(sessionId: string): void {
@@ -299,6 +309,14 @@ export function readSessionFileCached(filePath: string): {
     // stat failed — fall through to uncached read (will likely throw upstream)
   }
 
+  // ★ R17：文件大小预检查（O(1) 的 statSync，在解析前拦截超大文件防 OOM）
+  if (size > MAX_SESSION_FILE_SIZE) {
+    throw new Error(
+      `Session file too large (${(size / 1024 / 1024).toFixed(1)} MB). ` +
+      `Maximum allowed: ${MAX_SESSION_FILE_SIZE / 1024 / 1024} MB.`,
+    );
+  }
+
   const cached = cache.get(filePath);
   if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
     // Move to end (LRU-ish: most-recently-used last)
@@ -309,6 +327,15 @@ export function readSessionFileCached(filePath: string): {
 
   const sm = SessionManager.open(filePath);
   const entries = sm.getEntries() as unknown as SessionEntry[];
+
+  // ★ R17：条目数上限检查（双向保护：文件大小 + 条目数）
+  if (entries.length > MAX_SESSION_ENTRIES) {
+    throw new Error(
+      `Session has too many entries (${entries.length}). ` +
+      `Maximum allowed: ${MAX_SESSION_ENTRIES}.`,
+    );
+  }
+
   const leafId = sm.getLeafId();
   const context = buildSessionContext(entries, leafId);
   const header = sm.getHeader();

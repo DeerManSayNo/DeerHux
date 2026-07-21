@@ -2,6 +2,7 @@ import path from "path";
 import { addAllowedRoot } from "@/lib/file-access";
 import { ensureRpcSession, SessionNotFoundError } from "@/lib/agent-runtime/session-service";
 import { getAgentEventStore } from "@/lib/agent-runtime/event-store";
+import { validateSessionId, SessionIdValidationError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -22,27 +23,43 @@ export async function GET(
 
   let session;
   try {
+    validateSessionId(id);
     session = await ensureRpcSession(id);
   } catch (error) {
+    if (error instanceof SessionIdValidationError) {
+      return new Response(error.message, { status: 400 });
+    }
     if (error instanceof SessionNotFoundError) {
       return new Response("Session not found", { status: 404 });
     }
-    return new Response(`Failed to start agent: ${error}`, { status: 500 });
+    console.error("[agent/events] start failed:", error);
+    return new Response("Failed to start agent", { status: 500 });
   }
 
   const stream = new ReadableStream({
     start(controller) {
-      const encode = (data: unknown) => {
-        const text = `data: ${JSON.stringify(data)}\n\n`;
-        controller.enqueue(new TextEncoder().encode(text));
+      let closed = false;
+
+      // ★ R11：write-failure 安全编码——客户端断开时 controller.enqueue 抛异常，
+      // 自动触发清理，不再仅依赖 req.signal 的 abort 事件。
+      const safeEncode = (data: unknown) => {
+        if (closed) return;
+        try {
+          const text = `data: ${JSON.stringify(data)}\n\n`;
+          controller.enqueue(new TextEncoder().encode(text));
+          lastActivity = Date.now(); // ★ R11：记录最后活跃时间，供 watchdog 检测
+        } catch {
+          closed = true;
+          cleanup();
+        }
       };
 
       // Send initial connected event
-      encode({ type: "connected", sessionId: id });
+      safeEncode({ type: "connected", sessionId: id });
 
       const afterSeq = resolveAfterSeq(req);
       for (const stored of getAgentEventStore().getSince(id, afterSeq)) {
-        encode({
+        safeEncode({
           ...stored.event,
           seq: stored.seq,
           runId: stored.runId,
@@ -58,26 +75,42 @@ export async function GET(
             addAllowedRoot(path.dirname(filePath));
           }
         }
-        encode(event);
+        safeEncode(event);
       });
 
       // Heartbeat every 30s to prevent server/proxy timeout (Next.js default ~120-150s)
       const heartbeat = setInterval(() => {
+        if (closed) return;
         try {
           controller.enqueue(new TextEncoder().encode(":\n\n"));
+          lastActivity = Date.now();
         } catch {
-          // controller already closed
+          closed = true;
+          cleanup();
         }
       }, 30_000);
 
+      // ★ R11：5 分钟兜底 watchdog —— 即使 abort 事件丢失，也能检测死连接
+      let lastActivity = Date.now();
+      const watchdog = setInterval(() => {
+        if (closed) return;
+        if (Date.now() - lastActivity > 5 * 60_000) {
+          cleanup();
+        }
+      }, 60_000);
+
       // Cleanup when client disconnects
       const cleanup = () => {
+        if (closed) return;
+        closed = true;
         clearInterval(heartbeat);
+        clearInterval(watchdog);
         unsubscribe();
-        controller.close();
+        try { controller.close(); } catch { /* already closed */ }
       };
 
-      // Detect client disconnect via abort signal
+      // Double-insurance:
+      // 1. req.signal abort (normal close, fetch abort)
       req.signal?.addEventListener("abort", cleanup);
     },
   });

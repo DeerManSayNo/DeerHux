@@ -143,6 +143,6 @@ export async function POST(req: Request) {
     const model = registry.find(provider, modelId);
     return Response.json({ input: (model as { input?: ("text" | "image")[] } | undefined)?.input ?? ["text"] });
   } catch (error) {
-    return Response.json({ error: String(error) }, { status: 500 });
+    return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }

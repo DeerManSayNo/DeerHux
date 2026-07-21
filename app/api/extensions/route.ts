@@ -12,6 +12,6 @@ export async function GET(req: Request) {
   try {
     return NextResponse.json(await loadExtensionsView(cwd, { includeMcpRuntimeStatus }));
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

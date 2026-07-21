@@ -82,7 +82,7 @@ export async function GET(
       ...(agentState !== undefined ? { agentState } : {}),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -107,7 +107,7 @@ export async function PATCH(
     invalidateSessionFileCache(filePath);
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -159,6 +159,6 @@ export async function DELETE(
     forceRefreshSessionList();
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

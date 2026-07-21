@@ -36,6 +36,12 @@ import { buildIsolatedWorkerPrompt, buildWorkerPrompt, type PriorWorkerResult } 
 import { aggregateSubagentResults } from "./llm-aggregator";
 import { planSubagentTaskWithLlm } from "./llm-planner";
 import { createSubagentWorkerSession, getAutoRecoveryModels, runWorkerPromptWithRecovery, type WorkerSession } from "./subagent-runner";
+import {
+  getConcurrentWorkerSlots,
+  recordSubagentTimeoutOrAbort,
+  reserveSubagentWorkerCapacity,
+  type SubagentWorkerReservation,
+} from "./subagent-concurrency";
 
 export {
   abortCollaborationRun,
@@ -144,6 +150,9 @@ function snapshotRun(state: CollaborationRunState): CollaborationRunSnapshot {
     workers: state.workers,
     summary: state.summary,
     error: state.error,
+    canContinue: state.canContinue,
+    continueUnavailableReason: state.continueUnavailableReason,
+    continueExpiresAt: state.continueExpiresAt,
     createdAt: state.createdAt,
     updatedAt: state.updatedAt,
   };
@@ -206,6 +215,7 @@ export async function startCollaborationRun(params: {
 }): Promise<CollaborationRunState> {
   const runId = `collab_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
+  const cwd = path.resolve(params.cwd);
   // mode→taskMode 的兜底推断（用户只给了 mode 没给 taskMode 时）。
   const inferredTaskMode = params.taskMode
     ?? (params.mode === "isolated_coding" ? "code" : params.mode === "analysis" ? "ask" : undefined);
@@ -222,7 +232,6 @@ export async function startCollaborationRun(params: {
   });
   const mode = params.mode ?? planned.mode;
   const workflow = planned.workflow;
-  const cwd = path.resolve(params.cwd);
   if (mode === "isolated_coding") {
     if (!isGitRepo(cwd)) throw new Error("Code in Isolation requires a git repository so diffs can be reviewed and applied.");
     const repoStatus = getRepoStatus(cwd);
@@ -230,6 +239,11 @@ export async function startCollaborationRun(params: {
       throw new Error(`Working directory has uncommitted changes. Subagent worktrees start from HEAD, so commit/stash changes or confirm running from HEAD first: ${repoStatus.files.join(", ")}`);
     }
   }
+  const workerReservation = reserveSubagentWorkerCapacity({
+    runId,
+    cwd,
+    workerSlots: getConcurrentWorkerSlots(workflow, planned.workers.length),
+  });
   const state: CollaborationRunState = {
     runId,
     parentSessionId: params.parentSessionId,
@@ -244,6 +258,8 @@ export async function startCollaborationRun(params: {
     workflow,
     status: mode === "isolated_coding" ? "setting_up" : "running",
     isGit: isGitRepo(params.cwd),
+    canContinue: false,
+    continueUnavailableReason: "Subagent run is still running.",
     workers: planned.workers.map((worker, index) => ({
       ...worker,
       workerId: `${runId}_worker_${index + 1}`,
@@ -252,31 +268,42 @@ export async function startCollaborationRun(params: {
       agentType: planned.taskMode,
       capability: mode === "isolated_coding" ? "isolated_coding" : planned.taskMode === "review" ? "review" : "readonly",
       status: "pending",
+      workerSessionState: "running",
+      canContinue: false,
+      continueUnavailableReason: "Worker session is not available yet.",
     })),
     events: [],
     createdAt: now,
     updatedAt: now,
   };
 
-  createCollaborationRun(state);
-  emitCollaborationRunEvent({ type: "task_created", runId, summary: state.title });
-  await appendRunSnapshot(params.parentSessionId, state);
+  try {
+    createCollaborationRun(state);
+    emitCollaborationRunEvent({ type: "task_created", runId, summary: state.title });
+    await appendRunSnapshot(params.parentSessionId, state);
 
-  executeCollaborationRun(runId).catch(async (error: unknown) => {
-    const err = error instanceof Error ? error.message : String(error);
-    const updated = updateCollaborationRun(runId, (run) => {
-      run.status = "error";
-      run.error = err;
+    executeCollaborationRun(runId, workerReservation).catch(async (error: unknown) => {
+      workerReservation.release();
+      const err = error instanceof Error ? error.message : String(error);
+      const updated = updateCollaborationRun(runId, (run) => {
+        run.status = "error";
+        run.error = err;
+      });
+      emitCollaborationRunEvent({ type: "run_error", runId, error: err });
+      if (updated) await appendRunSnapshot(updated.parentSessionId, updated);
     });
-    emitCollaborationRunEvent({ type: "run_error", runId, error: err });
-    if (updated) await appendRunSnapshot(updated.parentSessionId, updated);
-  });
 
-  return state;
+    return state;
+  } catch (error) {
+    workerReservation.release();
+    throw error;
+  }
 }
 
-/** isolated_coding run 终态后保留 worktree 的时长：apply 通常很快，2h 足够且不占太久。 */
+/** isolated_coding run 终态后保留 worktree 的时长：apply/continue 通常很快，2h 足够且不占太久。 */
 const ISOLATED_WORKTREE_RETENTION_MS = 2 * 60 * 60 * 1000;
+/** analysis 无 worktree，且 worker session 内存已销毁；短暂保留 run 只为返回明确不可继续原因。 */
+const ANALYSIS_RUN_RETENTION_MS = 10 * 60 * 1000;
 
 export function waitForCollaborationRun(runId: string, timeoutMs = 12 * 60 * 1000): Promise<CollaborationRunState> {
   const existing = getCollaborationRun(runId);
@@ -287,6 +314,7 @@ export function waitForCollaborationRun(runId: string, timeoutMs = 12 * 60 * 100
     let unsubscribe: (() => void) | null = null;
     const timeout = setTimeout(() => {
       unsubscribe?.();
+      recordSubagentTimeoutOrAbort("timeout");
       // P1-3 修复：超时后联动 abort，让后台 workers 真正停下并触发终态回收，
       // 而不是让它们继续占用 session/worktree 直到 30min watchdog 自行 settle。
       void abortCollaborationRun(runId).catch(() => {});
@@ -308,21 +336,71 @@ export function waitForCollaborationRun(runId: string, timeoutMs = 12 * 60 * 100
 }
 
 /**
- * 按 run 模式调度终态回收。analysis（只读）无 worktree 可留，立即 remove；
- * isolated_coding 保留 worktree 2h 供 apply，到期兒底 remove。重复调用安全：
- * removeCollaborationRun 幂等，apply 成功提前 remove 后 TTL 再触发是 no-op。
+ * 按 run 模式调度终态回收。analysis 明确标记不可继续后短暂保留；
+ * isolated_coding 保留 worktree/jsonl 2h 供 apply/continue，到期先标记 expired 再回收。
  */
 function scheduleRunReclaim(runId: string, mode: CollaborationRunMode): void {
   if (mode === "isolated_coding") {
+    const expiresAt = new Date(Date.now() + ISOLATED_WORKTREE_RETENTION_MS).toISOString();
+    const updated = updateCollaborationRun(runId, (run) => {
+      run.continueUnavailableReason = undefined;
+      run.continueExpiresAt = expiresAt;
+      for (const worker of run.workers) {
+        if (!worker.sessionId || !worker.worktreePath || worker.status === "aborted") {
+          worker.workerSessionState = worker.status === "aborted" ? "deleted" : "complete_memory_destroyed";
+          worker.canContinue = false;
+          worker.continueUnavailableReason = worker.status === "aborted"
+            ? "Worker was aborted and cannot be continued."
+            : "Worker session or workspace is not available.";
+          worker.continueExpiresAt = undefined;
+          continue;
+        }
+        worker.workerSessionState = "reopenable_from_jsonl";
+        worker.canContinue = true;
+        worker.continueUnavailableReason = undefined;
+        worker.continueExpiresAt = expiresAt;
+      }
+      run.canContinue = run.workers.some((worker) => worker.canContinue);
+      if (!run.canContinue) {
+        run.continueUnavailableReason = "No workers are currently available to continue.";
+        run.continueExpiresAt = undefined;
+      }
+    });
+    if (updated) void appendRunSnapshot(updated.parentSessionId, updated);
     setTimeout(() => {
-      try { removeCollaborationRun(runId); } catch { /* best effort */ }
+      try {
+        const expired = updateCollaborationRun(runId, (run) => {
+          run.canContinue = false;
+          run.continueUnavailableReason = "Subagent worktree retention expired.";
+          for (const worker of run.workers) {
+            worker.workerSessionState = "expired";
+            worker.canContinue = false;
+            worker.continueUnavailableReason = "Subagent worktree retention expired.";
+          }
+        });
+        if (expired) void appendRunSnapshot(expired.parentSessionId, expired);
+        removeCollaborationRun(runId);
+      } catch { /* best effort */ }
     }, ISOLATED_WORKTREE_RETENTION_MS).unref?.();
     return;
   }
-  removeCollaborationRun(runId);
+  const updated = updateCollaborationRun(runId, (run) => {
+    run.canContinue = false;
+    run.continueUnavailableReason = "Analysis subagent runs do not retain worker sessions for continue.";
+    for (const worker of run.workers) {
+      worker.workerSessionState = "complete_memory_destroyed";
+      worker.canContinue = false;
+      worker.continueUnavailableReason = "Analysis subagent runs do not retain worker sessions for continue.";
+      worker.continueExpiresAt = undefined;
+    }
+  });
+  if (updated) void appendRunSnapshot(updated.parentSessionId, updated);
+  setTimeout(() => {
+    try { removeCollaborationRun(runId); } catch { /* best effort */ }
+  }, ANALYSIS_RUN_RETENTION_MS).unref?.();
 }
 
-async function executeCollaborationRun(runId: string): Promise<void> {
+async function executeCollaborationRun(runId: string, workerReservation?: SubagentWorkerReservation): Promise<void> {
   const state = getCollaborationRun(runId);
   if (!state) throw new Error("Run not found");
 
@@ -344,18 +422,25 @@ async function executeCollaborationRun(runId: string): Promise<void> {
 
   setCollaborationAbort(runId, async () => {
     aborted = true;
+    recordSubagentTimeoutOrAbort("abort");
     await Promise.all(workerSessions.map((session) => session.abort().catch(() => {})));
     cleanupAll();
     const updated = updateCollaborationRun(runId, (run) => {
       run.status = "aborted";
+      run.canContinue = false;
+      run.continueUnavailableReason = "Subagent run was aborted.";
       for (const worker of run.workers) {
         if (worker.status === "pending" || worker.status === "running") worker.status = "aborted";
+        worker.workerSessionState = "deleted";
+        worker.canContinue = false;
+        worker.continueUnavailableReason = "Subagent run was aborted.";
       }
     });
     emitCollaborationRunEvent({ type: "run_aborted", runId });
     if (updated) await appendRunSnapshot(updated.parentSessionId, updated);
     // aborted 不保留 worktree（用户主动中止，不会 apply）：全量回收 Map + jsonl +
     // listeners。cleanupAll 已清 worktree/session，这里主要释放内存与磁盘泄漏（P0-2）。
+    workerReservation?.release();
     removeCollaborationRun(runId);
   });
   setCollaborationCleanup(runId, cleanupAll);
@@ -368,6 +453,8 @@ async function executeCollaborationRun(runId: string): Promise<void> {
     worktrees = workspace.worktrees;
     updateCollaborationRun(runId, (run) => {
       run.status = "running";
+      run.canContinue = false;
+      run.continueUnavailableReason = "Subagent run is still running.";
       run.isGit = isGit;
       for (const worker of run.workers) worker.worktreePath = worktrees.get(worker.name);
     });
@@ -375,7 +462,10 @@ async function executeCollaborationRun(runId: string): Promise<void> {
   }
 
   const current = getCollaborationRun(runId);
-  if (!current || aborted) return;
+  if (!current || aborted) {
+    workerReservation?.release();
+    return;
+  }
   const recoveryModels = getAutoRecoveryModels();
 
   /** 收集 index 这个 worker 应注入的前序 worker 结论（sequential/pipeline/dag 用）。
@@ -423,6 +513,9 @@ async function executeCollaborationRun(runId: string): Promise<void> {
         if (target) {
           target.status = "running";
           target.sessionId = workerSession.sessionId;
+          target.workerSessionState = "running";
+          target.canContinue = false;
+          target.continueUnavailableReason = "Worker is still running.";
         }
       });
       emitCollaborationRunEvent({ type: "worker_start", runId, workerId: worker.name });
@@ -460,7 +553,12 @@ async function executeCollaborationRun(runId: string): Promise<void> {
       if (aborted) {
         updateCollaborationRun(runId, (run) => {
           const target = run.workers[index];
-          if (target) target.status = "aborted";
+          if (target) {
+            target.status = "aborted";
+            target.workerSessionState = "deleted";
+            target.canContinue = false;
+            target.continueUnavailableReason = "Worker was aborted.";
+          }
         });
         return undefined;
       }
@@ -470,6 +568,9 @@ async function executeCollaborationRun(runId: string): Promise<void> {
         if (target) {
           target.status = "complete";
           target.result = result;
+          target.workerSessionState = "complete_memory_destroyed";
+          target.canContinue = false;
+          target.continueUnavailableReason = "Continue availability is being finalized.";
           if (current.mode === "isolated_coding") {
             const { diff, stats } = generateDiff(workerCwd);
             target.diff = diff;
@@ -498,6 +599,9 @@ async function executeCollaborationRun(runId: string): Promise<void> {
         if (target) {
           target.status = "error";
           target.error = err;
+          target.workerSessionState = target.sessionId ? "complete_memory_destroyed" : undefined;
+          target.canContinue = false;
+          target.continueUnavailableReason = err;
         }
       });
       emitCollaborationRunEvent({ type: "worker_error", runId, workerId: worker.name, error: err });
@@ -520,12 +624,17 @@ async function executeCollaborationRun(runId: string): Promise<void> {
     }
   }
 
-  if (aborted) return;
+  if (aborted) {
+    workerReservation?.release();
+    return;
+  }
 
   // ── 终态：先定 status，再用 LLM 聚合 summary（多 worker 才综合，否则静态拼接）。
   updateCollaborationRun(runId, (run) => {
     run.status = run.workers.some((worker) => worker.status === "error") ? "error" : "complete";
     if (run.status === "error") run.error = "One or more child agents failed";
+    run.canContinue = false;
+    run.continueUnavailableReason = "Continue availability is being finalized.";
   });
   const forAggregate = getCollaborationRun(runId);
   // ★ LLM 聚合：≥2 个 completed worker 且有 model 时综合综述；否则回退静态拼接。
@@ -536,7 +645,10 @@ async function executeCollaborationRun(runId: string): Promise<void> {
   const completed = updateCollaborationRun(runId, (run) => {
     run.summary = summary;
   });
-  if (!completed) return;
+  if (!completed) {
+    workerReservation?.release();
+    return;
+  }
   emitCollaborationRunEvent({
     type: completed.status === "complete" ? "run_complete" : "run_error",
     runId,
@@ -544,17 +656,54 @@ async function executeCollaborationRun(runId: string): Promise<void> {
     error: completed.error,
   });
   await appendRunSnapshot(completed.parentSessionId, completed);
+  workerReservation?.release();
 
   // 终态回收（P0-1/P0-2）：worker session 在 run 终态后不再需要，立即 destroy。
   // worktree + Map + jsonl 按模式分流：
-  //   - analysis（只读）：无 worktree 可留，立即全量 remove。
-  //   - isolated_coding：apply 需要从 worktree 重新生成 diff（applyPatch 在
-  //     worktree 里跑 git diff HEAD），所以 worktree 必须保留到 apply；用户不点
-  //     apply 也不能永久泄漏，用 2h TTL 兒底 remove。
+  //   - analysis（只读）：无 worktree 且内存 session 已销毁，明确标记不可继续后短暂保留。
+  //   - isolated_coding：apply/continue 需要 worktree + worker jsonl，保留到 TTL。
   for (const session of workerSessions) {
     try { session.destroy(); } catch { /* best effort */ }
   }
   scheduleRunReclaim(completed.runId, completed.mode);
+}
+
+async function assertWorkerCanContinue(
+  state: CollaborationRunState,
+  worker: CollaborationRunState["workers"][number],
+): Promise<void> {
+  if (state.status === "applied") throw new Error("Subagent run has already been applied and cannot be continued.");
+  if (state.status === "aborted") throw new Error("Subagent run was aborted and cannot be continued.");
+  if (state.status === "applying") throw new Error("Subagent patches are currently being applied; continue is unavailable.");
+  if (state.status === "running" || state.status === "setting_up") throw new Error("Subagent run is still running.");
+  if (state.mode === "analysis") {
+    throw new Error(state.continueUnavailableReason ?? "Analysis subagent runs do not retain worker sessions for continue.");
+  }
+  if (state.canContinue === false) {
+    throw new Error(state.continueUnavailableReason ?? "Subagent run cannot be continued.");
+  }
+  if (worker.canContinue === false) {
+    throw new Error(worker.continueUnavailableReason ?? "Worker cannot be continued.");
+  }
+  if (worker.appliedFiles?.length) {
+    throw new Error("Worker changes were already applied; continue is unavailable.");
+  }
+  if (worker.workerSessionState === "expired") throw new Error(worker.continueUnavailableReason ?? "Worker continue window expired.");
+  if (worker.workerSessionState === "deleted") throw new Error(worker.continueUnavailableReason ?? "Worker session was deleted.");
+  const expiresAt = worker.continueExpiresAt ?? state.continueExpiresAt;
+  if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+    throw new Error("Worker continue window expired.");
+  }
+  if (!worker.sessionId) throw new Error("Worker session is not available yet.");
+  const sessionFile = await resolveSessionPath(worker.sessionId);
+  if (!sessionFile || !fs.existsSync(sessionFile)) {
+    throw new Error("Worker session file was not found; continue is unavailable.");
+  }
+  const workerCwd = state.mode === "isolated_coding" ? worker.worktreePath : state.cwd;
+  if (!workerCwd) throw new Error("Worker workspace is not available.");
+  if (state.mode === "isolated_coding" && !fs.existsSync(workerCwd)) {
+    throw new Error("Worker workspace was cleaned up; continue is unavailable.");
+  }
 }
 
 export async function continueCollaborationWorker(runId: string, workerId: string, prompt?: string): Promise<CollaborationRunState> {
@@ -563,10 +712,15 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
   const workerIndex = state.workers.findIndex((item) => item.workerId === workerId || item.name === workerId);
   const worker = workerIndex >= 0 ? state.workers[workerIndex] : undefined;
   if (!worker) throw new Error("Worker not found");
-  if (!worker.sessionId) throw new Error("Worker session is not available yet");
+  await assertWorkerCanContinue(state, worker);
 
   const workerCwd = state.mode === "isolated_coding" ? worker.worktreePath : state.cwd;
   if (!workerCwd) throw new Error("Worker workspace is not available");
+  const workerReservation = reserveSubagentWorkerCapacity({
+    runId: `${runId}:continue:${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    cwd: state.cwd,
+    workerSlots: 1,
+  });
   const message = prompt?.trim() || "请继续这个子任务，基于当前会话上下文补充结论、修复遗漏，并给出最新摘要。";
   const recoveryModels = getAutoRecoveryModels();
   let workerSession: WorkerSession | null = null;
@@ -574,8 +728,15 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
 
   updateCollaborationRun(runId, (run) => {
     run.status = "running";
+    run.canContinue = false;
+    run.continueUnavailableReason = "Worker continue is running.";
     const target = run.workers[workerIndex];
-    if (target) target.status = "running";
+    if (target) {
+      target.status = "running";
+      target.workerSessionState = "running";
+      target.canContinue = false;
+      target.continueUnavailableReason = "Worker continue is running.";
+    }
   });
   emitCollaborationRunEvent({ type: "worker_resumed", runId, workerId: worker.name, summary: message });
 
@@ -616,6 +777,9 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
       if (!target) return;
       target.status = "complete";
       target.result = target.result?.trim() ? `${target.result.trim()}\n\n---\n\n继续结果：\n${result}` : result;
+      target.workerSessionState = "complete_memory_destroyed";
+      target.canContinue = false;
+      target.continueUnavailableReason = "Continue availability is being finalized.";
       if (run.mode === "isolated_coding") {
         const { diff, stats } = generateDiff(workerCwd);
         target.diff = diff;
@@ -623,6 +787,8 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
       }
       run.status = run.workers.some((item) => item.status === "error") ? "error" : "complete";
       if (run.status !== "error") run.error = undefined;
+      run.canContinue = false;
+      run.continueUnavailableReason = "Continue availability is being finalized.";
     });
     // LLM 聚合 summary（≥2 completed 才综合；continue 单 worker 时回退静态拼接）。
     const forAggregate = getCollaborationRun(runId);
@@ -653,9 +819,14 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
       if (target) {
         target.status = "error";
         target.error = err;
+        target.workerSessionState = target.sessionId ? "complete_memory_destroyed" : undefined;
+        target.canContinue = false;
+        target.continueUnavailableReason = err;
       }
       run.status = "error";
       run.error = err;
+      run.canContinue = false;
+      run.continueUnavailableReason = err;
     });
     // 错误路径：单 worker 时 aggregateSubagentResults 直接静态拼接（不调 LLM），快速返回。
     const forAggregateErr = getCollaborationRun(runId);
@@ -669,6 +840,7 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
     throw error;
   } finally {
     workerSession?.destroy();
+    workerReservation.release();
   }
 }
 
@@ -683,7 +855,11 @@ export async function applyCollaborationPatches(runId: string, workerNames: stri
     throw new Error(`Working directory has uncommitted changes: ${repoStatus.files.join(", ")}`);
   }
 
-  updateCollaborationRun(runId, (run) => { run.status = "applying"; });
+  updateCollaborationRun(runId, (run) => {
+    run.status = "applying";
+    run.canContinue = false;
+    run.continueUnavailableReason = "Subagent patches are being applied.";
+  });
   emitCollaborationRunEvent({ type: "patch_apply_started", runId, files });
 
   const result: ApplyCollaborationPatchesResult = { success: true, applied: [], failed: [], conflicts: [], appliedFiles: [], conflictFiles: [] };
@@ -712,13 +888,27 @@ export async function applyCollaborationPatches(runId: string, workerNames: stri
   result.success = result.failed.length === 0;
   const updated = updateCollaborationRun(runId, (run) => {
     run.status = result.success ? "applied" : "complete";
+    if (result.success) {
+      run.canContinue = false;
+      run.continueUnavailableReason = "Subagent run has already been applied.";
+      run.continueExpiresAt = undefined;
+    }
     for (const workerName of result.applied) {
       const target = run.workers.find((item) => item.name === workerName || item.workerId === workerName);
-      if (target) target.appliedFiles = [...new Set([...(target.appliedFiles ?? []), ...(files ?? extractFilesFromDiffStats(target.diffStats))])];
+      if (target) {
+        target.appliedFiles = [...new Set([...(target.appliedFiles ?? []), ...(files ?? extractFilesFromDiffStats(target.diffStats))])];
+        target.canContinue = false;
+        target.continueUnavailableReason = "Worker changes were already applied.";
+        target.workerSessionState = "deleted";
+      }
     }
     for (const workerName of result.conflicts) {
       const target = run.workers.find((item) => item.name === workerName || item.workerId === workerName);
       if (target) target.conflictFiles = [...new Set([...(target.conflictFiles ?? []), ...(files ?? extractFilesFromDiffStats(target.diffStats))])];
+    }
+    if (!result.success) {
+      run.canContinue = run.workers.some((worker) => worker.canContinue);
+      run.continueUnavailableReason = run.canContinue ? undefined : "No workers are currently available to continue.";
     }
   });
   if (updated) await appendRunSnapshot(updated.parentSessionId, updated);

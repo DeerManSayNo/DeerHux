@@ -23,7 +23,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     if (!role) return NextResponse.json({ error: "Role not found" }, { status: 404 });
     return NextResponse.json({ role });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 

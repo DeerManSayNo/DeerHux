@@ -83,6 +83,6 @@ export async function POST(req: Request) {
       deletedIds,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

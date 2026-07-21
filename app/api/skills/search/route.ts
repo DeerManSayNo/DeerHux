@@ -116,6 +116,7 @@ export async function POST(req: Request) {
     const raw = (err.stdout ?? "") + (err.stderr ?? "");
     const results = raw ? parseSearchOutput(raw) : [];
     if (results.length > 0) return NextResponse.json({ results });
-    return NextResponse.json({ error: err.message ?? String(e) }, { status: 500 });
+    console.error("[api/skills/search] error:", e);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

@@ -82,7 +82,7 @@ export async function PATCH(req: Request) {
 
     return NextResponse.json({ roleId, config });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -119,6 +119,6 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ roleId, version, config });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

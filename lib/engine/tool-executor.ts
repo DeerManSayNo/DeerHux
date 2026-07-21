@@ -4,12 +4,10 @@
  * 设计文档 §4.3 + §7.1（工具并行错误隔离风险）。
  *
  * 核心契约：
- * 1. **分组执行**：把一批 toolCall 按各自工具的 executionMode 分成两组：
- *    - sequential 组：for-await 严格串行（一个跑完才跑下一个）
- *    - parallel 组：Promise.all 并发
- *    两组之间的执行顺序：**sequential 组先全跑完，再跑 parallel 组**（稳定可预测，
- *    注释说明；pi 的行为是 sequential 阻塞、parallel 之间并发，跨组顺序不保证，
- *    这里固定为 sequential-first 更易推理）。
+ * 1. **源序分段执行**：按 LLM 产出的 toolCall 源序切分 segment：
+ *    - 连续 parallel 工具组成一个 segment，用 Promise.all 并发执行
+ *    - sequential 工具按原始位置各自形成单工具 segment，严格等待前后 segment
+ *    segment 之间按源序等待，保证 read → edit 这类有副作用链路不会被反序。
  * 2. **错误隔离**：单个工具 throw 不能拖垮同批其他工具。失败的工具转成
  *    `isError=true, content=[{type:"text", text: errorMessage}]` 的结果，
  *    其余工具照常完成。用「每个工具包一层 try/catch 的 Promise」实现。
@@ -27,6 +25,12 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ExtensionContext } from "./extension-context.ts";
 import type { AgentToolResult, LoopEvent } from "./loop-event.ts";
 import type { AnyToolDefinition, ToolRegistry } from "./tool-registry.ts";
+import {
+  MAX_SUBAGENT_TOOL_CALLS_PER_TURN,
+  SUBAGENT_TOOL_NAME,
+  type SubagentConcurrencyRejectionDetails,
+  makeSubagentToolCallLimitDetails,
+} from "../parallel-agent/subagent-concurrency.ts";
 
 /**
  * 单个工具执行后的标准化输出。
@@ -44,6 +48,16 @@ export interface ToolExecOutput {
 
 /** 单工具执行的事件发射回调（deer-loop 注入，转发为 LoopEvent）。 */
 export type ToolEventEmitter = (event: LoopEvent) => void;
+
+export interface ToolCallLimitState {
+  toolName: string;
+  maxCallsPerTurn: number;
+  usedCalls: number;
+}
+
+export interface ToolExecuteBatchOptions {
+  callLimits?: ToolCallLimitState[];
+}
 
 /**
  * 工具执行器。
@@ -74,44 +88,45 @@ export class ToolExecutor {
     signal: AbortSignal,
     ctx: ExtensionContext,
     onToolEvent: ToolEventEmitter,
+    options?: ToolExecuteBatchOptions,
   ): Promise<ToolExecOutput[]> {
     if (calls.length === 0) return [];
 
-    // ① 按 executionMode 分组，保留源序下标（便于最后按源序重组结果）。
-    const sequentialIndices: number[] = [];
-    const parallelIndices: number[] = [];
+    // 结果数组（按源序占位，最后返回）。
+    const outputs: ToolExecOutput[] = new Array(calls.length);
+    const rejectedCalls = this.collectRejectedLimitedToolCalls(calls, options);
+
+    // ① 按源序切 segment：连续 parallel 并发；sequential 单独阻塞。
+    let parallelSegment: number[] = [];
+    const flushParallelSegment = async (): Promise<void> => {
+      if (parallelSegment.length === 0) return;
+      if (parallelSegment.length === 1) {
+        const idx = parallelSegment[0];
+        outputs[idx] = await this.executeLimitedAware(calls[idx], idx, signal, ctx, onToolEvent, rejectedCalls);
+      } else {
+        const segment = parallelSegment;
+        const settled = await Promise.all(
+          segment.map((idx) =>
+            this.executeLimitedAware(calls[idx], idx, signal, ctx, onToolEvent, rejectedCalls),
+          ),
+        );
+        for (let k = 0; k < segment.length; k++) {
+          outputs[segment[k]] = settled[k];
+        }
+      }
+      parallelSegment = [];
+    };
+
     for (let i = 0; i < calls.length; i++) {
       const mode = this.registry.getExecutionMode(calls[i].name);
       if (mode === "sequential") {
-        sequentialIndices.push(i);
+        await flushParallelSegment();
+        outputs[i] = await this.executeLimitedAware(calls[i], i, signal, ctx, onToolEvent, rejectedCalls);
       } else {
-        parallelIndices.push(i);
+        parallelSegment.push(i);
       }
     }
-
-    // 结果数组（按源序占位，最后返回）。
-    const outputs: ToolExecOutput[] = new Array(calls.length);
-
-    // ② sequential 组：严格串行（一个跑完才跑下一个）。
-    for (const idx of sequentialIndices) {
-      outputs[idx] = await this.executeOne(calls[idx], signal, ctx, onToolEvent);
-    }
-
-    // ③ parallel 组：并发执行（每个包 try/catch，错误隔离）。
-    if (parallelIndices.length === 1) {
-      // 单个无需 Promise.all，直接 await（少一层异步开销）。
-      const idx = parallelIndices[0];
-      outputs[idx] = await this.executeOne(calls[idx], signal, ctx, onToolEvent);
-    } else if (parallelIndices.length > 1) {
-      const settled = await Promise.all(
-        parallelIndices.map((idx) =>
-          this.executeOne(calls[idx], signal, ctx, onToolEvent),
-        ),
-      );
-      for (let k = 0; k < parallelIndices.length; k++) {
-        outputs[parallelIndices[k]] = settled[k];
-      }
-    }
+    await flushParallelSegment();
 
     return outputs;
   }
@@ -193,6 +208,77 @@ export class ToolExecutor {
   // 私有 helper
   // -------------------------------------------------------------------------
 
+  private collectRejectedLimitedToolCalls(
+    calls: readonly ToolCall[],
+    options?: ToolExecuteBatchOptions,
+  ): Map<number, { message: string; details?: SubagentConcurrencyRejectionDetails }> {
+    const rejected = new Map<number, { message: string; details?: SubagentConcurrencyRejectionDetails }>();
+    const limits = options?.callLimits;
+    if (!limits?.length) return rejected;
+
+    for (let index = 0; index < calls.length; index += 1) {
+      const call = calls[index];
+      const limit = limits.find((item) => item.toolName === call.name);
+      if (!limit) continue;
+      if (limit.usedCalls >= limit.maxCallsPerTurn) {
+        const details = call.name === SUBAGENT_TOOL_NAME
+          ? makeSubagentToolCallLimitDetails(limit.usedCalls, 1)
+          : undefined;
+        rejected.set(index, {
+          message: this.formatToolCallLimitError(call.name, limit, details),
+          details,
+        });
+        continue;
+      }
+      limit.usedCalls += 1;
+    }
+    return rejected;
+  }
+
+  private async executeLimitedAware(
+    call: ToolCall,
+    index: number,
+    signal: AbortSignal,
+    ctx: ExtensionContext,
+    onToolEvent: ToolEventEmitter,
+    rejectedCalls: Map<number, { message: string; details?: SubagentConcurrencyRejectionDetails }>,
+  ): Promise<ToolExecOutput> {
+    const rejection = rejectedCalls.get(index);
+    if (rejection) {
+      return this.executeRejectedToolCall(call, rejection, onToolEvent);
+    }
+    return this.executeOne(call, signal, ctx, onToolEvent);
+  }
+
+  private async executeRejectedToolCall(
+    call: ToolCall,
+    rejection: { message: string; details?: SubagentConcurrencyRejectionDetails },
+    onToolEvent: ToolEventEmitter,
+  ): Promise<ToolExecOutput> {
+    onToolEvent({
+      type: "tool_execution_start",
+      toolCallId: call.id,
+      toolName: call.name,
+      args: call.arguments,
+    });
+    const output = this.makeErrorOutput(rejection.message, rejection.details);
+    this.emitEnd(onToolEvent, call.id, call.name, output);
+    return output;
+  }
+
+  private formatToolCallLimitError(
+    toolName: string,
+    limit: ToolCallLimitState,
+    details?: ReturnType<typeof makeSubagentToolCallLimitDetails>,
+  ): string {
+    const max = toolName === SUBAGENT_TOOL_NAME ? MAX_SUBAGENT_TOOL_CALLS_PER_TURN : limit.maxCallsPerTurn;
+    const current = details?.current ?? limit.usedCalls;
+    return [
+      `Tool "${toolName}" exceeded this assistant tool-call batch limit: current ${current}, maximum ${max}.`,
+      details?.suggestion ?? "Please split the task into a later turn or retry after current work finishes.",
+    ].join(" ");
+  }
+
   /** 解析工具参数：优先 prepareArguments，兜底字符串 JSON.parse。 */
   private resolveArguments(
     tool: AnyToolDefinition,
@@ -216,10 +302,10 @@ export class ToolExecutor {
   }
 
   /** 合成错误输出（content 是一段错误文本，给 LLM 看）。 */
-  private makeErrorOutput(message: string): ToolExecOutput {
+  private makeErrorOutput(message: string, details?: unknown): ToolExecOutput {
     const result: AgentToolResult = {
       content: [{ type: "text", text: `Error: ${message}` }],
-      details: { error: message },
+      details: details ?? { error: message },
     };
     return { result, isError: true };
   }

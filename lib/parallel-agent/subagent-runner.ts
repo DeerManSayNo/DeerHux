@@ -2,6 +2,7 @@ import path from "path";
 import { existsSync, readFileSync } from "fs";
 import { startRpcSession, type AgentEvent } from "@/lib/rpc-manager";
 import { getAgentDir, resolveSessionPath } from "@/lib/session-reader";
+import { classifyLlmError, isRetryableLlmErrorCode } from "@/lib/llm-gateway";
 import type { CollaborationRunMode } from "./collaboration-types";
 import { registerWorkerSession } from "./subagent-registry";
 
@@ -58,7 +59,7 @@ export async function createSubagentWorkerSession(
     undefined,
     undefined,
     parentModel,
-    { allowSubagentTool: false, maxToolRounds: SUBAGENT_MAX_TOOL_ROUNDS },
+    { allowSubagentTool: false, maxToolRounds: SUBAGENT_MAX_TOOL_ROUNDS, requestKind: "subagent" },
   );
 
   // Record this worker session's origin so the sidebar can hide it from the
@@ -179,8 +180,12 @@ function getAssistantError(messages: Array<{ role: string; content?: unknown; st
 }
 
 function isRecoverableModelError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /400|upstream rejected|model|provider|rate.?limit|too many|overloaded|timeout|temporar/i.test(message);
+  const normalized = classifyLlmError(error);
+  if (normalized.code === "UNKNOWN") {
+    const message = error instanceof Error ? error.message : String(error);
+    return /upstream rejected|model|provider|temporar|no output/i.test(message);
+  }
+  return isRetryableLlmErrorCode(normalized.code);
 }
 
 function textFromMessages(messages: Array<{ role: string; content?: unknown }>): string {

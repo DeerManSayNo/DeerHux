@@ -28,7 +28,8 @@ export async function POST(req: Request) {
     const output = (stdout + stderr).replace(ANSI_RE, "");
     const success = /Installation complete|Installed \d+ skill/.test(output);
     if (!success) {
-      return NextResponse.json({ error: output.slice(-300) || "Install failed" }, { status: 500 });
+      console.error("[skills/install] install failed, full output:", output);
+      return NextResponse.json({ error: output.slice(-100) || "Install failed" }, { status: 500 });
     }
 
     const synced = syncSkillsFromPiToDeerhux(homedir(), {
@@ -43,6 +44,7 @@ export async function POST(req: Request) {
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; message?: string };
     const output = ((err.stdout ?? "") + (err.stderr ?? "")).replace(ANSI_RE, "");
-    return NextResponse.json({ error: output || (err.message ?? String(e)) }, { status: 500 });
+    console.error("[api/skills/install] error:", e, "output:", output);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

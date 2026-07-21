@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
-import type { AutoRecoveryMode, StallLevel } from "@/hooks/useAgentSession";
+import type { AutoRecoveryMode, RetryInfo, StallLevel } from "@/hooks/useAgentSession";
 import type { AgentMode } from "@/lib/agent-modes";
 import type { FileReference, SkillReference } from "@/lib/types";
 
@@ -77,7 +77,7 @@ interface Props {
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh") => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
-  retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+  retryInfo?: RetryInfo | null;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   cwd?: string | null;
@@ -110,6 +110,7 @@ const AGENT_MODES: { id: AgentMode; label: string; desc: string }[] = [
 ];
 
 const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const IME_ENTER_SUPPRESS_MS = 10;
 const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], string> = {
   auto: "沿用 DeerHux 默认设置",
   off: "关闭推理",
@@ -356,7 +357,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handleSend = useCallback(() => {
     cancelPendingEnterSend();
-    const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 80;
+    const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < IME_ENTER_SUPPRESS_MS;
     if (shouldBlock) return;
 
     const currentValue = textareaRef.current?.value ?? value;
@@ -503,7 +504,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     suppressNextEnterTimerRef.current = setTimeout(() => {
       suppressNextEnterRef.current = false;
       suppressNextEnterTimerRef.current = null;
-    }, 80);
+    }, IME_ENTER_SUPPRESS_MS);
   }, [cancelPendingEnterSend]);
 
   const runSendAction = useCallback(() => {
@@ -518,10 +519,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     cancelPendingEnterSend();
     pendingEnterSendTimerRef.current = setTimeout(() => {
       pendingEnterSendTimerRef.current = null;
-      const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 80;
+      const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < IME_ENTER_SUPPRESS_MS;
       if (shouldBlock) return;
       runSendAction();
-    }, 80);
+    }, IME_ENTER_SUPPRESS_MS);
   }, [cancelPendingEnterSend, runSendAction]);
 
   // Filtered skills for the picker
@@ -628,7 +629,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         nativeEvent.keyCode === 229 ||
         nativeEvent.which === 229 ||
         e.key === "Process";
-      const isImmediatelyAfterComposition = Date.now() - lastCompositionEndAtRef.current < 80;
+      const isImmediatelyAfterComposition = Date.now() - lastCompositionEndAtRef.current < IME_ENTER_SUPPRESS_MS;
 
       if (isImeEvent) {
         suppressNextEnterRef.current = true;
@@ -838,7 +839,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
               <path d="M3 3v5h5" />
             </svg>
-            正在重试 ({retryInfo.attempt}/{retryInfo.maxAttempts})…{retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+            {retryInfo.userMessage ?? "正在自动重试"}
+            <span style={{ opacity: 0.7, marginLeft: 4 }}>
+              ({retryInfo.attempt}/{retryInfo.maxAttempts})
+            </span>
           </div>
         )}
         {/* Model error banner */}

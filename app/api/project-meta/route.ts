@@ -15,7 +15,7 @@ export async function GET() {
     const meta = readProjectMeta();
     return NextResponse.json({ meta, exists: !isEmptyProjectMeta(meta) });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -35,6 +35,6 @@ export async function POST(req: Request) {
     });
     return NextResponse.json({ ok: true, meta });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

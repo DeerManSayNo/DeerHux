@@ -144,6 +144,7 @@ export interface AgentStatePayload {
     isStreaming?: boolean;
     isCompacting?: boolean;
     isRunning?: boolean;
+    stopRequested?: boolean;
     contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
     systemPrompt?: string;
     thinkingLevel?: string;
@@ -208,6 +209,7 @@ function fetchModels(): Promise<ModelsResponse> {
 export type AgentPhase =
   | { kind: "waiting_model"; reason: "initial" | "after_message" | "after_tool" | "restored" | "recovery" }
   | { kind: "running_tools"; tools: { id: string; name: string }[] }
+  | { kind: "stopping" }
   | null;
 
 export interface UseAgentSessionOptions {
@@ -452,11 +454,21 @@ export type WatchdogInfo = {
 
 export type AutoRecoveryMode = "off" | "conservative" | "aggressive";
 export type StallLevel = null | "warning" | "recovering";
+export type RetryInfo = {
+  attempt: number;
+  maxAttempts: number;
+  delayMs?: number;
+  errorMessage?: string;
+  errorCode?: string;
+  userMessage?: string;
+  suggestedAction?: string;
+};
 
 type AgentStatus = {
   isStreaming?: boolean;
   isCompacting?: boolean;
   isRunning?: boolean;
+  stopRequested?: boolean;
   lastEventType?: string;
   eventIdleMs?: number | null;
   contentIdleMs?: number | null;
@@ -497,7 +509,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const agentModeRef = useRef<AgentMode>("agent");
   const [planReady, setPlanReady] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
-  const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
+  const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const lastSystemPromptRef = useRef<string | null>(null);
@@ -572,6 +584,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const awaitingAgentStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const awaitingAgentStartChecksRef = useRef(0);
   const optimisticSessionIdRef = useRef<string | null>(null);
+  // New-session first prompt has a short window where the UI is already
+  // running but the real session id has not returned from /api/agent/new yet.
+  // If the user hits stop in that window, remember it and send abort as soon
+  // as the real id is known.
+  const pendingAbortOnSessionReadyRef = useRef(false);
+  const stopRequestedRef = useRef(false);
   const adoptingCreatedSessionRef = useRef<string | null>(null);
   const turnIdRef = useRef(0);
   const activeSubagentToolIdsRef = useRef<Set<string>>(new Set());
@@ -873,15 +891,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    */
   const applyAgentStatePayload = useCallback((agentState: AgentStatePayload | null, sid: string) => {
     if (sid !== sessionIdRef.current) return;
-    if (agentState?.running) {
+    const runtimeRunning = Boolean(agentState?.running && agentState.state?.isRunning !== false);
+    if (runtimeRunning) {
       loadTools(sid);
       // isRunning stays true across gaps (waiting-for-model, between tool
       // batches, auto-retry backoff). Falls back to true for older servers.
-      if (agentState.state?.isRunning !== false) {
-        agentRunningRef.current = true;
-        setAgentRunning(true);
-        setAgentPhase({ kind: "waiting_model", reason: "restored" });
-      }
+      agentRunningRef.current = true;
+      setAgentRunning(true);
+      const stopRequested = agentState?.state?.stopRequested === true;
+      stopRequestedRef.current = stopRequested;
+      setAgentPhase(stopRequested ? { kind: "stopping" } : { kind: "waiting_model", reason: "restored" });
+    } else {
+      // 状态同步必须是双向的。只把 false→true 应用到 UI、却忽略 true→false，
+      // 会让丢失 agent_end 的历史会话永久锁住发送按钮。
+      stopRequestedRef.current = false;
+      agentRunningRef.current = false;
+      setAgentRunning(false);
+      setAgentPhase(null);
+      dispatch({ type: "end" });
     }
     if (agentState?.state) {
       if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
@@ -1190,6 +1217,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_end": {
         clearAwaitingAgentStartGuard();
         awaitingAgentStartRef.current = false;
+        stopRequestedRef.current = false;
         // If the stale-event protection gate is still open (set by a
         // watchdog recovery cycle that sent abort), and abortCompletedRef
         // has NOT been set yet, this agent_end is from the aborted old
@@ -1263,6 +1291,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const changedFiles = [...changedFilesRef.current];
         changedFilesRef.current.clear();
         if (sessionIdRef.current) onAgentEnd?.(sessionIdRef.current, changedFiles);
+
+        // === TTFT Recovery: 中转站排队导致首包超时 → 主动切备用模型 ===
+        // 服务端 TTFT 超时重试 1 次仍失败后，agent_end 会带 errorCode。
+        // errorCode === "UPSTREAM_TTFT_TIMEOUT" 本身排除了用户主动停止
+        //（用户 abort 走 aborted 分支，不产生该 errorCode）。
+        const ttftErrorCode = (event as { errorCode?: string }).errorCode;
+        if (
+          ttftErrorCode === "UPSTREAM_TTFT_TIMEOUT" &&
+          sessionIdRef.current &&
+          autoRecoveryMode !== "off" &&
+          autoRecoveryModelsRef.current.length > 0 &&
+          !autoContinueSentRef.current &&
+          autoRecoveryAttemptsRef.current < MAX_AUTO_RECOVERIES_PER_TURN
+        ) {
+          autoRecoveryAttemptsRef.current += 1;
+          console.log(
+            '[TTFT-Recovery] UPSTREAM_TTFT_TIMEOUT — switching to fallback model (attempt %d/%d)',
+            autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES_PER_TURN,
+          );
+          void executeRecoveryRef.current(sessionIdRef.current, autoRecoveryAttemptsRef.current);
+        }
         break;
       }
       case "message_start":
@@ -1382,7 +1431,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // false-positive stale-detection and a conflicting auto-continue.
         watchdogStaleRecoveriesRef.current = 0;
         lastContentChangedAtRef.current = Date.now();
-        setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
+        setRetryInfo({
+          attempt: event.attempt as number,
+          maxAttempts: event.maxAttempts as number,
+          delayMs: event.delayMs as number | undefined,
+          errorMessage: event.errorMessage as string | undefined,
+          errorCode: event.errorCode as string | undefined,
+          userMessage: event.userMessage as string | undefined,
+          suggestedAction: event.suggestedAction as string | undefined,
+        });
         break;
       case "auto_retry_end": {
         const retryEndEvent = event as { success?: boolean; finalError?: string };
@@ -1428,6 +1485,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (agentRunningRef.current) return;
     // Set the ref immediately to prevent duplicate sends before React re-renders
     agentRunningRef.current = true;
+    pendingAbortOnSessionReadyRef.current = false;
     turnIdRef.current += 1;
     // Explicitly clear recovery state — a user-initiated send always starts a fresh turn
     autoContinueSentRef.current = false;
@@ -1513,6 +1571,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         adoptingCreatedSessionRef.current = realId;
         optimisticSessionIdRef.current = null;
         connectEvents(realId);
+        if (pendingAbortOnSessionReadyRef.current) {
+          pendingAbortOnSessionReadyRef.current = false;
+          void sendAgentCommand(realId, { type: "abort" }, { timeoutMs: 3_000 }).catch((err) => {
+            console.error("Failed to abort pending new session:", err);
+          });
+        }
         scheduleAwaitingAgentStartGuard(realId, currentTurnId);
         createdRealSession = true;
         onSessionCreated?.({
@@ -1536,7 +1600,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(piImages?.length ? { images: piImages } : {}),
           ...(roleId ? { roleId } : {}),
           ...(skill ? { skillName: skill.name } : {}),
-        });
+        }, { timeoutMs: 45_000 });
       }
     } catch (e) {
       if (optimisticNewSession && !createdRealSession) onSessionStarted?.(null);
@@ -1545,7 +1609,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       optimisticSessionIdRef.current = null;
       adoptingCreatedSessionRef.current = null;
       console.error("Failed to send message:", e);
-      const errorMessage = e instanceof Error ? e.message : String(e);
+      const errorMessage = e instanceof DOMException && e.name === "AbortError"
+        ? "历史会话启动超时，请重试；本次请求已取消，不会在后台继续发送。"
+        : e instanceof Error ? e.message : String(e);
       // 400 with images → likely model doesn't support image input
       if (piImages?.length && /400/.test(errorMessage)) {
         lastModelErrorRef.current = errorMessage + " — 该模型可能不支持图片输入，请检查模型配置";
@@ -1560,6 +1626,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Reset the ref synchronously so the watchdog and SSE reconnect logic
       // see the correct state immediately — not after the next React render.
       agentRunningRef.current = false;
+      pendingAbortOnSessionReadyRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
@@ -1575,15 +1642,90 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, connectEvents, ensureEventsConnected, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
 
+  const forceStopLocally = useCallback((opts?: { keepPendingAbort?: boolean }) => {
+    clearAwaitingAgentStartGuard();
+    awaitingAgentStartRef.current = false;
+    if (!opts?.keepPendingAbort) pendingAbortOnSessionReadyRef.current = false;
+    stopRequestedRef.current = false;
+    autoContinueSentRef.current = false;
+    autoContinueInProgressRef.current = false;
+    abortCompletedRef.current = false;
+    stallDismissedRef.current = true;
+    activeSubagentToolIdsRef.current.clear();
+    stopSubagentLiveRefresh();
+    agentRunningRef.current = false;
+    setAgentRunning(false);
+    setAgentPhase(null);
+    setStallLevel(null);
+    setRetryInfo(null);
+    dispatch({ type: "end" });
+  }, [clearAwaitingAgentStartGuard, stopSubagentLiveRefresh]);
+
   const handleAbort = useCallback(async () => {
+    if (stopRequestedRef.current) return;
+    stopRequestedRef.current = true;
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid) {
+      if (agentRunningRef.current) pendingAbortOnSessionReadyRef.current = true;
+      setAgentPhase({ kind: "stopping" });
+      return;
+    }
+
+    clearAwaitingAgentStartGuard();
+    awaitingAgentStartRef.current = false;
+    autoContinueSentRef.current = false;
+    autoContinueInProgressRef.current = false;
+    setAgentPhase({ kind: "stopping" });
+    setStallLevel(null);
+    setRetryInfo(null);
     try {
-      await sendAgentCommand(sid, { type: "abort" });
+      const result = await sendAgentCommand<{ stopped?: boolean }>(
+        sid,
+        { type: "abort" },
+        { timeoutMs: 3_000 },
+      );
+      if (result?.stopped) {
+        forceStopLocally();
+        void loadSession(sid, false, false);
+        return;
+      }
+
+      // abort 接口只确认“停止信号已送达”。继续观察后端，只有运行态确实归零
+      // 才解锁发送，避免 UI 假停后创建并发 turn。
+      const deadline = Date.now() + 15_000;
+      while (
+        stopRequestedRef.current
+        && sessionIdRef.current === sid
+        && Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        try {
+          const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, {
+            cache: "no-store",
+            signal: AbortSignal.timeout(2_000),
+          });
+          if (!res.ok) continue;
+          const state = await res.json() as { running?: boolean; status?: AgentStatus };
+          if (!state.running || state.status?.isRunning === false) {
+            forceStopLocally();
+            void loadSession(sid, false, false);
+            return;
+          }
+        } catch {
+          // 状态查询失败是 unknown，不等于已停止；继续保持锁定并等待 SSE/下一次查询。
+        }
+      }
+
+      if (stopRequestedRef.current && sessionIdRef.current === sid) {
+        setLastModelError("停止请求已送达，但当前工具仍在安全收尾；完成前不会启动新的回合。");
+      }
     } catch (e) {
       console.error("Failed to abort:", e);
+      stopRequestedRef.current = false;
+      setAgentPhase(null);
+      setLastModelError("停止请求发送失败，后端可能仍在运行，请重试。");
     }
-  }, []);
+  }, [clearAwaitingAgentStartGuard, forceStopLocally, loadSession]);
 
   const handleFork = useCallback(async (entryId: string) => {
     const sid = sessionIdRef.current;
@@ -2194,6 +2336,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunningRef.current = false;
     awaitingAgentStartRef.current = false;
     optimisticSessionIdRef.current = null;
+    pendingAbortOnSessionReadyRef.current = false;
+    stopRequestedRef.current = false;
     adoptingCreatedSessionRef.current = null;
     autoContinueSentRef.current = false;
     watchdogStaleRecoveriesRef.current = 0;

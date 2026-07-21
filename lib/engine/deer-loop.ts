@@ -1,17 +1,10 @@
 /**
- * DeerLoopEngine —— DeerHux 自研 Agent Loop 引擎（M1 最小骨架）。
+ * DeerLoopEngine —— DeerHux 自研 Agent Loop 引擎。
  *
- * 设计文档 §四 / §六.M1 的产出。实现 {@link AgentEnginePort} 的最小子集：
- * - ✅ prompt() 流式（消费 pi-ai 的 AssistantMessageEventStream，转成 LoopEvent emit）
- * - ✅ abort() 中止当前 in-flight stream
- * - ✅ subscribe() / dispose() 事件订阅与释放
- * - ✅ 基本只读属性（sessionId / isStreaming / model / thinkingLevel ...）
- *
- * M1 不做：工具调用循环、工具注册、重试、steering/followUp 队列、session 持久化、
- * 压缩。这些方法按文档 §五 能力对齐表 throw "not implemented in M1"。
- *
- * ★ 关键依赖：复用 pi-ai 的 streamSimple（14+ provider 适配不动），DeerLoopEngine
- * 只负责 loop 编排与事件契约。streamFn 可注入，便于单测 mock。
+ * 负责 prompt 流式消费、工具调用循环、重试、steering/followUp 队列、压缩状态
+ * 与 session jsonl 持久化编排。LLM 传输仍复用 pi-ai 的 streamSimple
+ *（14+ provider 适配不动），DeerLoopEngine 只负责 loop 编排与事件契约。
+ * streamFn 可注入，便于单测 mock。
  *
  * ★ 事件顺序契约（文档 §7.1）：严格
  *   agent_start → message_start → message_update*N → message_end → agent_end
@@ -36,6 +29,13 @@ import type {
   SessionManager,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import {
+  buildSessionContext,
+  convertToLlm,
+  DEFAULT_COMPACTION_SETTINGS,
+  findCutPoint,
+  generateSummary,
+} from "@earendil-works/pi-coding-agent";
 import type { AgentEnginePort } from "./port.ts";
 import type { AgentMessage, CompactionResult, LoopEvent, QueueMode } from "./loop-event.ts";
 import { ToolRegistry, type AnyToolDefinition } from "./tool-registry.ts";
@@ -48,6 +48,30 @@ import {
   getAssistantContentLength,
   type RetryPolicy,
 } from "./retry-policy.ts";
+import {
+  acquireLlmPermit,
+  classifyLlmError,
+  getLlmUserMessage,
+  hashLlmApiKey,
+  isLlmGatewayEnabled,
+  type LlmPermit,
+  type LlmRequestKind,
+  type LlmRequestMeta,
+  type NormalizedLlmError,
+} from "../llm-gateway";
+import {
+  recordLlmError,
+  recordLlmRequest,
+  recordLlmSuccess,
+} from "../llm-gateway/metrics";
+import {
+  recordUpstreamFailure,
+  recordUpstreamSuccess,
+} from "../llm-gateway/upstream-health";
+import {
+  MAX_SUBAGENT_TOOL_CALLS_PER_TURN,
+  SUBAGENT_TOOL_NAME,
+} from "../parallel-agent/subagent-concurrency";
 
 /**
  * 不限定具体 Api 的 Model 类型别名。
@@ -70,6 +94,10 @@ export type StreamFn = (
   options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
+export interface DeerLoopModelRegistry {
+  find(provider: string, modelId: string): AnyModel | undefined;
+}
+
 /**
  * DeerLoopEngine 构造选项（文档 §4.5 的子集，M1 只保留流式必需字段）。
  */
@@ -84,12 +112,16 @@ export interface DeerLoopOptions {
   sessionId?: string;
   /** 思考级别（pi-ai 的 ThinkingLevel，不含 "off"；off 时传 undefined）。 */
   thinkingLevel?: ThinkingLevel;
+  /** 从持久化 session 恢复的模型上下文。新会话不传。 */
+  initialMessages?: readonly AgentMessage[];
   /** ★ 可注入的 stream 函数，默认 streamSimple。测试用。 */
   streamFn?: StreamFn;
   /** API key 解析器（OAuth 短 token 用）。每次 LLM 调用前调。 */
   getApiKey?: (provider: string) => Promise<string | undefined>;
   /** 真实 SessionManager。生产路径注入后，DeerLoopEngine 会把消息写入 jsonl。 */
   sessionManager?: SessionManager;
+  /** 真实 ModelRegistry。用于 set_model/recover 和工具 ctx.modelRegistry，避免空代理。 */
+  modelRegistry?: DeerLoopModelRegistry;
 
   // ─── M2：工具注册 ───────────────────────────────────────
   /** ★ 初始工具集（defineTool / createCodeGraphTools 等产物，直接喂给 registry）。 */
@@ -102,6 +134,8 @@ export interface DeerLoopOptions {
   maxToolRounds?: number;
   /** ★ M4：注入自定义重试策略（测试用极小 delay/settle；不传则 installRetryHardening 时建 DefaultRetryPolicy）。 */
   retryPolicy?: RetryPolicy;
+  /** LLM Gateway 调度用请求类型。主会话默认 main，subagent worker 传 subagent。 */
+  requestKind?: LlmRequestKind;
 
   // ─── M5：steering / followUp 队列 ───────────────────────
   /** ★ M5：steering 队列模式（默认 "all"，turn 结束后一次注入全部插嘴消息）。
@@ -140,26 +174,59 @@ function extractText(message: { content?: unknown }): string {
   return text;
 }
 
-/** ★ M6 helper：粗略估算 token 数（chars/4 近似，中文友好的折衷）。
+/**
+ * 保守估算文本 token：CJK 字符通常接近一字一 token，其余文本按约 4 字符一 token。
+ * 相比统一 chars/4，不会在中文说明、中文日志和混合工具输出上严重低估。
+ */
+function estimateTextTokens(text: string): number {
+  let cjk = 0;
+  let other = 0;
+  for (const char of text) {
+    if (/[\u3400-\u9fff\uf900-\ufaff]/u.test(char)) cjk++;
+    else other++;
+  }
+  return cjk + Math.ceil(other / 4);
+}
+
+/** ★ M6 helper：粗略估算 token 数。
  *
- *  非精确计数（真正的 tokenizer 依赖 provider），仅用于 getContextUsage
- *  的 percent 估算与 compact 的 tokensBefore/After 对比。 */
+ * 非精确计数（真正的 tokenizer 依赖 provider），仅用于提前压缩和批次大小控制；
+ * 估算必须宁高勿低，避免压缩请求本身超过上下文窗口。 */
 function estimateTokens(messages: AgentMessage[]): number {
-  let chars = 0;
+  let tokens = 0;
   for (const msg of messages) {
+    const summaryMessage = msg as { role?: string; summary?: unknown };
+    if (
+      (summaryMessage.role === "compactionSummary" || summaryMessage.role === "branchSummary")
+      && typeof summaryMessage.summary === "string"
+    ) {
+      tokens += estimateTextTokens(summaryMessage.summary);
+      continue;
+    }
     if (typeof msg.content === "string") {
-      chars += msg.content.length;
+      tokens += estimateTextTokens(msg.content);
     } else if (Array.isArray(msg.content)) {
       for (const block of msg.content) {
         if (block && typeof block === "object") {
-          const b = block as { text?: string; thinking?: string };
-          if (typeof b.text === "string") chars += b.text.length;
-          if (typeof b.thinking === "string") chars += b.thinking.length;
+          const b = block as {
+            text?: string;
+            thinking?: string;
+            type?: string;
+            name?: string;
+            arguments?: unknown;
+          };
+          if (typeof b.text === "string") tokens += estimateTextTokens(b.text);
+          if (typeof b.thinking === "string") tokens += estimateTextTokens(b.thinking);
+          if (b.type === "toolCall") {
+            tokens += estimateTextTokens(b.name ?? "") + estimateTextTokens(JSON.stringify(b.arguments ?? {}));
+          }
+          // 图片不会作为文本出现在 jsonl，但会占用可观的视觉上下文预算。
+          if (b.type === "image") tokens += 1_200;
         }
       }
     }
   }
-  return Math.ceil(chars / 4);
+  return tokens;
 }
 
 /** ★ M5：单个 prompt 内最多触发的 followUp 新 turn 数（防无限 followUp 死循环）。
@@ -195,6 +262,10 @@ interface ConsumedStream {
   aborted: boolean;
   /** 错误消息（非 abort）。 */
   errorMessage: string | undefined;
+  /** 原始错误对象；用于统一 LLM 错误分类，避免丢失 status/headers。 */
+  error: unknown;
+  /** 标准化错误，存在时供 retry/UI 复用。 */
+  normalizedError?: NormalizedLlmError;
   /** ★ M4 修复：consumeStreamWithRetry 是否已发射最终的 message_start+message_end。
    *
    *  当发生重试时，最终轮的 message_end 必须在 auto_retry_end 【之前】发射（事件顺序契约）。
@@ -226,6 +297,72 @@ const DEFAULT_TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = 
 };
 
 // ===========================================================================
+// ★ R8：Promise-based Mutex（非排队、快速拒绝语义）
+// ===========================================================================
+
+/**
+ * Promise-based Mutex（非排队、快速拒绝语义）。
+ *
+ * 用于 prompt() 并发保护：若当前已有 prompt 在执行，第二个请求立即
+ * 抛出 AGENT_BUSY 错误而非排队等待。参考 Prisma 的 Mutex 类。
+ */
+class Mutex {
+  private _locked = false;
+
+  /** 尝试获取锁。成功返回 release 函数；已锁返回 null（快速拒绝）。 */
+  tryAcquire(): (() => void) | null {
+    if (this._locked) return null;
+    this._locked = true;
+    return () => {
+      this._locked = false;
+    };
+  }
+}
+
+// ===========================================================================
+// ★ R9：事件守卫（RAII guard）——保证 agent_start / agent_end 严格配对
+// ===========================================================================
+
+/**
+ * 事件守卫（RAII guard）：保证 agent_start / agent_end 在 prompt 生命周期
+ * 内严格配对发射。即使内部分支遗漏事件，finally 也会补发。
+ *
+ * 参考 Jupyter Kernel 的消息协议：scope guard 在入口创建，析构时自动补发
+ * 缺失事件，不依赖手动 emit 的分支覆盖率。
+ */
+class EventGuard {
+  private _agentStarted = false;
+  private _agentEnded = false;
+  private readonly _emit: (event: LoopEvent) => void;
+
+  constructor(emit: (event: LoopEvent) => void) {
+    this._emit = emit;
+  }
+
+  /** 发射 agent_start（幂等：已发射则跳过）。 */
+  ensureAgentStart(): void {
+    if (!this._agentStarted) {
+      this._agentStarted = true;
+      this._emit({ type: "agent_start" });
+    }
+  }
+
+  /** 发射 agent_end（幂等：已发射则跳过）。
+   *  可传额外字段（error / errorCode / willRetry / messages）。 */
+  ensureAgentEnd(extra?: Record<string, unknown>): void {
+    if (!this._agentEnded) {
+      this._agentEnded = true;
+      this._emit({ type: "agent_end", ...extra } as LoopEvent);
+    }
+  }
+
+  /** 查询 agent_end 是否已发射（finally 中判断是否需要补发）。 */
+  get agentEnded(): boolean {
+    return this._agentEnded;
+  }
+}
+
+// ===========================================================================
 // DeerLoopEngine
 // ===========================================================================
 
@@ -243,6 +380,9 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** 当前 in-flight stream 的 AbortController。null 表示空闲。 */
   private abortController: AbortController | null = null;
 
+  /** ★ R8：prompt 并发保护 Mutex（快速拒绝语义，不排队）。 */
+  private readonly _promptMutex = new Mutex();
+
   /** loop 级运行标记：agent_start → agent_end 之间为 true。 */
   private _isRunning = false;
 
@@ -250,7 +390,7 @@ export class DeerLoopEngine implements AgentEnginePort {
   private _isStreaming = false;
 
   /** 会话 transcript（pi-ai Message[]，= AgentMessage[]）。 */
-  private readonly _messages: AgentMessage[] = [];
+  private readonly _messages: AgentMessage[];
 
   /** 持久系统提示词（loop 自持，天然免疫 H1——见 {@link DeerLoopEngine#setSystemPromptPersistent}）。
    *
@@ -280,6 +420,12 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** 真实 SessionManager（生产路径注入）；未注入时回退最小代理，方便单测。 */
   private readonly _sessionManager?: SessionManager;
 
+  /** 真实 ModelRegistry（生产路径注入）；未注入时回退只读空代理，方便单测。 */
+  private readonly _modelRegistry?: DeerLoopModelRegistry;
+
+  /** LLM Gateway 调度用请求类型，影响 limiter 优先级。 */
+  private readonly _requestKind: LlmRequestKind;
+
   /** ★ M2：工具注册表（单一数据源，消灭 pi 三份副本）。 */
   private readonly registry: ToolRegistry;
 
@@ -303,8 +449,8 @@ export class DeerLoopEngine implements AgentEnginePort {
   private _isCompacting = false;
   /** ★ M6：compact 的独立 AbortController（与 prompt 的 abortController 分离）。 */
   private compactionAbortController: AbortController | null = null;
-  /** ★ M6：是否启用自动压缩（setAutoCompactionEnabled 写）。当前只存状态，自动触发留后续。 */
-  private _autoCompactionEnabled = false;
+  /** ★ M6：是否启用自动压缩。默认开启，在每个新回合前检查安全阈值。 */
+  private _autoCompactionEnabled = true;
 
   // ─── ★ M5：steering / followUp 队列 ─────────────────────
   /** steering 队列：用户在 turn 进行中「插嘴补充」（steer 命令）。
@@ -348,9 +494,12 @@ export class DeerLoopEngine implements AgentEnginePort {
     this._sessionId = options.sessionId ?? `deer-loop-${Date.now()}`;
     this._baseSystemPrompt = options.systemPrompt ?? "";
     this._thinkingLevel = options.thinkingLevel;
+    this._messages = options.initialMessages ? [...options.initialMessages] : [];
     this._streamFn = options.streamFn ?? defaultStreamFn;
     this._getApiKey = options.getApiKey;
     this._sessionManager = options.sessionManager;
+    this._modelRegistry = options.modelRegistry;
+    this._requestKind = options.requestKind ?? "main";
     this._agentState = {
       systemPrompt: this._baseSystemPrompt,
       thinkingLevel: this._thinkingLevel ?? "off",
@@ -423,215 +572,259 @@ export class DeerLoopEngine implements AgentEnginePort {
       images?: Array<{ type: "image"; data: string; mimeType: string }>;
     },
   ): Promise<void> {
-    if (this._isRunning) {
+    // ★ R8：用 Mutex 替代非原子 boolean 检查（tryAcquire 快速拒绝，不排队）
+    const release = this._promptMutex.tryAcquire();
+    if (!release) {
       throw new Error(
-        "DeerLoopEngine.prompt: a prompt is already running (不支持并发 prompt)",
+        "AGENT_BUSY: a prompt is already running (不支持并发 prompt)",
       );
     }
 
-    // 1. 把用户输入包成 UserMessage，追加到 transcript。
-    const userContent = this.buildUserContent(text, options?.images);
-    const userMessage: UserMessage = {
-      role: "user",
-      content: userContent,
-      timestamp: Date.now(),
-    };
-    this._messages.push(userMessage);
-    this.persistMessage(userMessage);
-
-    // 2. 进入 running 态，发射 agent_start。
-    this._isRunning = true;
-    this.abortController = new AbortController();
-    this.emit({ type: "agent_start" });
+    // ★ R9：事件守卫——保证 agent_start / agent_end 严格配对，
+    //   任何分支遗漏事件都会在 finally 中补发。
+    const guard = new EventGuard((e) => this.emit(e));
 
     let agentError: string | undefined; // 记录 agent_end 携带的错误消息
+    let agentErrorCode: NormalizedLlmError["code"] | undefined; // 记录标准化错误码
 
     try {
-      let toolRounds = 0;
-      // ★ M5：本 prompt 内已触发的 followUp 新 turn 数（防无限 followUp 死循环）。
-      //   followUp drain 时 ++；达到 _maxFollowUps 后不再触发，正常结束。
-      let followUpTurnsConsumed = 0;
-      // ★ 工具调用循环：每轮 consume stream → 判断 toolUse → 执行工具 → 回填 → 继续。
-      while (true) {
-        // ★ M5：drain steering 队列（turn 进行中的插嘴）。
-        //   时机：consumeStream 【之前】注入，保证同一轮 LLM 就能看到插嘴内容
-        //   （踩坑预警 #1：若在 consumeStream 之后注入，要多等一轮）。
-        //   行为：
-        //     - "all"：全部插嘴消息每条一条 user message 入 transcript
-        //     - "one-at-a-time"：只注入最老一条，其余留队列等下一轮
-        //   drain 后 emit queue_update（队列变化）。abort 不会清空队列（见 abort 注释）。
-        if (this.steeringQueue.length > 0) {
-          const toInject =
-            this._steeringMode === "one-at-a-time"
-              ? [this.steeringQueue.shift()!]
-              : this.steeringQueue.splice(0);
-          for (const entry of toInject) {
-            const steerMsg: UserMessage = {
-              role: "user",
-              content: this.buildUserContent(entry.text, entry.images),
-              timestamp: Date.now(),
-            };
-            this._messages.push(steerMsg);
-            this.persistMessage(steerMsg);
+      // ★ R9：进入 prompt 立即发射 agent_start（幂等；内层若重复 emit 也安全）
+      guard.ensureAgentStart();
+
+      // 在写入下一条用户消息前先压缩旧历史，避免请求抵达模型时已经超过上下文窗口。
+      await this.compactBeforePromptIfNeeded();
+
+      // 1. 把用户输入包成 UserMessage，追加到 transcript。
+      const userContent = this.buildUserContent(text, options?.images);
+      const userMessage: UserMessage = {
+        role: "user",
+        content: userContent,
+        timestamp: Date.now(),
+      };
+      this._messages.push(userMessage);
+      this.persistMessage(userMessage);
+
+      // 2. 进入 running 态（_isRunning 保留为观察字段，并发保护由 Mutex 负责）。
+      this._isRunning = true;
+      this.abortController = new AbortController();
+
+      try {
+        let toolRounds = 0;
+        // ★ M5：本 prompt 内已触发的 followUp 新 turn 数（防无限 followUp 死循环）。
+        //   followUp drain 时 ++；达到 _maxFollowUps 后不再触发，正常结束。
+        let followUpTurnsConsumed = 0;
+        // ★ 工具调用循环：每轮 consume stream → 判断 toolUse → 执行工具 → 回填 → 继续。
+        while (true) {
+          // ★ M5：drain steering 队列（turn 进行中的插嘴）。
+          //   时机：consumeStream 【之前】注入，保证同一轮 LLM 就能看到插嘴内容
+          //   （踩坑预警 #1：若在 consumeStream 之后注入，要多等一轮）。
+          //   行为：
+          //     - "all"：全部插嘴消息每条一条 user message 入 transcript
+          //     - "one-at-a-time"：只注入最老一条，其余留队列等下一轮
+          //   drain 后 emit queue_update（队列变化）。abort 不会清空队列（见 abort 注释）。
+          if (this.steeringQueue.length > 0) {
+            const toInject =
+              this._steeringMode === "one-at-a-time"
+                ? [this.steeringQueue.shift()!]
+                : this.steeringQueue.splice(0);
+            for (const entry of toInject) {
+              const steerMsg: UserMessage = {
+                role: "user",
+                content: this.buildUserContent(entry.text, entry.images),
+                timestamp: Date.now(),
+              };
+              this._messages.push(steerMsg);
+              this.persistMessage(steerMsg);
+            }
+            this.emitQueueUpdate();
           }
-          this.emitQueueUpdate();
-        }
 
-        // ★ M3 持久性关键：Context 在 while 循环【内】每轮重新构造，
-        //   systemPrompt 直接读 this._baseSystemPrompt（不缓存到循环外）。
-        //   因此 setSystemPromptPersistent 的修改从下一轮 consumeStream 立即生效，
-        //   且连发 N 个 prompt 值恒定不变（免疫 H1）。
-        //   见 scripts/test-system-prompt-persistence.mjs 用例 1/2。
-        const activeTools = this.registry.getActive();
-        const context: Context = {
-          systemPrompt: this._baseSystemPrompt || undefined,
-          messages: this._messages as Message[],
-          ...(activeTools.length > 0
-            ? { tools: activeTools.map(toPiAiTool) }
-            : {}),
-        };
+          // ★ M3 持久性关键：Context 在 while 循环【内】每轮重新构造，
+          //   systemPrompt 直接读 this._baseSystemPrompt（不缓存到循环外）。
+          //   因此 setSystemPromptPersistent 的修改从下一轮 consumeStream 立即生效，
+          //   且连发 N 个 prompt 值恒定不变（免疫 H1）。
+          //   见 scripts/test-system-prompt-persistence.mjs 用例 1/2。
+          const activeTools = this.registry.getActive();
+          const context: Context = {
+            systemPrompt: this._baseSystemPrompt || undefined,
+            messages: convertToLlm(this._messages as never) as Message[],
+            ...(activeTools.length > 0
+              ? { tools: activeTools.map(toPiAiTool) }
+              : {}),
+          };
 
-        // ★ M4：消费 stream（带重试）。失败时 consumeStreamWithRetry 内部判定是否重试，
-        //   并发射 auto_retry_start/end + agent_end{willRetry:true} 事件。
-        //   返回的 consumed 是【最终结果】（成功 / abort / 不可重试错误 / 全部重试失败）。
-        const consumed = await this.consumeStreamWithRetry(context);
+          // ★ M4：消费 stream（带重试）。失败时 consumeStreamWithRetry 内部判定是否重试，
+          //   并发射 auto_retry_start/end + agent_end{willRetry:true} 事件。
+          //   返回的 consumed 是【最终结果】（成功 / abort / 不可重试错误 / 全部重试失败）。
+          const consumed = await this.consumeStreamWithRetry(context);
 
-        // abort / error：收尾后跳出循环。
-        if (consumed.aborted || consumed.errorMessage) {
-          // ★ M4 修复：若 consumeStreamWithRetry 已发过 message_end（重试场景的最终轮），
-          //   这里不重复发；否则补发。
-          if (!consumed.messageEndEmitted) {
-            this.emitMessageStartIfNeeded(consumed);
-            this.emit({ type: "message_end", message: consumed.endMessage });
+          // abort / error：收尾后跳出循环。
+          if (consumed.aborted || consumed.errorMessage) {
+            // ★ M4 修复：若 consumeStreamWithRetry 已发过 message_end（重试场景的最终轮），
+            //   这里不重复发；否则补发。
+            if (!consumed.messageEndEmitted) {
+              this.emitMessageStartIfNeeded(consumed);
+              this.emit({ type: "message_end", message: consumed.endMessage });
+            }
+            // ★ M4 修复（问题 #3）：abort 时不 push endMessage 到 transcript（aborted 不算有效对话）。
+            //   error（不可重试/全部重试失败）仍 push（保留错误上下文，下次 prompt LLM 能看到）。
+            if (!consumed.aborted) {
+              this._messages.push(consumed.endMessage);
+              this.persistMessage(consumed.endMessage);
+            }
+            if (consumed.errorMessage) agentError = consumed.errorMessage;
+            if (consumed.normalizedError) agentErrorCode = consumed.normalizedError.code;
+            break;
           }
-          // ★ M4 修复（问题 #3）：abort 时不 push endMessage 到 transcript（aborted 不算有效对话）。
-          //   error（不可重试/全部重试失败）仍 push（保留错误上下文，下次 prompt LLM 能看到）。
-          if (!consumed.aborted) {
-            this._messages.push(consumed.endMessage);
-          this.persistMessage(consumed.endMessage);
+
+          // 把本轮 assistant 最终消息追加到 transcript。
+          const assistantMessage = consumed.endMessage;
+          this._messages.push(assistantMessage);
+          this.persistMessage(assistantMessage);
+
+          // ★ 提取本轮的 ToolCall（源序）。
+          const toolCalls = assistantMessage.content.filter(
+            (c): c is ToolCall => c.type === "toolCall",
+          );
+
+          // ★ 保守判断进工具循环（踩坑预警 #1）：
+          //   stopReason === "toolUse" 或 content 含 toolCall 即进。
+          const wantsTools =
+            consumed.stopReason === "toolUse" || toolCalls.length > 0;
+
+          if (!wantsTools || toolCalls.length === 0) {
+            // LLM 不再要工具 → 正常结束（emit message_end 后跳出循环）。
+            if (!consumed.messageEndEmitted) {
+              this.emitMessageStartIfNeeded(consumed);
+              this.emit({ type: "message_end", message: assistantMessage });
+            }
+
+            // ★ M5：drain followUp 队列（turn 结束后的追问）。
+            //   时机：agent 本要停止时（无工具调用、stopReason=stop）。
+            //   行为：
+            //     - 队列非空且未达 maxFollowUps 上限 → 注入触发新 turn（continue 不 break）
+            //     - "all" 模式：全部 followUp 消息每条一条 user message
+            //     - "one-at-a-time" 模式：只注入最老一条
+            //   followUp 触发的新 turn 重置 toolRounds（新 turn 独立 maxToolRounds 预算），
+            //   避免原 turn 的工具轮数被 followUp 消耗。防死循环靠 _maxFollowUps 上限。
+            //   ★ 不发 agent_end（turn 还没结束）；只在队列真的空了且不调工具时才 break 走 finally。
+            if (
+              this.followUpQueue.length > 0 &&
+              followUpTurnsConsumed < this._maxFollowUps
+            ) {
+              const toInject =
+                this._followUpMode === "one-at-a-time"
+                  ? [this.followUpQueue.shift()!]
+                  : this.followUpQueue.splice(0);
+              this.emitQueueUpdate();
+              for (const entry of toInject) {
+                const followMsg: UserMessage = {
+                  role: "user",
+                  content: this.buildUserContent(entry.text, entry.images),
+                  timestamp: Date.now(),
+                };
+                this._messages.push(followMsg);
+                this.persistMessage(followMsg);
+              }
+              toolRounds = 0; // ★ followUp 是新 turn，重置工具轮数预算
+              followUpTurnsConsumed++;
+              continue; // ★ 不 break，进入下一轮 consumeStream（新 turn）
+            }
+
+            break;
           }
-          if (consumed.errorMessage) agentError = consumed.errorMessage;
-          break;
-        }
 
-        // 把本轮 assistant 最终消息追加到 transcript。
-        const assistantMessage = consumed.endMessage;
-        this._messages.push(assistantMessage);
-        this.persistMessage(assistantMessage);
-
-        // ★ 提取本轮的 ToolCall（源序）。
-        const toolCalls = assistantMessage.content.filter(
-          (c): c is ToolCall => c.type === "toolCall",
-        );
-
-        // ★ 保守判断进工具循环（踩坑预警 #1）：
-        //   stopReason === "toolUse" 或 content 含 toolCall 即进。
-        const wantsTools =
-          consumed.stopReason === "toolUse" || toolCalls.length > 0;
-
-        if (!wantsTools || toolCalls.length === 0) {
-          // LLM 不再要工具 → 正常结束（emit message_end 后跳出循环）。
+          // 有 toolCall：本轮 assistant 消息结束（emit message_end），接下来是工具执行。
           if (!consumed.messageEndEmitted) {
             this.emitMessageStartIfNeeded(consumed);
             this.emit({ type: "message_end", message: assistantMessage });
           }
 
-          // ★ M5：drain followUp 队列（turn 结束后的追问）。
-          //   时机：agent 本要停止时（无工具调用、stopReason=stop）。
-          //   行为：
-          //     - 队列非空且未达 maxFollowUps 上限 → 注入触发新 turn（continue 不 break）
-          //     - "all" 模式：全部 followUp 消息每条一条 user message
-          //     - "one-at-a-time" 模式：只注入最老一条
-          //   followUp 触发的新 turn 重置 toolRounds（新 turn 独立 maxToolRounds 预算），
-          //   避免原 turn 的工具轮数被 followUp 消耗。防死循环靠 _maxFollowUps 上限。
-          //   ★ 不发 agent_end（turn 还没结束）；只在队列真的空了且不调工具时才 break 走 finally。
-          if (
-            this.followUpQueue.length > 0 &&
-            followUpTurnsConsumed < this._maxFollowUps
-          ) {
-            const toInject =
-              this._followUpMode === "one-at-a-time"
-                ? [this.followUpQueue.shift()!]
-                : this.followUpQueue.splice(0);
-            this.emitQueueUpdate();
-            for (const entry of toInject) {
-              const followMsg: UserMessage = {
-                role: "user",
-                content: this.buildUserContent(entry.text, entry.images),
-                timestamp: Date.now(),
-              };
-              this._messages.push(followMsg);
-              this.persistMessage(followMsg);
-            }
-            toolRounds = 0; // ★ followUp 是新 turn，重置工具轮数预算
-            followUpTurnsConsumed++;
-            continue; // ★ 不 break，进入下一轮 consumeStream（新 turn）
+          // 防死循环：超过 maxToolRounds 强制停。
+          toolRounds++;
+          if (toolRounds > this._maxToolRounds) {
+            agentError = `DeerLoopEngine: 超过最大工具调用轮数（${this._maxToolRounds}），强制停止`;
+            break;
           }
 
-          break;
-        }
+          // 构造 ExtensionContext + 执行工具。
+          const ctx = this.buildExtensionContext();
+          const outputs = await this.toolExecutor.executeBatch(
+            toolCalls,
+            this.abortController!.signal,
+            ctx,
+            (e) => this.emit(e),
+            {
+              // Limit fan-out inside one assistant tool-call batch only. A later
+              // LLM round may start another subagent after the previous one
+              // completed and its ToolResultMessage has been written back.
+              callLimits: [{
+                toolName: SUBAGENT_TOOL_NAME,
+                maxCallsPerTurn: MAX_SUBAGENT_TOOL_CALLS_PER_TURN,
+                usedCalls: 0,
+              }],
+            },
+          );
 
-        // 有 toolCall：本轮 assistant 消息结束（emit message_end），接下来是工具执行。
-        if (!consumed.messageEndEmitted) {
-          this.emitMessageStartIfNeeded(consumed);
-          this.emit({ type: "message_end", message: assistantMessage });
-        }
+          // abort 发生在工具执行期间：回填已有结果后跳出。
+          if (this.abortController?.signal.aborted) {
+            const toolResults = this.buildToolResultMessages(toolCalls, outputs);
+            this._messages.push(...toolResults);
+            for (const msg of toolResults) this.persistMessage(msg);
+            agentError = "aborted";
+            break;
+          }
 
-        // 防死循环：超过 maxToolRounds 强制停。
-        toolRounds++;
-        if (toolRounds > this._maxToolRounds) {
-          agentError = `DeerLoopEngine: 超过最大工具调用轮数（${this._maxToolRounds}），强制停止`;
-          break;
-        }
-
-        // 构造 ExtensionContext + 执行工具。
-        const ctx = this.buildExtensionContext();
-        const outputs = await this.toolExecutor.executeBatch(
-          toolCalls,
-          this.abortController!.signal,
-          ctx,
-          (e) => this.emit(e),
-        );
-
-        // abort 发生在工具执行期间：回填已有结果后跳出。
-        if (this.abortController?.signal.aborted) {
+          // 构造 ToolResultMessage × N 入 transcript（源序，对齐 toolCalls）。
           const toolResults = this.buildToolResultMessages(toolCalls, outputs);
           this._messages.push(...toolResults);
           for (const msg of toolResults) this.persistMessage(msg);
-          agentError = "aborted";
-          break;
+
+          // 继续下一轮 LLM 调用（while true 顶部重新构造 context，此时 transcript
+          // 已含工具结果，LLM 会看到）。
         }
-
-        // 构造 ToolResultMessage × N 入 transcript（源序，对齐 toolCalls）。
-        const toolResults = this.buildToolResultMessages(toolCalls, outputs);
-        this._messages.push(...toolResults);
-        for (const msg of toolResults) this.persistMessage(msg);
-
-        // 继续下一轮 LLM 调用（while true 顶部重新构造 context，此时 transcript
-        // 已含工具结果，LLM 会看到）。
-      }
-    } catch (err) {
-      // 兜底：循环内不应抛（abort/error 已在 consumeStream/executeBatch 内部隔离），
-      // 这里只防未预期异常。
-      if (this.isAbortError(err)) {
-        agentError = "aborted";
-      } else {
-        agentError = err instanceof Error ? err.message : String(err);
+      } catch (err) {
+        // 兜底：循环内不应抛（abort/error 已在 consumeStream/executeBatch 内部隔离），
+        // 这里只防未预期异常。
+        if (this.isAbortError(err)) {
+          agentError = "aborted";
+        } else {
+          agentError = err instanceof Error ? err.message : String(err);
+          const classified = classifyLlmError(err);
+          agentErrorCode = classified.code;
+        }
+      } finally {
+        this._isStreaming = false;
+        this._isRunning = false;
+        this.abortController = null;
+        // ★ R9：agent_end 由外层 guard.ensureAgentEnd 统一发射，此处不再重复
       }
     } finally {
-      this._isStreaming = false;
-      this._isRunning = false;
-      this.abortController = null;
+      // ★ R9：守卫兜底——保证 agent_end 一定发射（若内部已发射则幂等跳过）。
+      //   无论 prompt 正常完成、abort、error、或 compactBeforePromptIfNeeded 抛异常，
+      //   这里都会补发 agent_end{willRetry:false}，前端不会永久等待。
+      if (!guard.agentEnded) {
+        this._isStreaming = false;
+        this._isRunning = false;
+        this.abortController = null;
 
-      const agentEndEvent: LoopEvent = {
-        type: "agent_end",
-        messages: [...this._messages],
-        willRetry: false,
-      };
-      if (agentError && agentError !== "aborted") {
-        (agentEndEvent as { error?: string }).error = agentError;
+        const agentEndEvent: LoopEvent = {
+          type: "agent_end",
+          messages: [...this._messages],
+          willRetry: false,
+        };
+        if (agentError && agentError !== "aborted") {
+          (agentEndEvent as { error?: string }).error = agentError;
+        }
+        if (agentErrorCode) {
+          (agentEndEvent as { errorCode?: NormalizedLlmError["code"] }).errorCode = agentErrorCode;
+        }
+        this.emit(agentEndEvent);
+        guard.ensureAgentEnd();
       }
-      this.emit(agentEndEvent);
+
+      // ★ R8：释放 mutex（无论成功/失败/abort，finally 确保锁一定释放）
+      release();
     }
   }
 
@@ -650,6 +843,25 @@ export class DeerLoopEngine implements AgentEnginePort {
     } catch (error) {
       console.warn("DeerLoopEngine: 写入 session jsonl 失败", error);
     }
+  }
+
+  private buildLlmRequestMeta(
+    requestKind: LlmRequestKind,
+    stream: boolean,
+    apiKeyHash: string | undefined,
+    context: Context,
+  ): LlmRequestMeta {
+    const chars = JSON.stringify(context.messages ?? []).length + (context.systemPrompt?.length ?? 0);
+    return {
+      provider: this._model.provider,
+      modelId: this._model.id,
+      ...(apiKeyHash ? { apiKeyHash } : {}),
+      sessionId: this._sessionId,
+      requestKind,
+      priority: requestKind === "main" ? "high" : requestKind === "subagent" ? "medium" : "low",
+      stream,
+      estimatedInputTokens: Math.ceil(chars / 4),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -673,13 +885,39 @@ export class DeerLoopEngine implements AgentEnginePort {
     let finalMessage: AssistantMessage | null = null;
     let aborted = false;
     let errorMessage: string | undefined;
+    let rawError: unknown;
+    let normalizedError: NormalizedLlmError | undefined;
     let stopReason: string | undefined;
+    let permit: LlmPermit | null = null;
+    let meta: LlmRequestMeta | null = null;
+
+    // ★ TTFT（首事件超时）：独立于用户 abortController，用于在中转站高峰排队、
+    //   HTTP 已建连但迟迟不返回首个流事件时主动取消本次上游请求。触发时
+    //   aborted=false（非用户主动停止），归类为 UPSTREAM_TTFT_TIMEOUT，由
+    //   consumeStreamWithRetry + RetryPolicy 走自动退避重试。
+    let ttftController: AbortController | null = null;
+    let ttftTimer: ReturnType<typeof setTimeout> | undefined;
+    let ttftCancelled = false;
+    const cancelTtft = (): void => {
+      ttftCancelled = true;
+      if (ttftTimer) {
+        clearTimeout(ttftTimer);
+        ttftTimer = undefined;
+      }
+    };
 
     try {
+      ttftController = new AbortController();
+      // 合成用户 abort 与 TTFT 两个信号：任一触发都让 stream 抛 AbortError。
+      const combinedSignal = AbortSignal.any([
+        this.abortController!.signal,
+        ttftController.signal,
+      ]);
       const streamOptions: SimpleStreamOptions = {
-        signal: this.abortController!.signal,
+        signal: combinedSignal,
         sessionId: this._sessionId,
       };
+      let apiKey: string | undefined;
       if (this._thinkingLevel) {
         streamOptions.reasoning = this._thinkingLevel;
       }
@@ -688,11 +926,27 @@ export class DeerLoopEngine implements AgentEnginePort {
         // 异步 getApiKey(provider)。在调 stream 前先解析一次（与 pi-agent-core 的
         // AgentLoopConfig.getApiKey 行为一致：每次 LLM 调用前解析）。
         const provider = this._model.provider;
-        const apiKey = await this._getApiKey(provider);
+        apiKey = await this._getApiKey(provider);
         if (apiKey) streamOptions.apiKey = apiKey;
       }
 
+      meta = this.buildLlmRequestMeta(this._requestKind, true, hashLlmApiKey(apiKey), context);
+      if (isLlmGatewayEnabled()) recordLlmRequest(meta);
+      // acquireLlmPermit 仍只听用户 abort：本地排队等待期间不应被 TTFT 打断
+      //（排队是 DeerHux 自身的限流，与上游中转站无响应是两件事）。
+      permit = await acquireLlmPermit(meta, this.abortController!.signal);
       const stream = this._streamFn(this._model, context, streamOptions);
+
+      // 启动 TTFT 计时器：首个流事件到达前若超时，abort ttftController。
+      const ttftMs = this.computeTtftTimeoutMs();
+      ttftTimer = setTimeout(() => {
+        if (!ttftCancelled && ttftController) {
+          ttftController.abort();
+        }
+      }, ttftMs);
+      // unref：与 rate-limiter.drainTimer 一致，避免请求进行中的 45-120s timer
+      // 拖住 Node 进程优雅退出。正常路径 cancelTtft() 在 finally 清理。
+      ttftTimer.unref?.();
 
       for await (const ev of stream) {
         // abort 检查：即便 stream 没抛，也主动退出。
@@ -702,17 +956,21 @@ export class DeerLoopEngine implements AgentEnginePort {
         }
 
         if (ev.type === "done") {
+          cancelTtft();
           finalMessage = ev.message;
           stopReason = ev.reason;
           break;
         }
 
         if (ev.type === "error") {
+          // 上游已响应（即便错误），TTFT 不再适用——取消计时器。
+          cancelTtft();
           // stream 显式报告错误（含 aborted）。
           if (ev.reason === "aborted") {
             aborted = true;
           } else {
             errorMessage = ev.error.errorMessage ?? ev.reason;
+            rawError = ev.error;
           }
           // ★ 优先保留已生成的 partial 内容（H3 判定需要 contentLength）。
           //   ev.error 通常是空 content 的错误壳；若 lastPartial 有内容，用它
@@ -725,7 +983,11 @@ export class DeerLoopEngine implements AgentEnginePort {
         // start / text_* / thinking_* / toolcall_* 事件：partial 是累计 AssistantMessage。
         lastPartial = ev.partial;
         if (!started) {
+          // 首个流事件到达：立即取消 TTFT 计时器，不再因排队超时中断。
+          cancelTtft();
           started = true;
+          // 上游健康：首事件到达 = 该 endpoint 健康，清零连续失败/退出冷却。
+          recordUpstreamSuccess(this.modelRef, meta?.apiKeyHash);
           this.emit({ type: "message_start", message: ev.partial });
         }
         this.emit({
@@ -735,24 +997,54 @@ export class DeerLoopEngine implements AgentEnginePort {
         });
       }
     } catch (err) {
-      // abort 导致的抛错：标记为 aborted；其他视为错误。
-      if (this.isAbortError(err)) {
+      // TTFT 超时：ttftController 触发但用户未 abort → 归类为可重试的上游排队超时，
+      // 不算用户主动停止（aborted=false），交由 consumeStreamWithRetry 走退避重试。
+      if (ttftController?.signal.aborted && !this.abortController?.signal.aborted && !ttftCancelled) {
+        const ttftMsg = getLlmUserMessage("UPSTREAM_TTFT_TIMEOUT");
+        errorMessage = "模型服务长时间未返回首个响应（UPSTREAM_TTFT_TIMEOUT）";
+        normalizedError = {
+          code: "UPSTREAM_TTFT_TIMEOUT",
+          message: errorMessage,
+          retryable: true,
+          provider: this._model.provider,
+          modelId: this._model.id,
+          userMessage: ttftMsg,
+          suggestedAction: "wait",
+        };
+      } else if (this.isAbortError(err)) {
+        // 用户 abort 导致的抛错。
         aborted = true;
       } else {
         errorMessage = err instanceof Error ? err.message : String(err);
+        rawError = err;
       }
     } finally {
+      cancelTtft();
+      permit?.release();
       this._isStreaming = false;
+      ttftController = null;
     }
 
+    if (errorMessage && !aborted) {
+      if (!normalizedError) {
+        normalizedError = classifyLlmError(rawError ?? errorMessage, meta ?? undefined);
+      }
+      recordLlmError(meta ?? {}, normalizedError.code);
+      // 上游健康：TTFT 超时 / 过载 / 限流计入连续失败，达阈值进入冷却。
+      recordUpstreamFailure(this.modelRef, meta?.apiKeyHash, normalizedError.code);
+    } else if (!aborted && meta) {
+      recordLlmSuccess(meta);
+    }
+
+    const displayErrorMessage = normalizedError?.userMessage ?? errorMessage;
     const endMessage = this.resolveEndMessage(
       finalMessage,
       lastPartial,
       aborted,
-      errorMessage,
+      displayErrorMessage,
     );
 
-    return { endMessage, started, aborted, errorMessage, stopReason };
+    return { endMessage, started, aborted, errorMessage, error: rawError, normalizedError, stopReason };
   }
 
   /**
@@ -813,9 +1105,12 @@ export class DeerLoopEngine implements AgentEnginePort {
    */
   private async consumeStreamWithRetry(context: Context): Promise<ConsumedStream> {
     let retryCount = 0; // 已完成的重试次数（0 = 初始尝试，未重试过）
+    // ★ R9：记录最近一次 consumed 快照，用于兜底补发 message_end
+    let lastConsumedForGuard: ConsumedStream | null = null;
 
     while (true) {
       const consumed = await this.consumeStream(context);
+      lastConsumedForGuard = consumed; // ★ R9：记录快照供兜底
 
       // 成功或 abort：不重试。
       // ★ M4 修复（事件顺序契约）：重试后的最终轮，先发 message_start+message_end，
@@ -839,11 +1134,13 @@ export class DeerLoopEngine implements AgentEnginePort {
 
       const nextAttempt = retryCount + 1; // 1-indexed：第一次重试 attempt=1
       const contentLength = getAssistantContentLength(consumed.endMessage);
+      const normalizedError = consumed.normalizedError ?? classifyLlmError(consumed.error ?? consumed.errorMessage);
       const decision = policy.isRetryable({
         attempt: nextAttempt,
         errorMessage: consumed.errorMessage,
         partialMessage: consumed.endMessage,
         contentLength,
+        normalizedError,
       });
 
       // 不可重试或超过 maxAttempts
@@ -883,6 +1180,10 @@ export class DeerLoopEngine implements AgentEnginePort {
         maxAttempts: policy.maxAttempts,
         delayMs: decision.delayMs,
         errorMessage: consumed.errorMessage,
+        errorCode: normalizedError.code,
+        retryAfterMs: normalizedError.retryAfterMs,
+        userMessage: normalizedError.userMessage,
+        suggestedAction: normalizedError.suggestedAction,
       });
 
       // ★ H4（settleMs）+ H2（delayMs）sleep。可被 abort 打断。
@@ -921,6 +1222,20 @@ export class DeerLoopEngine implements AgentEnginePort {
 
       retryCount = nextAttempt;
       // 继续循环 → 重新 consumeStream（重试）
+    }
+    // ★ R9：防御性保护——若 while 循环因未预期异常退出（非正常 return），
+    //   补发 message_end 避免前端永久等待。正常 return 路径不受影响。
+    if (lastConsumedForGuard) {
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+      const fc = lastConsumedForGuard as ConsumedStream;
+      if (!fc.messageEndEmitted) {
+        try {
+          this.emitMessageStartIfNeeded(fc);
+          this.emit({ type: "message_end", message: fc.endMessage });
+        } catch {
+          // 静默：事件发射失败不应掩盖原始错误
+        }
+      }
     }
   }
 
@@ -1008,6 +1323,7 @@ export class DeerLoopEngine implements AgentEnginePort {
         toolCallId: call.id,
         toolName: call.name,
         content,
+        ...(output?.result?.details !== undefined ? { details: output.result.details } : {}),
         isError: output?.isError ?? false,
         timestamp: now,
       } satisfies ToolResultMessage;
@@ -1086,9 +1402,9 @@ export class DeerLoopEngine implements AgentEnginePort {
     return this._sessionId;
   }
 
-  /** M1 不持久化：返回 undefined。 */
+  /** 真实 SessionManager 注入时返回当前 jsonl 文件路径。 */
   get sessionFile(): string | undefined {
-    return undefined;
+    return this._sessionManager?.getSessionFile?.() ?? undefined;
   }
 
   get isStreaming(): boolean {
@@ -1112,6 +1428,12 @@ export class DeerLoopEngine implements AgentEnginePort {
     return this._model;
   }
 
+  /** 当前模型的 ModelRef 视图（provider + modelId + baseUrl），用于上游健康 key 构造。
+   *  baseUrl 区分同 provider 同模型但走不同中转站的 endpoint——用户多中转站场景关键。 */
+  get modelRef(): { provider: string; modelId: string; baseUrl: string } {
+    return { provider: this._model.provider, modelId: this._model.id, baseUrl: this._model.baseUrl };
+  }
+
   get thinkingLevel(): ThinkingLevel | undefined {
     return this._thinkingLevel;
   }
@@ -1130,8 +1452,8 @@ export class DeerLoopEngine implements AgentEnginePort {
    * sessionManager 代理（Port 过渡字段）。
    *
    * wrapper 构造时 applyRolePrompt 会调 sessionManager.getCwd()；
-   * 多处读 isPersisted() / appendCustomEntry()。M1 不做 session 持久化，
-   * 提供最小代理满足这些调用（getCwd 返回 cwd，isPersisted 返回 false，
+   * 多处读 isPersisted() / appendCustomEntry()。生产路径注入真实 SessionManager，
+   * 未注入时提供最小代理满足这些调用（getCwd 返回 cwd，isPersisted 返回 false，
    * appendCustomEntry 返回占位 id）。其他方法（getBranch/fork 等）被调时 throw。
    */
   get sessionManager(): import("@earendil-works/pi-coding-agent").SessionManager {
@@ -1151,15 +1473,11 @@ export class DeerLoopEngine implements AgentEnginePort {
   /**
    * modelRegistry 代理（Port 过渡字段）。
    *
-   * M1 灰度路径不读 modelRegistry（set_model/recover 不走）。提供最小代理
-   * 满足 Port 类型；find 返回 undefined。
+   * 生产路径由 startDeerLoopSession 注入真实 ModelRegistry；测试未注入时保留
+   * 空代理，避免构造最小 engine 需要读用户模型配置。
    */
-  get modelRegistry(): {
-    find: (provider: string, modelId: string) => AnyModel | undefined;
-  } {
-    return {
-      find: () => undefined,
-    };
+  get modelRegistry(): DeerLoopModelRegistry {
+    return this._modelRegistry ?? { find: () => undefined };
   }
 
   // -------------------------------------------------------------------------
@@ -1323,7 +1641,16 @@ export class DeerLoopEngine implements AgentEnginePort {
    * @param customInstructions 额外的压缩指令（追加到 systemPrompt）
    * @returns CompactionResult（summary / tokensBefore / tokensAfter）
    */
-  async compact(customInstructions?: string): Promise<CompactionResult> {
+  /**
+   * 压缩历史并把结果持久化为 session 的 compaction 条目。
+   *
+   * 不能只替换内存 transcript：wrapper 被回收或刷新页面后会从 jsonl 重建上下文，
+   * 因此必须调用 SessionManager.appendCompaction()，再从持久化分支重新加载。
+   */
+  async compact(
+    customInstructions?: string,
+    reason: "manual" | "threshold" | "overflow" = "manual",
+  ): Promise<CompactionResult> {
     if (this._isRunning) {
       throw new Error("DeerLoopEngine.compact: 无法压缩——prompt 正在运行");
     }
@@ -1333,120 +1660,253 @@ export class DeerLoopEngine implements AgentEnginePort {
 
     this._isCompacting = true;
     this.compactionAbortController = new AbortController();
-    this.emit({ type: "compaction_start", reason: "manual" });
+    this.emit({ type: "compaction_start", reason });
 
-    const tokensBefore = estimateTokens([
-      ...this._messages,
-      { role: "system", content: this._baseSystemPrompt } as unknown as AgentMessage,
-    ]);
-
+    const tokensBefore = this.getContextUsage()?.tokens ?? estimateTokens(this._messages);
     try {
-      // 1. 构造压缩 prompt：把 transcript 转文本
-      const transcriptText = this._messages
-        .map((m) => `${m.role}: ${JSON.stringify(m.content)}`)
-        .join("\n");
-      const compactSystemPrompt =
-        `You are a conversation summarizer. Summarize the following conversation concisely, ` +
-        `preserving key context, decisions, and file changes. Output only the summary.` +
-        (customInstructions ? `\n\nAdditional instructions: ${customInstructions}` : "");
+      const manager = this._sessionManager;
+      if (!manager?.isPersisted()) {
+        throw new Error("当前会话尚未持久化，无法安全压缩");
+      }
 
-      const compactContext: Context = {
-        systemPrompt: compactSystemPrompt,
-        messages: [
-          {
+      const entries = manager.getBranch();
+      const contextWindow = this._model.contextWindow ?? 8192;
+      const settings = {
+        ...DEFAULT_COMPACTION_SETTINGS,
+        // 默认配置面向大上下文模型；小窗口模型必须按窗口比例缩小保留区和摘要预算。
+        reserveTokens: Math.max(256, Math.min(DEFAULT_COMPACTION_SETTINGS.reserveTokens, Math.floor(contextWindow * 0.2))),
+        keepRecentTokens: Math.max(512, Math.min(DEFAULT_COMPACTION_SETTINGS.keepRecentTokens, Math.floor(contextWindow * 0.35))),
+      };
+      let previousCompactionIndex = -1;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i].type === "compaction") {
+          previousCompactionIndex = i;
+          break;
+        }
+      }
+
+      let boundaryStart = 0;
+      let previousSummary: string | undefined;
+      if (previousCompactionIndex >= 0) {
+        const previous = entries[previousCompactionIndex] as {
+          firstKeptEntryId?: string;
+          summary?: string;
+        };
+        previousSummary = previous.summary;
+        const firstKeptIndex = previous.firstKeptEntryId
+          ? entries.findIndex((entry) => entry.id === previous.firstKeptEntryId)
+          : -1;
+        boundaryStart = firstKeptIndex >= 0 ? firstKeptIndex : previousCompactionIndex + 1;
+      }
+
+      const rawCutPoint = findCutPoint(entries, boundaryStart, entries.length, settings.keepRecentTokens);
+      // 绝不能从 tool call 与 tool result 的中间切开：部分 provider 会拒绝孤立的
+      // toolResult。宁可多保留当前完整回合，也不能生成不合法的消息序列。
+      const firstKeptEntryIndex = rawCutPoint.isSplitTurn && rawCutPoint.turnStartIndex >= boundaryStart
+        ? rawCutPoint.turnStartIndex
+        : rawCutPoint.firstKeptEntryIndex;
+      const historyEnd = firstKeptEntryIndex;
+      if (historyEnd <= boundaryStart) {
+        throw new Error("Conversation too short to compact");
+      }
+      const firstKeptEntryId = entries[firstKeptEntryIndex]?.id;
+      if (!firstKeptEntryId) throw new Error("无法确定压缩边界，session 可能已损坏");
+
+      // 普通 custom 是 UI 元数据，不参与模型上下文；custom_message / branch_summary 则必须纳入摘要。
+      const messagesToSummarize = entries.slice(boundaryStart, historyEnd).flatMap((entry) => {
+        if (entry.type === "message") return [entry.message as AgentMessage];
+        if (entry.type === "custom_message") {
+          return [{
             role: "user",
-            content: `Summarize this conversation:\n${transcriptText}`,
-            timestamp: Date.now(),
-          } as Message,
-        ],
-      };
-
-      // 2. 用 streamFn 调一次 LLM（单轮，不带工具）
-      const streamOptions: SimpleStreamOptions = {
-        signal: this.compactionAbortController.signal,
-        sessionId: this._sessionId + "-compact",
-      };
-      if (this._getApiKey) {
-        const apiKey = await this._getApiKey(this._model.provider);
-        if (apiKey) streamOptions.apiKey = apiKey;
-      }
-
-      const stream = this._streamFn(this._model, compactContext, streamOptions);
-
-      // 3. 消费 stream，收集 summary
-      let summary = "";
-      let aborted = false;
-      try {
-        for await (const ev of stream) {
-          if (this.compactionAbortController?.signal.aborted) {
-            aborted = true;
-            break;
-          }
-          if (ev.type === "done") {
-            summary = extractText(ev.message);
-            break;
-          }
-          if (ev.type === "error") {
-            const errMsg = ev.error.errorMessage ?? "compaction stream error";
-            throw new Error(`compaction failed: ${errMsg}`);
-          }
-          // 从 partial 提取累积文本
-          if (ev.partial) {
-            summary = extractText(ev.partial);
-          }
+            content: entry.content,
+            timestamp: Date.parse(entry.timestamp) || Date.now(),
+          } as AgentMessage];
         }
-      } catch (err) {
-        if (this.compactionAbortController?.signal.aborted || this.isAbortError(err)) {
-          aborted = true;
-        } else {
-          throw err;
+        if (entry.type === "branch_summary" && entry.summary) {
+          return [{
+            role: "user",
+            content: `[Branch summary]\n${entry.summary}`,
+            timestamp: Date.parse(entry.timestamp) || Date.now(),
+          } as AgentMessage];
         }
-      }
-
-      // 4. 替换 transcript（仅在未 abort 时）
-      if (!aborted && summary.trim()) {
-        this._messages.splice(0);
-        this._messages.push({
-          role: "assistant",
-          content: [
-            { type: "text", text: `[Compacted summary]\n${summary}` },
-          ],
-          api: this._model.api,
-          provider: this._model.provider,
-          model: this._model.id,
-          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-          stopReason: "stop",
-          timestamp: Date.now(),
-        } as AssistantMessage);
-      }
-
-      const tokensAfter = estimateTokens([
-        ...this._messages,
-        { role: "system", content: this._baseSystemPrompt } as unknown as AgentMessage,
-      ]);
-
-      const result: CompactionResult = { summary, tokensBefore, tokensAfter };
-      this.emit({
-        type: "compaction_end",
-        reason: "manual",
-        result: aborted ? undefined : result,
-        aborted,
-        willRetry: false,
+        return [];
       });
+      if (!messagesToSummarize.length) throw new Error("Conversation too short to compact");
+
+      const apiKey = this._getApiKey ? await this._getApiKey(this._model.provider) : undefined;
+      const summary = await this.generateCompactionSummary(
+        messagesToSummarize,
+        settings.reserveTokens,
+        apiKey,
+        customInstructions,
+        previousSummary,
+      );
+      if (this.compactionAbortController.signal.aborted) {
+        const result = { summary: "", tokensBefore, tokensAfter: tokensBefore };
+        this.emit({ type: "compaction_end", reason, aborted: true, willRetry: false });
+        return result;
+      }
+      if (!summary.trim()) throw new Error("压缩模型未返回有效摘要");
+
+      manager.appendCompaction(summary, firstKeptEntryId, tokensBefore);
+      const compactedContext = buildSessionContext(manager.getEntries(), manager.getLeafId());
+      this._messages.splice(0, this._messages.length, ...(compactedContext.messages as AgentMessage[]));
+
+      const tokensAfter = this.getContextUsage()?.tokens ?? estimateTokens(this._messages);
+      const result: CompactionResult = { summary, tokensBefore, tokensAfter };
+      this.emit({ type: "compaction_end", reason, result, aborted: false, willRetry: false });
       return result;
     } catch (err) {
+      if (this.compactionAbortController?.signal.aborted || this.isAbortError(err)) {
+        const result = { summary: "", tokensBefore, tokensAfter: tokensBefore };
+        this.emit({ type: "compaction_end", reason, aborted: true, willRetry: false });
+        return result;
+      }
       const errorMessage = err instanceof Error ? err.message : String(err);
-      this.emit({
-        type: "compaction_end",
-        reason: "manual",
-        aborted: false,
-        willRetry: false,
-        errorMessage,
-      });
+      this.emit({ type: "compaction_end", reason, aborted: false, willRetry: false, errorMessage });
       throw err;
     } finally {
       this._isCompacting = false;
       this.compactionAbortController = null;
+    }
+  }
+
+  /**
+   * 分批生成滚动摘要，避免历史已经过大时，首次压缩请求本身再次超过模型上下文。
+   * 每批摘要会合并进 previousSummary；因此最终只保留一份可继续使用的检查点。
+   */
+  private async generateCompactionSummary(
+    messages: AgentMessage[],
+    reserveTokens: number,
+    apiKey: string | undefined,
+    customInstructions: string | undefined,
+    previousSummary: string | undefined,
+  ): Promise<string> {
+    // 摘要模型不需要复现原始工具协议；统一转成带原角色标记的文本，
+    // 从而可在任意位置安全切批，避免 toolCall/toolResult 被拆开后被 API 拒绝。
+    const summaryMessages = messages.map((message) => this.toCompactionTextMessage(
+      this.truncateMessageForCompaction(message),
+    ));
+    const contextWindow = this._model.contextWindow ?? 8192;
+    const outputAndPromptReserve = Math.max(1_024, Math.floor(contextWindow * 0.125));
+    // 当前批次 + 上一份滚动摘要 + 新摘要输出 + 系统提示词必须同时装进窗口。
+    const batchTokenLimit = Math.max(
+      512,
+      Math.min(12_000, contextWindow - reserveTokens * 2 - outputAndPromptReserve),
+    );
+    const batches: AgentMessage[][] = [];
+    let batch: AgentMessage[] = [];
+    let batchTokens = 0;
+
+    for (const message of summaryMessages) {
+      const messageTokens = estimateTokens([message]);
+      if (batch.length > 0 && batchTokens + messageTokens > batchTokenLimit) {
+        batches.push(batch);
+        batch = [];
+        batchTokens = 0;
+      }
+      batch.push(message);
+      batchTokens += messageTokens;
+    }
+    if (batch.length) batches.push(batch);
+
+    let summary = previousSummary;
+    for (const currentBatch of batches) {
+      if (this.compactionAbortController?.signal.aborted) return "";
+      summary = await generateSummary(
+        currentBatch as never,
+        this._model as never,
+        reserveTokens,
+        apiKey,
+        undefined,
+        this.compactionAbortController?.signal,
+        customInstructions,
+        summary,
+        this._thinkingLevel,
+        this._streamFn as never,
+      );
+      if (!summary.trim()) throw new Error("压缩模型未返回有效摘要");
+    }
+    return summary ?? "";
+  }
+
+  /** 将超大记录裁成可摘要的代表性片段，不修改原始会话内容。 */
+  private truncateMessageForCompaction(message: AgentMessage): AgentMessage {
+    const contextWindow = this._model.contextWindow ?? 8192;
+    // 工具结果常是冗长日志；一个回合可能含数十条，必须比普通消息更严格截断。
+    const maxChars = message.role === "toolResult"
+      ? Math.max(1_024, Math.min(2_048, Math.floor(contextWindow * 0.125)))
+      : Math.max(4_000, Math.min(24_000, contextWindow * 2));
+    const truncate = (text: string): string => {
+      if (text.length <= maxChars) return text;
+      const half = Math.floor((maxChars - 96) / 2);
+      return `${text.slice(0, half)}\n\n[... 为生成会话摘要，已省略 ${text.length - half * 2} 个字符 ...]\n\n${text.slice(-half)}`;
+    };
+    const content = message.content;
+    if (typeof content === "string") {
+      const next = truncate(content);
+      return next === content ? message : ({ ...message, content: next } as AgentMessage);
+    }
+    if (!Array.isArray(content)) return message;
+
+    let changed = false;
+    const nextContent = content.map((block) => {
+      if (!block || typeof block !== "object") return block;
+      const next = { ...block } as Record<string, unknown>;
+      for (const key of ["text", "thinking"] as const) {
+        if (typeof next[key] === "string") {
+          const truncated = truncate(next[key] as string);
+          if (truncated !== next[key]) {
+            next[key] = truncated;
+            changed = true;
+          }
+        }
+      }
+      if (next.type === "image") {
+        changed = true;
+        return { type: "text", text: "[图片已省略；原始图片仍保留在会话记录中]" } as unknown as typeof block;
+      }
+      if (next.type === "toolCall" && next.arguments !== undefined) {
+        const serialized = JSON.stringify(next.arguments) ?? "";
+        if (serialized.length > maxChars) {
+          next.arguments = { _truncatedForCompaction: truncate(serialized) };
+          changed = true;
+        }
+      }
+      return next as unknown as typeof block;
+    });
+    return changed ? { ...message, content: nextContent } as AgentMessage : message;
+  }
+
+  /** 将摘要输入转成普通文本，隔离原始工具调用协议和大对象结构。 */
+  private toCompactionTextMessage(message: AgentMessage): AgentMessage {
+    let content: string;
+    try {
+      content = typeof message.content === "string"
+        ? message.content
+        : JSON.stringify(message.content);
+    } catch {
+      content = "[无法序列化的历史消息内容已省略]";
+    }
+    return {
+      role: "user",
+      content: `<history role="${message.role}">\n${content}\n</history>`,
+      timestamp: message.timestamp ?? Date.now(),
+    } as AgentMessage;
+  }
+
+  /** 在下一回合开始前预留足够空间，避免模型先因超上下文失败。 */
+  private async compactBeforePromptIfNeeded(): Promise<void> {
+    if (!this._autoCompactionEnabled || !this._sessionManager?.isPersisted()) return;
+    const usage = this.getContextUsage();
+    if (!usage?.tokens || usage.contextWindow <= 0) return;
+    // 标准 reserveTokens 对小窗口模型会过大；统一在 70% 时提前压缩。
+    if (usage.tokens / usage.contextWindow < 0.7) return;
+    try {
+      await this.compact(undefined, "threshold");
+    } catch (error) {
+      // 压缩失败不丢弃用户本轮请求；原 prompt/重试链仍可报告上游错误。
+      console.warn("DeerLoopEngine: 自动压缩失败，将继续本轮请求", error);
     }
   }
 
@@ -1663,6 +2123,31 @@ export class DeerLoopEngine implements AgentEnginePort {
       return err.name === "AbortError" || /abort/i.test(err.message);
     }
     return false;
+  }
+
+  /**
+   * 计算本次上游请求的首事件（首 token）超时阈值。
+   *
+   * 按思考级别放大：普通模型 45s，high 90s，xhigh 120s。可被环境变量覆盖
+   *（DEERHUX_LLM_TTFT_TIMEOUT_MS / _HIGH_MS / _XHIGH_MS，仅正整数生效）。
+   * 仅用于上游中转站「HTTP 已建连但迟迟不发首事件」的排队场景；本地限流
+   * 队列等待不受此值影响（acquireLlmPermit 用独立信号）。
+   */
+  private computeTtftTimeoutMs(): number {
+    const readEnv = (name: string, fallback: number): number => {
+      const raw = process.env[name];
+      if (!raw) return fallback;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+    };
+    const level = this._thinkingLevel;
+    if (level === "xhigh") {
+      return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_XHIGH_MS", 120_000);
+    }
+    if (level === "high") {
+      return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_HIGH_MS", 90_000);
+    }
+    return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_MS", 45_000);
   }
 
   /**

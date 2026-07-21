@@ -8,7 +8,7 @@ import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
-import { useAgentSession, type AgentPhase, type WatchdogInfo } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase, type RetryInfo, type WatchdogInfo } from "@/hooks/useAgentSession";
 import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -60,16 +60,20 @@ function phaseLabel(
   phase: AgentPhase,
   opts: {
     serverStatus: ServerStatus | null;
-    retryInfo: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+    retryInfo: RetryInfo | null;
     isCompacting: boolean;
     stallLevel: string | null;
   }
 ): string {
   const { serverStatus, retryInfo, isCompacting, stallLevel } = opts;
   if (isCompacting) return "正在压缩上下文...";
+  if (retryInfo?.userMessage) return retryInfo.userMessage;
+  if (retryInfo?.errorCode === "UPSTREAM_TTFT_TIMEOUT")
+    return `模型首个响应超时，服务可能处于高峰排队中，正在第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次重试…`;
   if (retryInfo) return `模型连接异常，正在第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次重试...`;
   if (stallLevel === "recovering") return "正在恢复连接并续写...";
   if (stallLevel === "warning") return "响应停滞，正在检查连接...";
+  if (phase?.kind === "stopping") return "停止请求已发送，正在等待当前操作安全收尾...";
 
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((t) => t.name);
@@ -82,7 +86,7 @@ function phaseLabel(
   if (phase?.kind === "waiting_model") {
     switch (phase.reason) {
       case "initial":
-        return "已发送请求，等待模型开始输出...";
+        return "正在等待模型首个响应，服务高峰时可能排队…";
       case "after_message":
         return "回复已生成，正在等待回合收尾...";
       case "after_tool":
@@ -136,7 +140,7 @@ interface TickerProps {
   watchdog: WatchdogInfo | null;
   agentPhase: AgentPhase;
   thinkingLevel: string;
-  retryInfo: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+  retryInfo: RetryInfo | null;
   contextUsage: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   isCompacting: boolean;
   stallLevel: string | null;
@@ -250,11 +254,12 @@ function AgentStatusTicker(props: TickerProps) {
 
   // 7. 自动重试
   if (retryInfo) {
+    const delaySuffix = retryInfo.delayMs ? ` · ${formatMs(retryInfo.delayMs)}` : "";
     items.push({
       label: "重试",
-      value: `${retryInfo.attempt}/${retryInfo.maxAttempts}`,
+      value: `${retryInfo.attempt}/${retryInfo.maxAttempts}${delaySuffix}`,
       accent: true,
-      title: retryInfo.errorMessage ? `第 ${retryInfo.attempt} 次重试：${retryInfo.errorMessage}` : `第 ${retryInfo.attempt} 次重试`,
+      title: retryInfo.userMessage ?? (retryInfo.errorMessage ? `第 ${retryInfo.attempt} 次重试：${retryInfo.errorMessage}` : `第 ${retryInfo.attempt} 次重试`),
       priority: 7,
     });
   }

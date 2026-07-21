@@ -18,6 +18,7 @@ import type {
   AssistantMessageEvent,
   Message,
 } from "@earendil-works/pi-ai";
+import type { LlmErrorCode, LlmSuggestedAction } from "../llm-gateway";
 
 /**
  * DeerLoopEngine 内部的消息类型别名。
@@ -72,6 +73,8 @@ export type LoopEvent =
       messages: AgentMessage[];
       willRetry: boolean;
       error?: string;
+      /** 标准化错误码（如 UPSTREAM_TTFT_TIMEOUT）。前端可据此触发模型切换恢复。 */
+      errorCode?: LlmErrorCode;
     }
   | { type: "turn_start" }
   | {
@@ -125,6 +128,10 @@ export type LoopEvent =
       maxAttempts: number;
       delayMs: number;
       errorMessage: string;
+      errorCode?: LlmErrorCode;
+      retryAfterMs?: number;
+      userMessage?: string;
+      suggestedAction?: LlmSuggestedAction;
     }
   | {
       type: "auto_retry_end";

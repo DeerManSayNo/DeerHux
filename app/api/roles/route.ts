@@ -15,6 +15,6 @@ export async function POST(req: Request) {
     if (!body.name?.trim()) return NextResponse.json({ error: "name is required" }, { status: 400 });
     return NextResponse.json({ role: createRole({ name: body.name, description: body.description, basePrompt: body.basePrompt, scope: body.scope, cwd }) });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

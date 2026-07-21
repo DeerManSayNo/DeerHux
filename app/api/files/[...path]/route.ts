@@ -359,7 +359,7 @@ export async function GET(
 
     return NextResponse.json({ entries, path: filePath });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -397,7 +397,7 @@ export async function PUT(
     const nextStat = fs.statSync(filePath);
     return NextResponse.json({ ok: true, size: nextStat.size, language: getLanguage(filePath) });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -460,6 +460,6 @@ export async function POST(
       markdownPath: toMarkdownRelativePath(filePath, targetPath),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

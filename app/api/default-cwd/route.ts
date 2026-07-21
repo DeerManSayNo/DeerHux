@@ -12,6 +12,6 @@ export async function POST() {
     mkdirSync(dir, { recursive: true });
     return NextResponse.json({ cwd: dir });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

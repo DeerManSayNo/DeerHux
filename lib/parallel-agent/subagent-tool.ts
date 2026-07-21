@@ -1,10 +1,17 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { startCollaborationRun, subscribeCollaborationRun, getCollaborationRun } from "./collaboration-orchestrator";
+import {
+  abortCollaborationRun,
+  getCollaborationRun,
+  startCollaborationRun,
+  subscribeCollaborationRun,
+} from "./collaboration-orchestrator";
 import type { CollaborationRunEvent, CollaborationRunState, CollaborationWorkerState, SubagentTaskMode, SubagentWorkflow } from "./collaboration-types";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { isSubagentConcurrencyLimitError, SUBAGENT_TOOL_NAME } from "./subagent-concurrency";
+import { MAX_WORKERS_PER_RUN } from "./subagent-planner";
 
-export const SUBAGENT_TOOL_NAME = "subagent";
+export { SUBAGENT_TOOL_NAME };
 
 export interface CreateSubagentToolOptions {
   /** Resolved at execution time so the tool can attach the run to its parent session. */
@@ -65,11 +72,12 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
           task: Type.String({ description: "Self-contained instructions for this worker. Include the goal and any constraints." }),
           dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Names of prior workers this one depends on (pipeline/sequential). Omit to infer sequential order." })),
         }),
-        { description: "Custom worker breakdown. Omit to let the planner auto-build workers from the mode." },
+        { description: `Custom worker breakdown. Maximum ${MAX_WORKERS_PER_RUN} workers. Omit to let the planner auto-build workers from the mode.` },
       )),
     }),
     executionMode: "parallel" as const,
-    execute: async (_toolCallId, params, _signal, onUpdate) => {
+    execute: async (_toolCallId, params, signal, onUpdate) => {
+      signal?.throwIfAborted();
       const message = typeof params.message === "string" ? params.message.trim() : "";
       if (!message) {
         return {
@@ -79,6 +87,16 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
       }
       const taskMode = (params.mode as SubagentTaskMode | undefined) ?? undefined;
       const workflow = (params.workflow as SubagentWorkflow | undefined) ?? undefined;
+      if (Array.isArray(params.workers) && params.workers.length > MAX_WORKERS_PER_RUN) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `subagent error: too many workers (${params.workers.length}). Maximum allowed is ${MAX_WORKERS_PER_RUN}.`,
+          }],
+          details: { maxWorkers: MAX_WORKERS_PER_RUN, requestedWorkers: params.workers.length },
+          isError: true,
+        };
+      }
       const workers = Array.isArray(params.workers)
         ? params.workers
             .map((w) => ({
@@ -109,9 +127,11 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
         });
       } catch (error) {
         const err = error instanceof Error ? error.message : String(error);
+        const details = isSubagentConcurrencyLimitError(error) ? error.details : undefined;
         return {
           content: [{ type: "text" as const, text: `subagent failed to start: ${err}` }],
-          details: undefined,
+          details,
+          isError: true,
         };
       }
 
@@ -122,9 +142,23 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
 
       const finalState = await new Promise<CollaborationRunState>((resolve, reject) => {
         let settled = false;
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        const abortRun = () => {
+          void abortCollaborationRun(runId).then((aborted) => {
+            if (aborted) return;
+            const latest = getCollaborationRun(runId);
+            settle(() => latest
+              ? resolve(latest)
+              : reject(new DOMException("Subagent task aborted", "AbortError")));
+          }).catch((error) => {
+            settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+          });
+        };
         const settle = (fn: () => void) => {
           if (settled) return;
           settled = true;
+          if (timeout) clearTimeout(timeout);
+          signal?.removeEventListener("abort", abortRun);
           unsubscribe();
           fn();
         };
@@ -148,10 +182,12 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
           }
         });
         // 兜底超时（12 分钟，与 waitForCollaborationRun 一致）
-        setTimeout(() => {
+        timeout = setTimeout(() => {
           const latest = getCollaborationRun(runId);
           settle(() => latest ? resolve(latest) : reject(new Error("Timed out waiting for subagent task")));
         }, 12 * 60 * 1000);
+        if (signal?.aborted) abortRun();
+        else signal?.addEventListener("abort", abortRun, { once: true });
       });
 
       // 终态时推送最后一次完整进度，确保主 Agent 看到最终 worker 状态

@@ -32,6 +32,31 @@ function activeSignal(signal: AbortSignal | undefined): AbortSignal {
   return signal ?? new AbortController().signal;
 }
 
+/** 与 pi-agent 一致：终止整个进程树，而不是只终止 shell 进程。 */
+function killProcessTree(pid: number): void {
+  if (process.platform === "win32") {
+    try {
+      spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
+        stdio: "ignore",
+        detached: true,
+        windowsHide: true,
+      }).unref();
+    } catch {
+      // Process may already have exited.
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Process may already have exited.
+    }
+  }
+}
+
 function valueAsString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
@@ -136,6 +161,9 @@ async function walkFiles(root: string, current: string, out: string[], options: 
 }
 
 function runProcess(command: string, args: string[], opts: { cwd: string; signal: AbortSignal; timeoutMs?: number; shell?: boolean }): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }> {
+  if (opts.signal.aborted) {
+    return Promise.reject(new DOMException("Process aborted", "AbortError"));
+  }
   return new Promise((resolve, reject) => {
     const timeoutMs = Math.min(Math.max(opts.timeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS, 1_000), MAX_PROCESS_TIMEOUT_MS);
     const child = spawn(command, args, {
@@ -143,15 +171,22 @@ function runProcess(command: string, args: string[], opts: { cwd: string; signal
       shell: opts.shell ?? false,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      windowsHide: true,
     });
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let terminationError: Error | null = null;
+    let postExitTimer: ReturnType<typeof setTimeout> | null = null;
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (postExitTimer) clearTimeout(postExitTimer);
       opts.signal.removeEventListener("abort", onAbort);
+      child.stdout.destroy();
+      child.stderr.destroy();
       fn();
     };
     const append = (chunk: Buffer, target: "stdout" | "stderr") => {
@@ -160,19 +195,29 @@ function runProcess(command: string, args: string[], opts: { cwd: string; signal
       else stderr = truncateText(stderr + text, MAX_PROCESS_OUTPUT_BYTES);
     };
     const onAbort = () => {
-      child.kill("SIGTERM");
-      finish(() => reject(new Error("Process aborted")));
+      terminationError = new DOMException("Process aborted", "AbortError");
+      if (child.pid) killProcessTree(child.pid);
     };
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      finish(() => reject(new Error(`Process timed out after ${timeoutMs}ms`)));
+      terminationError = new Error(`Process timed out after ${timeoutMs}ms`);
+      if (child.pid) killProcessTree(child.pid);
     }, timeoutMs);
 
     opts.signal.addEventListener("abort", onAbort, { once: true });
+    if (opts.signal.aborted) onAbort();
     child.stdout.on("data", (chunk: Buffer) => append(chunk, "stdout"));
     child.stderr.on("data", (chunk: Buffer) => append(chunk, "stderr"));
     child.on("error", (error) => finish(() => reject(error)));
-    child.on("close", (code, signal) => finish(() => resolve({ stdout, stderr, code, signal })));
+    child.on("exit", (code, signal) => {
+      postExitTimer = setTimeout(() => {
+        finish(() => terminationError
+          ? reject(terminationError)
+          : resolve({ stdout, stderr, code, signal }));
+      }, 100);
+    });
+    child.on("close", (code, signal) => finish(() => terminationError
+      ? reject(terminationError)
+      : resolve({ stdout, stderr, code, signal })));
   });
 }
 

@@ -21,6 +21,18 @@
  * 原样搬入，保持行为逐字一致（pi 路径继续用自己的副本，互不依赖）。
  */
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { calculateBackoffDelayMs, type NormalizedLlmError } from "../llm-gateway";
+import { isRetryableLlmErrorCode } from "../llm-gateway/error-classifier";
+
+/**
+ * UPSTREAM_TTFT_TIMEOUT 的独立重试上限。
+ *
+ * 中转站高峰排队时，原路（同模型/同中转站）重试大概率再次排队。这里把 TTFT 超时
+ * 的原路重试限制为 1 次（给瞬时抖动一次机会），超过即放弃，由 prompt 主循环发
+ * agent_end{errorCode}，让上层（前端 recover / 备用模型链路）接管切换，而不是
+ * 在同一个拥堵的上游上反复消耗数十秒。
+ */
+const TTFT_MAX_RETRY_ATTEMPTS = 1;
 
 // ===========================================================================
 // 常量（原样从 pi-engine-adapter.ts:26-33 搬入）
@@ -98,6 +110,8 @@ export interface RetryContext {
   partialMessage: AssistantMessage | null;
   /** 已经收到的有效内容长度（H3 判定用，由 {@link getAssistantContentLength} 计算）。 */
   contentLength: number;
+  /** 标准化后的模型错误。传入时优先使用它判断不可重试错误与 Retry-After。 */
+  normalizedError?: NormalizedLlmError;
 }
 
 /**
@@ -190,9 +204,24 @@ export class DefaultRetryPolicy implements RetryPolicy {
     ) {
       return { retry: false, delayMs: 0 };
     }
-    // 3. 可重试：计算退避（H2：>= minDelayMs，指数递增）
-    const exponential = this._minDelayMs * Math.pow(2, ctx.attempt - 1);
-    const delayMs = Math.max(this._minDelayMs, exponential);
+    // 3. 标准错误分类：quota/auth/context 等不可恢复错误不进入自动重试。
+    if (ctx.normalizedError && !isRetryableLlmErrorCode(ctx.normalizedError.code)) {
+      return { retry: false, delayMs: 0 };
+    }
+    // 3b. TTFT 超时：独立、更低的重试上限。中转站排队时原路重试意义有限，
+    //     超过 TTFT_MAX_RETRY_ATTEMPTS 即放弃，交由上层切备用模型。
+    if (
+      ctx.normalizedError?.code === "UPSTREAM_TTFT_TIMEOUT" &&
+      ctx.attempt > TTFT_MAX_RETRY_ATTEMPTS
+    ) {
+      return { retry: false, delayMs: 0 };
+    }
+    // 4. 可重试：计算退避（H2：>= minDelayMs，指数递增）并尊重 Retry-After。
+    const delayMs = calculateBackoffDelayMs({
+      attempt: ctx.attempt,
+      baseDelayMs: this._minDelayMs,
+      retryAfterMs: ctx.normalizedError?.retryAfterMs,
+    });
     return { retry: true, delayMs };
   }
 

@@ -50,12 +50,13 @@ export async function GET() {
       const sessions = await listAllSessions();
       return NextResponse.json({
         sessions,
-        warning: String(error),
+        warning: "session index unavailable, showing legacy list",
         source: "legacy",
         pagingEnabled: isSessionPagingEnabled(),
       });
     } catch (fallbackError) {
-      return NextResponse.json({ error: String(fallbackError) }, { status: 500 });
+      console.error("[/api/sessions] legacy fallback failed:", fallbackError);
+      return NextResponse.json({ error: "Internal server error" }, { status: 500 });
     }
   }
 }

@@ -15,8 +15,9 @@ import { isSessionTraceEnabled } from "@/lib/session/session-trace";
  *  - no live rpc session → `{ running: false }` immediately
  *  - live rpc → `rpc.send({ type: "get_state" })` with a short internal
  *    timeout (5s) so a stuck runtime can never hang the caller
- *  - any failure → `{ running: false }` with a 200 (never 500): a missing
- *    state must never break message display
+ *  - live runtime state read failure → conservative `{ running: true }`:
+ *    unknown must not be interpreted as idle, otherwise the UI can start a
+ *    second turn against a runtime that is merely slow.
  */
 export async function GET(
   _req: Request,
@@ -40,12 +41,17 @@ export async function GET(
     }
     return NextResponse.json({ running: true, state });
   } catch (err) {
-    // Runtime didn't answer in time (or errored). Report not-running so the
-    // client can still render messages; a subsequent poll can recover.
+    // Runtime exists but didn't answer. Keep the UI locked conservatively;
+    // history rendering is already decoupled and does not depend on this result.
     if (isSessionTraceEnabled()) {
       console.log(`[session-trace] sessionState id=${id} total=${Date.now() - start}ms running=false reason=timeout-or-error`);
     }
-    return NextResponse.json({ running: false, error: String(err) });
+    return NextResponse.json({
+      running: true,
+      state: { isRunning: true },
+      unavailable: true,
+      error: String(err),
+    });
   }
 }
 

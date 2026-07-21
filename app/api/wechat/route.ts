@@ -18,8 +18,8 @@ export async function GET() {
   try {
     const bot = getWeChatBotService();
     return NextResponse.json(bot.getStatus());
-  } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+  } catch (_error) {
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -47,9 +47,10 @@ export async function POST(req: Request) {
             message: "请用微信扫描二维码",
           });
         } catch (err) {
+          console.error("[wechat] getQRCode failed:", err);
           return NextResponse.json({
             success: false,
-            error: `获取二维码失败: ${err instanceof Error ? err.message : String(err)}`,
+            error: "获取二维码失败",
           }, { status: 500 });
         }
       }
@@ -120,7 +121,7 @@ export async function POST(req: Request) {
           error: `Unknown action: ${body.action}. Supported: login, start, stop, restart, logout, setCwd, restore`,
         }, { status: 400 });
     }
-  } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+  } catch (_error) {
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

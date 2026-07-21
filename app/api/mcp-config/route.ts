@@ -14,6 +14,6 @@ export async function PUT(req: Request) {
     const reloadResults = await reloadMcpForIdleSessions();
     return NextResponse.json({ servers, reloadResults });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

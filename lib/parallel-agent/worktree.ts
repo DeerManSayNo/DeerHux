@@ -130,11 +130,57 @@ export function generateDiff(worktreePath: string): { diff: string; stats: strin
  * Apply a patch from a worktree to the main cwd.
  * Returns { success, conflict }.
  */
+/**
+ * Validate externally-supplied file pathspecs before passing to git.
+ * Rejects: NUL bytes, absolute paths (POSIX & Windows), parent traversal,
+ * option-like ("-…") and pathspec-magic (":…") prefixes, empty segments.
+ * Returns sanitized relative paths safe to use after git's "--" separator.
+ */
+function validatePatchFiles(files: string[] | undefined): string[] | undefined {
+  if (files === undefined) return undefined; // preserve full-diff behavior
+  const result: string[] = [];
+  for (const raw of files) {
+    if (typeof raw !== "string") {
+      throw new Error("Invalid file entry: not a string");
+    }
+    const f = raw; // intentionally NOT trimmed — preserve spaces in filenames
+    if (f.length === 0 || /^\s*$/.test(f)) continue;
+    if (f.includes("\0")) {
+      throw new Error("Invalid file path: contains NUL byte");
+    }
+    // POSIX absolute
+    if (f.startsWith("/")) {
+      throw new Error(`Invalid file path: absolute path not allowed: ${JSON.stringify(raw)}`);
+    }
+    // Windows absolute: drive letter or UNC
+    if (/^[a-zA-Z]:[\\/]/.test(f) || f.startsWith("\\\\")) {
+      throw new Error(`Invalid file path: absolute path not allowed: ${JSON.stringify(raw)}`);
+    }
+    // Reject option-like and pathspec-magic prefixes
+    if (f.startsWith("-")) {
+      throw new Error(`Invalid file path: looks like a git option: ${JSON.stringify(raw)}`);
+    }
+    if (f.startsWith(":")) {
+      throw new Error(`Invalid file path: looks like git pathspec magic: ${JSON.stringify(raw)}`);
+    }
+    // Reject parent traversal on any segment
+    const segments = f.replace(/\\/g, "/").split("/");
+    if (segments.includes("..") || segments.includes(".")) {
+      throw new Error(`Invalid file path: parent/current reference not allowed: ${JSON.stringify(raw)}`);
+    }
+    result.push(f);
+  }
+  return result;
+}
+
 export function applyPatch(mainCwd: string, worktreePath: string, files?: string[]): { success: boolean; error?: string } {
   try {
-    // Generate patch and apply
-    const pathspecs = files?.map((file) => file.trim()).filter(Boolean) ?? [];
-    const diff = execFileSync("git", ["diff", "HEAD", "--", ...pathspecs], {
+    // Validate externally-supplied pathspecs to prevent option injection / traversal
+    const pathspecs = validatePatchFiles(files);
+    if (files !== undefined && pathspecs !== undefined && pathspecs.length === 0) {
+      return { success: false, error: "Empty file selection: no valid paths to apply" };
+    }
+    const diff = execFileSync("git", ["diff", "HEAD", "--", ...(pathspecs ?? [])], {
       cwd: worktreePath,
       encoding: "utf8",
       maxBuffer: 10 * 1024 * 1024,

@@ -16,7 +16,7 @@ export async function PATCH(
     if (!version) return NextResponse.json({ error: "Version not found" }, { status: 404 });
     return NextResponse.json({ version });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 

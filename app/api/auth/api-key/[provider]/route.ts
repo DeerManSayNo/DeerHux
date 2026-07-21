@@ -28,7 +28,7 @@ export async function POST(req: Request, { params }: Params) {
     authStorage.set(provider, { type: "api_key", key: apiKey.trim() });
     return NextResponse.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
@@ -40,6 +40,6 @@ export async function DELETE(_req: Request, { params }: Params) {
     authStorage.remove(provider);
     return NextResponse.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

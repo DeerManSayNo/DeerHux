@@ -53,3 +53,6 @@ __pycache__/
 /src-tauri/binaries/
 placeholder-dist/
 /.deerhux-build-home/
+
+# backup files
+*.bak

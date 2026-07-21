@@ -14,7 +14,7 @@
  * workers）永远优先，不被 LLM 覆盖。
  */
 import { callLlmForText } from "./llm-call";
-import { planSubagentTask, type SubagentPlan } from "./subagent-planner";
+import { MAX_WORKERS_PER_RUN, planSubagentTask, type SubagentPlan } from "./subagent-planner";
 import type {
   CollaborationWorkerSpec,
   SubagentRunPlacement,
@@ -68,6 +68,7 @@ async function tryLlmPlan(options: LlmPlanOptions): Promise<SubagentPlan | null>
     systemPrompt: PLANNER_SYSTEM_PROMPT,
     userPrompt: buildPlannerUserPrompt(options),
     timeoutMs: options.timeoutMs,
+    requestKind: "planner",
   });
   if (!raw) return null;
   const parsed = parsePlanJson(raw);
@@ -101,7 +102,7 @@ const PLANNER_SYSTEM_PROMPT = [
   "1. 简单查询/单次调研/单点修改不要拆成多 worker，用一个 worker 即可。",
   "2. 目标里含「先…再…」「调研后实现」「实现后审查」等上下游语义时，用 pipeline 并按顺序给 worker 加 dependsOn 链。",
   "3. 目标里含「对比/多个方案/并行尝试」时用 parallel，每个 worker 独立尝试同一目标。",
-  "4. workers 数量 1~5 个，每个 task 要自包含（subagent 不共享主对话上下文）。",
+  `4. workers 数量 1~${MAX_WORKERS_PER_RUN} 个，每个 task 要自包含（subagent 不共享主对话上下文）。`,
   "5. 只输出 JSON，不要 markdown 代码块、不要多余解释。",
 ].join("\n");
 
@@ -182,7 +183,7 @@ function normalizeWorkers(value: unknown): CollaborationWorkerSpec[] | undefined
       ? record.dependsOn.map((d) => (typeof d === "string" ? d.trim() : "")).filter(Boolean)
       : [];
     workers.push({ name: record.name.trim(), task: record.task.trim(), ...(dependsOn.length ? { dependsOn } : {}) });
-    if (workers.length >= 10) break;
+    if (workers.length >= MAX_WORKERS_PER_RUN) break;
   }
   return workers.length > 0 ? workers : undefined;
 }

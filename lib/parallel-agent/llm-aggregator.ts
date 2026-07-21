@@ -53,6 +53,7 @@ async function tryLlmAggregate(
     systemPrompt: AGGREGATOR_SYSTEM_PROMPT,
     userPrompt: buildAggregatorUserPrompt(run, completed),
     timeoutMs: options.timeoutMs,
+    requestKind: "aggregator",
   });
   if (!raw) return null;
   // 补一个标题头，让前端展示一致。
