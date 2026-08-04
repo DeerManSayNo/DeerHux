@@ -43,13 +43,23 @@ interface Props {
   onFork?: (entryId: string) => void;
   forking?: boolean;
   showTimestamp?: boolean;
+  /** 该消息是否是所属 user turn 的最后一条 assistant。 */
+  showTurnDuration?: boolean;
   prevTimestamp?: number;
+  /** 当前 user turn 的开始/结束时间，用于展示整轮总耗时。 */
+  turnStartTimestamp?: number;
+  turnEndTimestamp?: number;
+  /** 当前页面运行态冻结下来的整轮耗时；优先于时间戳推算。 */
+  turnDurationSeconds?: number;
   nextUserTimestamp?: number;
   onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
   systemPrompt?: string | null;
   /** subagent 协作 run 快照（来自父 session 的 custom entry）。 */
   collaborationRuns?: CollaborationRunSnapshot[];
+  /** 当前 user turn 覆盖的所有消息 entry id，用于精确关联 subagent。 */
+  turnEntryIds?: string[];
   onOpenSession?: (sessionId: string) => void;
+  onCollaborationRunUpdate?: (run: CollaborationRunSnapshot) => void;
 }
 
 function formatTime(ts?: number): string | null {
@@ -84,27 +94,29 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, nextUserTimestamp, onResend, systemPrompt, collaborationRuns, onOpenSession }: Props) {
-  // 把协作 run 关联到触发它的 user 消息：run.createdAt 是 ISO string，
-  // UserMessage.timestamp 是 ms。一个 user turn 可能发起多次 subagent，
-  // 全部归到该条 user（下一条 user 消息的 run 自然 createdAt 更晚，不会重复归属）。
+function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, nextUserTimestamp, onResend, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
+  // 新 run 用 parentEntryId 精确归属到触发它的 user turn；旧数据没有该字段时，
+  // 才保留 createdAt 时间窗作为兼容兜底。
   const rawTs = message.role === "user" ? (message as UserMessage).timestamp : undefined;
   const userTs = typeof rawTs === "number" ? rawTs : (rawTs ? Date.parse(rawTs) : NaN);
+  const turnEntryIdSet = useMemo(() => new Set(turnEntryIds ?? []), [turnEntryIds]);
   const linkedRuns = useMemo(() => {
     if (message.role !== "user") return [];
     if (!collaborationRuns || collaborationRuns.length === 0) return [];
-    if (!userTs || Number.isNaN(userTs)) return [];
     // 只归属已终结的 run。活跃中的 run 统一由 ChatWindow 钉在聊天流最底部跟随
     // 最新消息，避免同一 run 同时出现在历史 user 消息下方和底部造成重复。
     return collaborationRuns
       .filter((r) => {
+        if (!TERMINAL_RUN_STATUSES.has(r.status)) return false;
+        if (r.parentEntryId) return turnEntryIdSet.has(r.parentEntryId);
+        if (!userTs || Number.isNaN(userTs)) return false;
         const created = Date.parse(r.createdAt);
         if (Number.isNaN(created)) return false;
         if (created < userTs || (nextUserTimestamp && created >= nextUserTimestamp)) return false;
-        return TERMINAL_RUN_STATUSES.has(r.status);
+        return true;
       })
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  }, [message.role, collaborationRuns, userTs, nextUserTimestamp]);
+  }, [message.role, collaborationRuns, turnEntryIdSet, userTs, nextUserTimestamp]);
   if (message.role === "user") {
     return (
       <>
@@ -112,7 +124,7 @@ function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchd
         {linkedRuns.length > 0 && (
           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
             {linkedRuns.map((run) => (
-              <SubagentRunCard key={run.runId} run={run} onOpenSession={onOpenSession} />
+              <SubagentRunCard key={run.runId} run={run} onOpenSession={onOpenSession} onRunUpdate={onCollaborationRunUpdate} />
             ))}
           </div>
         )}
@@ -120,7 +132,7 @@ function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchd
     );
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -139,12 +151,18 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.onFork === next.onFork &&
   prev.forking === next.forking &&
   prev.showTimestamp === next.showTimestamp &&
+  prev.showTurnDuration === next.showTurnDuration &&
   prev.prevTimestamp === next.prevTimestamp &&
+  prev.turnStartTimestamp === next.turnStartTimestamp &&
+  prev.turnEndTimestamp === next.turnEndTimestamp &&
+  prev.turnDurationSeconds === next.turnDurationSeconds &&
   prev.nextUserTimestamp === next.nextUserTimestamp &&
   prev.onResend === next.onResend &&
   prev.systemPrompt === next.systemPrompt &&
   prev.collaborationRuns === next.collaborationRuns &&
-  prev.onOpenSession === next.onOpenSession
+  prev.turnEntryIds === next.turnEntryIds &&
+  prev.onOpenSession === next.onOpenSession &&
+  prev.onCollaborationRunUpdate === next.onCollaborationRunUpdate
 ));
 
 /** Parse /skill:name prefix from message text. Returns { skillName, rest } or null. */
@@ -748,7 +766,11 @@ function AssistantMessageView({
   modelNames,
   watchdogInfo,
   showTimestamp,
+  showTurnDuration,
   prevTimestamp,
+  turnStartTimestamp,
+  turnEndTimestamp,
+  turnDurationSeconds,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -756,14 +778,17 @@ function AssistantMessageView({
   modelNames?: Record<string, string>;
   watchdogInfo?: WatchdogInfo | null;
   showTimestamp?: boolean;
+  showTurnDuration?: boolean;
   prevTimestamp?: number;
+  turnStartTimestamp?: number;
+  turnEndTimestamp?: number;
+  turnDurationSeconds?: number;
 }) {
   const time = showTimestamp ? formatTime(message.timestamp) : null;
   const blocks = message.content ?? [];
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
-  const [streamElapsedSeconds, setStreamElapsedSeconds] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const blocksRef = useRef(blocks);
   blocksRef.current = blocks;
@@ -772,20 +797,20 @@ function AssistantMessageView({
   const blockStartTimesRef = useRef<Map<number, number>>(new Map());
   const [streamingDurations, setStreamingDurations] = useState<Map<number, number>>(new Map());
 
-  // Total assistant turn duration derived from session file timestamps:
-  // previous visible message end → current assistant message end.
-  // This also works for sessions driven by remote connectors (WeChat Bot), because
-  // once the session is reloaded from disk it has the same persisted timestamps as
-  // a normal in-app conversation.
+  // 整轮总耗时统一按 user message 开始 → 本轮最后一条持久化消息结束计算。
+  // 只有本轮最后一条 assistant 显示，避免多段 assistant/tool 循环重复计时。
   const totalDurationFromFile = useMemo<number | undefined>(() => {
+    if (showTurnDuration && turnDurationSeconds !== undefined) return turnDurationSeconds;
+    if (!showTurnDuration || !turnStartTimestamp || !turnEndTimestamp) return undefined;
+    return Math.max(0, Math.round((turnEndTimestamp - turnStartTimestamp) / 1000));
+  }, [showTurnDuration, turnDurationSeconds, turnStartTimestamp, turnEndTimestamp]);
+
+  // 单条 assistant 的思考耗时仍使用上一条消息 → 当前 assistant，不能拿整轮耗时替代。
+  const thinkingDurationFromFile = useMemo<number | undefined>(() => {
     if (!message.timestamp || !prevTimestamp) return undefined;
     const secs = Math.round((message.timestamp - prevTimestamp) / 1000);
     return secs > 0 ? secs : undefined;
   }, [message.timestamp, prevTimestamp]);
-
-  // Thinking duration derived from file timestamps: time from prev message end to this message end
-  // This is the total generation time (thinking + any text before first tool call)
-  const thinkingDurationFromFile = totalDurationFromFile;
 
   // Tool call durations derived from session file timestamps (accurate for completed messages)
   // assistant message timestamp = when generation ended = when tools started running
@@ -826,7 +851,6 @@ function AssistantMessageView({
         return next;
       });
       streamStartRef.current = null;
-      setStreamElapsedSeconds(null);
       setTps(null);
       return;
     }
@@ -838,8 +862,6 @@ function AssistantMessageView({
       // remote sessions (WeChat Bot etc.) show the same “正在生成 / 耗时 x 秒” feel.
       const streamStart = streamStartRef.current ?? now;
       streamStartRef.current = streamStart;
-      setStreamElapsedSeconds(Math.max(0, Math.round((now - streamStart) / 1000)));
-
       // Record start time for each block the first time we see it
       bs.forEach((_, i) => {
         if (!blockStartTimesRef.current.has(i)) blockStartTimesRef.current.set(i, now);
@@ -905,11 +927,6 @@ function AssistantMessageView({
           return (
             <>
 
-              {streamElapsedSeconds !== null && (
-                <span style={{ color: "var(--text-dim)", fontSize: 11, fontVariantNumeric: "tabular-nums" }} title="本轮已运行时间">
-                  {formatCompactDuration(streamElapsedSeconds)}
-                </span>
-              )}
               {est > 0 && (
                 <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title="预估 token 数（流式接收中）">
                   <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
@@ -949,16 +966,45 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {blocks.map((block, i) => (
-          <BlockView
-            key={i}
-            block={block}
-            toolResults={toolResults}
-            streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
-            toolCallDurations={toolCallDurations}
-            isStreaming={isStreaming}
-          />
-        ))}
+        {blocks.map((block, i) => {
+          // 失败消息会同时写入 text + errorMessage；UI 只展示红色错误框，避免重复。
+          if (
+            !isStreaming
+            && message.errorMessage
+            && block.type === "text"
+            && (block as TextContent).text === message.errorMessage
+          ) {
+            return null;
+          }
+          return (
+            <BlockView
+              key={i}
+              block={block}
+              toolResults={toolResults}
+              streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
+              toolCallDurations={toolCallDurations}
+              isStreaming={isStreaming}
+            />
+          );
+        })}
+        {!isStreaming && (message.errorMessage || message.stopReason === "error") && (
+          <div
+            style={{
+              padding: "8px 10px",
+              borderRadius: 8,
+              background: "rgba(239,68,68,0.08)",
+              border: "1px solid rgba(239,68,68,0.25)",
+              color: "rgba(200,60,60,0.95)",
+              fontSize: 12,
+              lineHeight: 1.55,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+            }}
+          >
+            {message.errorMessage
+              || "模型以错误状态结束，但没有返回具体错误信息。"}
+          </div>
+        )}
       </div>
 
       <div style={{
@@ -971,7 +1017,7 @@ function AssistantMessageView({
         )}
         {totalDurationFromFile !== undefined && !isStreaming && (
           <div style={{ fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
-            耗时 {formatCompactDuration(totalDurationFromFile)}
+            总耗时 {formatCompactDuration(totalDurationFromFile)}
           </div>
         )}
         {textContent && !isStreaming && (
@@ -1386,5 +1432,3 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
     </div>
   );
 }
-
-

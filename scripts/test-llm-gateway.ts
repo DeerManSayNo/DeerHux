@@ -54,4 +54,28 @@ const meta = { provider: "openai", modelId: "gpt-test" };
   assert.equal(passthrough.suggestedAction, "wait");
 }
 
+// 终态文案回归：可重试错误的 userMessage 不得保留"正在等待后自动重试"
+// 这类进行时措辞——它们会被前端当作最终失败状态展示，造成"永远在重试"的误导。
+{
+  const terminalPhrases = ["正在等待后自动重试"];
+  const retryableCodes = [
+    "RATE_LIMIT_REQUESTS",
+    "RATE_LIMIT_TOKENS",
+    "SERVER_OVERLOADED",
+    "SERVER_ERROR",
+    "TIMEOUT",
+    "NETWORK_ERROR",
+    "STREAM_INTERRUPTED",
+  ] as const;
+  for (const code of retryableCodes) {
+    const msg = getLlmUserMessage(code);
+    for (const phrase of terminalPhrases) {
+      assert.ok(
+        !msg.includes(phrase),
+        `${code} userMessage must not contain terminal-misleading phrase "${phrase}", got: ${msg}`,
+      );
+    }
+  }
+}
+
 console.log("llm-gateway tests passed");

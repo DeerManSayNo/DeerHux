@@ -42,7 +42,11 @@ export interface AgentSessionLike {
   navigateTree(targetId: string, options?: { summarize?: boolean }): Promise<NavigateTreeResult>;
   appendCustomEntry?(customType: string, data?: unknown): string;
   setThinkingLevel(level: string): void;
-  compact(customInstructions?: string): Promise<unknown>;
+  compact(
+    customInstructions?: string,
+    reason?: "manual" | "threshold" | "overflow",
+    options?: { provider?: string; modelId?: string; model?: unknown },
+  ): Promise<unknown>;
   setAutoCompactionEnabled(enabled: boolean): void;
   setAutoRetryEnabled(enabled: boolean): void;
   steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;

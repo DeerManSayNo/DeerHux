@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import { getLocalStorageItem } from "@/lib/client-storage";
-import type { AgentMessage, FileReference, ImageContent, SessionInfo, SkillReference, TextContent, UserMessage } from "@/lib/types";
+import type { AgentMessage, AssistantMessage, FileReference, ImageContent, SessionInfo, SkillReference, TextContent, UserMessage } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { agentEventBus } from "@/lib/agent-event-bus";
@@ -234,6 +234,7 @@ export interface ChatInputHandle {
   insertIfEmpty: (content: string) => void;
   addImages: (files: File[]) => void;
   addReference: (path: string) => void;
+  clearInput?: () => void;
 }
 
 export interface AttachedImage {
@@ -510,6 +511,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [planReady, setPlanReady] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
+  const retryInfoRef = useRef<RetryInfo | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const lastSystemPromptRef = useRef<string | null>(null);
@@ -521,6 +523,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
+  const isCompactingRef = useRef(false);
+  useEffect(() => {
+    isCompactingRef.current = isCompacting;
+  }, [isCompacting]);
+  const [compactionProgress, setCompactionProgress] = useState<import("@/lib/compaction-ui").CompactionProgress | null>(null);
   const [compactError, setCompactError] = useState<string | null>(null);
   // TODO 3 — first-paint pagination. When the recent-messages endpoint
   // reported older messages were truncated, this lets the UI offer a
@@ -539,6 +546,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const stored = getLocalStorageItem("deerhux.auto-recovery-mode");
     return (stored === "off" || stored === "conservative" || stored === "aggressive") ? stored : "aggressive";
   });
+  const autoRecoveryModeRef = useRef(autoRecoveryMode);
+  useEffect(() => {
+    autoRecoveryModeRef.current = autoRecoveryMode;
+  }, [autoRecoveryMode]);
   const [stallLevel, setStallLevel] = useState<StallLevel>(null);
   const stallDismissedRef = useRef(false);
 
@@ -552,7 +563,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const stallRecoveriesRef = useRef(0);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  // 累计完整 message_update 可能按 token 到达。这里只保留最新快照并按动画帧
+  // 提交，避免 React/Markdown 渲染频率被上游事件频率直接放大。
+  const pendingMessageUpdateRef = useRef<AgentEvent | null>(null);
+  const messageUpdateFrameRef = useRef<number | null>(null);
   const sseReconnectAttemptRef = useRef(0);
+  const lastEventSeqRef = useRef(0);
   const sseReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const agentRunningRef = useRef(false);
@@ -574,12 +590,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Reset only on user-initiated sends (handleSend / handleFollowUp), NOT in
   // resetTurnTracking(), so it survives across watchdog recovery cycles and
   // acts as a circuit breaker (max 3 auto-recoveries per user message).
+  /** 同一用户回合的原路重试耗尽只允许触发一次 recover。 */
+  const retryExhaustedRecoveryUsedRef = useRef(false);
   const autoRecoveryAttemptsRef = useRef(0);
   const agentPhaseRef = useRef<AgentPhase>(null);
   const autoContinueSentRef = useRef(false);
   const autoContinueInProgressRef = useRef(false);
   const abortCompletedRef = useRef(false);
   const receivedAssistantMessageRef = useRef(false);
+  /** 本回合已完成 tool-call assistant，正在等待工具后的最终模型回复。 */
+  const awaitingFinalReplyAfterToolsRef = useRef(false);
   const awaitingAgentStartRef = useRef(false);
   const awaitingAgentStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const awaitingAgentStartChecksRef = useRef(0);
@@ -592,6 +612,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const stopRequestedRef = useRef(false);
   const adoptingCreatedSessionRef = useRef<string | null>(null);
   const turnIdRef = useRef(0);
+  // 最终 agent_end 后，拒绝同一会话中较早发出的状态请求将界面重新置为运行中。
+  const terminalTurnEndedSessionIdRef = useRef<string | null>(null);
   const activeSubagentToolIdsRef = useRef<Set<string>>(new Set());
   const subagentLiveRefreshTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -622,6 +644,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     lastModelErrorRef.current = null;
     setLastModelError(null);
     receivedAssistantMessageRef.current = false;
+    awaitingFinalReplyAfterToolsRef.current = false;
     awaitingAgentStartRef.current = false;
     clearAwaitingAgentStartGuard();
     lastAgentEventAtRef.current = Date.now();
@@ -892,7 +915,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const applyAgentStatePayload = useCallback((agentState: AgentStatePayload | null, sid: string) => {
     if (sid !== sessionIdRef.current) return;
     const runtimeRunning = Boolean(agentState?.running && agentState.state?.isRunning !== false);
-    if (runtimeRunning) {
+    // 状态请求与 SSE 并行：若最终 agent_end 已先抵达，此响应即使迟到也不能
+    // 覆盖终态。新的 agent_start / 用户发送会清除此标记。
+    const terminalEndAlreadySeen = terminalTurnEndedSessionIdRef.current === sid;
+    if (runtimeRunning && !terminalEndAlreadySeen) {
       loadTools(sid);
       // isRunning stays true across gaps (waiting-for-model, between tool
       // batches, auto-retry backoff). Falls back to true for older servers.
@@ -977,7 +1003,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     void loadSession(sid, false, false);
   }, [loadSession, stopSubagentLiveRefresh]);
 
-  const connectEvents = useCallback((sid: string) => {
+  const cancelPendingMessageUpdate = useCallback(() => {
+    pendingMessageUpdateRef.current = null;
+    if (messageUpdateFrameRef.current !== null) {
+      cancelAnimationFrame(messageUpdateFrameRef.current);
+      messageUpdateFrameRef.current = null;
+    }
+  }, []);
+
+  const flushPendingMessageUpdate = useCallback(() => {
+    if (messageUpdateFrameRef.current !== null) {
+      cancelAnimationFrame(messageUpdateFrameRef.current);
+      messageUpdateFrameRef.current = null;
+    }
+    const pending = pendingMessageUpdateRef.current;
+    pendingMessageUpdateRef.current = null;
+    if (pending) handleAgentEventRef.current?.(pending);
+  }, []);
+
+  const enqueueMessageUpdate = useCallback((event: AgentEvent, sid: string) => {
+    pendingMessageUpdateRef.current = event;
+    if (messageUpdateFrameRef.current !== null) return;
+    messageUpdateFrameRef.current = requestAnimationFrame(() => {
+      messageUpdateFrameRef.current = null;
+      if (sessionIdRef.current !== sid) {
+        pendingMessageUpdateRef.current = null;
+        return;
+      }
+      const pending = pendingMessageUpdateRef.current;
+      pendingMessageUpdateRef.current = null;
+      if (pending) handleAgentEventRef.current?.(pending);
+    });
+  }, []);
+
+  const connectEvents = useCallback((sid: string, isReconnect = false) => {
     // Clear any pending reconnect timer from a previous attempt
     if (sseReconnectTimerRef.current) {
       clearTimeout(sseReconnectTimerRef.current);
@@ -987,19 +1046,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
-    sseReconnectAttemptRef.current = 0;
+    if (!isReconnect) sseReconnectAttemptRef.current = 0;
 
     // Sync the subagent capability toggle to this (possibly freshly
     // cold-started) session so subagent is in/out of the active tool set.
     void sendAgentCommand(sid, { type: "set_subagent_enabled", enabled: subagentEnabledRef.current }).catch(() => { /* best effort */ });
+    // 激进/保守/关闭 → 后端 TTFT 首包超时（激进 = 120s）。
+    void sendAgentCommand(sid, { type: "set_auto_recovery_mode", mode: autoRecoveryModeRef.current }).catch(() => { /* best effort */ });
 
-    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
+    const afterSeq = lastEventSeqRef.current;
+    const eventsUrl = `/api/agent/${encodeURIComponent(sid)}/events${afterSeq > 0 ? `?after=${afterSeq}` : ""}`;
+    const es = new EventSource(eventsUrl);
     eventSourceRef.current = es;
     es.onmessage = (e) => {
       try {
         const event = JSON.parse(e.data) as AgentEvent;
+        const seq = typeof event.seq === "number" ? event.seq : Number(e.lastEventId);
+        if (Number.isFinite(seq) && seq > lastEventSeqRef.current) {
+          lastEventSeqRef.current = seq;
+        }
         agentEventBus.emit(event);
-        handleAgentEventRef.current?.(event);
+        if (event.type === "message_update") {
+          enqueueMessageUpdate(event, sid);
+        } else {
+          // 顺序屏障：message_end/工具/生命周期事件必须看到它之前的最新快照。
+          flushPendingMessageUpdate();
+          handleAgentEventRef.current?.(event);
+        }
       } catch {
         // ignore
       }
@@ -1022,8 +1095,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           if (agentRunningRef.current && (!d.running || d.status?.isRunning === false)) {
             // Session ended while we were disconnected — dispatch a synthetic
-            // agent_end so the client state resets cleanly.
-            handleAgentEventRef.current?.({ type: "agent_end", willRetry: false });
+            // agent_end so the client state resets cleanly. This is not a
+            // trustworthy normal completion because its real terminal event
+            // was lost; expose the transport diagnosis instead of stopping silently.
+            handleAgentEventRef.current?.({
+              type: "agent_end",
+              willRetry: false,
+              error: `事件流断开期间回合已经结束，未收到服务端终止详情（lastEventType=${d.status?.lastEventType ?? "unknown"}，eventIdleMs=${d.status?.eventIdleMs ?? "unknown"}）。请检查服务端日志；若回复不完整可发送“继续”。`,
+            });
           }
         })
         .catch(() => {});
@@ -1043,7 +1122,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sseReconnectAttemptRef.current += 1;
       const attempt = sseReconnectAttemptRef.current;
       const MAX_ATTEMPTS = 10;
-      if (attempt > MAX_ATTEMPTS) return;
+      if (attempt > MAX_ATTEMPTS) {
+        const message = `实时事件连接连续 ${MAX_ATTEMPTS} 次重连失败，无法继续接收模型输出或终止事件（session=${sid}）。后端可能已退出、网络连接已中断或 SSE 路由不可用。`;
+        lastModelErrorRef.current = message;
+        setLastModelError(message);
+        return;
+      }
 
       // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s
       const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30_000);
@@ -1054,12 +1138,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // the agent is still running.  Without this check, a tab switch
         // during the backoff delay would reconnect to the wrong session.
         if (agentRunningRef.current && sessionIdRef.current === sid) {
-          connectEvents(sid);
+          connectEvents(sid, true);
         }
       }, delay);
     };
     return es;
-  }, [loadSession, loadSessionState]);
+  }, [enqueueMessageUpdate, flushPendingMessageUpdate, loadSession, loadSessionState]);
 
   const ensureEventsConnected = useCallback((sid: string) => {
     const existing = eventSourceRef.current;
@@ -1088,6 +1172,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(false);
     setAgentPhase(null);
     setStallLevel(null);
+    retryInfoRef.current = null;
     setRetryInfo(null);
     dispatch({ type: "end" });
     setLastModelError(message);
@@ -1156,7 +1241,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // executeRecovery is declared further down (after handleAgentEvent), but
   // handleAgentEvent needs to trigger it for backend `agent_stale_warning`
   // events. Bridge with a ref to avoid a forward-declaration error.
-  const executeRecoveryRef = useRef<(sid: string, attempt?: number) => Promise<void>>(async () => {});
+  const executeRecoveryRef = useRef<(sid: string, attempt?: number, source?: "watchdog" | "stale_warning" | "retry_exhausted" | "manual" | "ttft") => Promise<void>>(async () => {});
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     lastAgentEventAtRef.current = Date.now();
@@ -1199,10 +1284,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // destroy kill it with no follow_up.
         autoRecoveryAttemptsRef.current += 1;
         console.log('[Watchdog] stale_warning recovery (attempt %d/%d)', autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES_PER_TURN);
-        void executeRecoveryRef.current(staleSid, autoRecoveryAttemptsRef.current);
+        void executeRecoveryRef.current(staleSid, autoRecoveryAttemptsRef.current, "stale_warning");
         break;
       }
       case "agent_start":
+        terminalTurnEndedSessionIdRef.current = null;
         turnIdRef.current += 1;
         // A fresh turn has started — reset all per-turn tracking.
         resetTurnTracking();
@@ -1243,21 +1329,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         watchdogStaleRecoveriesRef.current = 0;
         const eventData = event as { willRetry?: boolean; error?: string };
         const willRetry = eventData.willRetry ?? false;
-        // Capture error from immediate prompt() failure (rpc-manager sends error field)
-        if (eventData.error && !lastModelErrorRef.current) {
+        // agent_end carries the backend's most complete terminal diagnosis.
+        // Always prefer it over an earlier generic message_end error shell.
+        if (eventData.error) {
           lastModelErrorRef.current = eventData.error;
           setLastModelError(eventData.error);
         }
         // Show error if: retries were exhausted (lastModelError is set) OR the turn ended
-        // without producing any assistant message (direct failure, auto-retry disabled)
+        // without producing any assistant message (direct failure, auto-retry disabled).
+        // Also: tool-call assistant 已到、工具也跑完，但最终文本回复缺失时，
+        // 旧逻辑会因 receivedAssistantMessageRef=true 而静默成功——这里强制报错。
+        if (
+          !willRetry
+          && awaitingFinalReplyAfterToolsRef.current
+          && !lastModelErrorRef.current
+        ) {
+          lastModelErrorRef.current = "模型在工具执行后未返回最终回复";
+          setLastModelError(lastModelErrorRef.current);
+        }
         const endedWithError = (
           (lastModelErrorRef.current !== null) ||
-          (!willRetry && !receivedAssistantMessageRef.current)
+          (!willRetry && !receivedAssistantMessageRef.current) ||
+          (!willRetry && awaitingFinalReplyAfterToolsRef.current)
         );
         if (!willRetry && !receivedAssistantMessageRef.current && !lastModelErrorRef.current) {
           lastModelErrorRef.current = "模型响应失败";
           setLastModelError("模型响应失败");
         }
+        awaitingFinalReplyAfterToolsRef.current = false;
         // When the agent will retry automatically, keep agentRunning=true so the
         // UI stays in "streaming" mode and prevents accidental user "continue"
         // inputs that would collide with the SDK's auto-retry.
@@ -1270,11 +1369,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           break;
         }
+        terminalTurnEndedSessionIdRef.current = sessionIdRef.current;
+        // 同步更新 ref，避免 SSE 重连/看门狗在 React 渲染前仍将旧回合当作运行中。
+        agentRunningRef.current = false;
         setAgentRunning(false);
         setAgentPhase(null);
         activeSubagentToolIdsRef.current.clear();
         stopSubagentLiveRefresh();
-        if (!endedWithError) setRetryInfo(null);
+        if (!endedWithError) retryInfoRef.current = null;
+    setRetryInfo(null);
         dispatch({ type: "end" });
         setPlanReady(!endedWithError && agentModeRef.current === "plan");
         if (sessionIdRef.current && !endedWithError) {
@@ -1310,7 +1413,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             '[TTFT-Recovery] UPSTREAM_TTFT_TIMEOUT — switching to fallback model (attempt %d/%d)',
             autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES_PER_TURN,
           );
-          void executeRecoveryRef.current(sessionIdRef.current, autoRecoveryAttemptsRef.current);
+          void executeRecoveryRef.current(sessionIdRef.current, autoRecoveryAttemptsRef.current, "ttft");
         }
         break;
       }
@@ -1334,7 +1437,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const completed = event.message as AgentMessage | undefined;
         const completedRole = completed?.role;
         if (completed) {
-          if (completedRole === "assistant") receivedAssistantMessageRef.current = true;
+          if (completedRole === "assistant") {
+            receivedAssistantMessageRef.current = true;
+            const assistant = completed as AssistantMessage;
+            const stopReason = assistant.stopReason;
+            const hasToolCalls = Array.isArray(assistant.content)
+              && assistant.content.some((block) => block?.type === "toolCall");
+            // toolUse 回合还要等工具结果后的最终回复；最终文本/错误到来时清除等待标记。
+            awaitingFinalReplyAfterToolsRef.current =
+              (stopReason === "toolUse" || hasToolCalls)
+              && stopReason !== "error"
+              && stopReason !== "aborted";
+            if (stopReason === "error") {
+              const message = assistant.errorMessage
+                ?? `模型以错误状态结束，但没有返回错误详情（provider=${assistant.provider || "unknown"}，model=${assistant.model || "unknown"}）。`;
+              lastModelErrorRef.current = message;
+              setLastModelError(message);
+            } else if (stopReason === "length") {
+              const message = `模型回复达到单次输出长度上限而提前停止（provider=${assistant.provider || "unknown"}，model=${assistant.model || "unknown"}，stopReason=length）。回复可能不完整，可发送“继续”要求续写。`;
+              lastModelErrorRef.current = message;
+              setLastModelError(message);
+            } else if (stopReason && stopReason !== "stop" && stopReason !== "toolUse" && stopReason !== "aborted") {
+              const message = `模型以非正常原因提前停止（provider=${assistant.provider || "unknown"}，model=${assistant.model || "unknown"}，stopReason=${stopReason}）。回复可能不完整。`;
+              lastModelErrorRef.current = message;
+              setLastModelError(message);
+            }
+          }
           const normalized = normalizeVisibleUserMessage(normalizeCompletedMessage(completed));
           setMessages((prev) => {
             // We optimistically append the user's prompt in handleSend/handleFollowUp/handleBuildPlan,
@@ -1421,7 +1549,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase((prev) => {
           if (prev?.kind !== "running_tools") return prev;
           const tools = prev.tools.filter((t) => t.id !== id);
-          if (tools.length === 0) return { kind: "waiting_model", reason: "after_tool" };
+          if (tools.length === 0) {
+            // 工具刚结束、正在等下一轮模型：重置内容空闲计时，避免把正常 TTFT 当成停滞。
+            lastContentChangedAtRef.current = Date.now();
+            lastAgentEventAtRef.current = Date.now();
+            return { kind: "waiting_model", reason: "after_tool" };
+          }
           return { kind: "running_tools", tools };
         });
         break;
@@ -1431,7 +1564,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // false-positive stale-detection and a conflicting auto-continue.
         watchdogStaleRecoveriesRef.current = 0;
         lastContentChangedAtRef.current = Date.now();
-        setRetryInfo({
+        const nextRetryInfo: RetryInfo = {
           attempt: event.attempt as number,
           maxAttempts: event.maxAttempts as number,
           delayMs: event.delayMs as number | undefined,
@@ -1439,25 +1572,50 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           errorCode: event.errorCode as string | undefined,
           userMessage: event.userMessage as string | undefined,
           suggestedAction: event.suggestedAction as string | undefined,
-        });
+        };
+        retryInfoRef.current = nextRetryInfo;
+        setRetryInfo(nextRetryInfo);
         break;
       case "auto_retry_end": {
         const retryEndEvent = event as { success?: boolean; finalError?: string };
         if (retryEndEvent.success === false) {
-          // Retries exhausted — finalize the stop.
-          if (retryEndEvent.finalError) {
-            lastModelErrorRef.current = retryEndEvent.finalError;
-            setLastModelError(retryEndEvent.finalError);
-          }
+          const currentRetryInfo = retryInfoRef.current;
+          const retrySummary = currentRetryInfo
+            ? `${currentRetryInfo.attempt}/${currentRetryInfo.maxAttempts}`
+            : "已耗尽";
+          const finalError = retryEndEvent.finalError
+            ?? currentRetryInfo?.errorMessage
+            ?? "模型调用失败";
+          const terminalMessage = `自动重试失败（${retrySummary}）：${finalError}`;
+          lastModelErrorRef.current = terminalMessage;
+          setLastModelError(terminalMessage);
           if (agentRunningRef.current) {
             agentRunningRef.current = false;
             setAgentRunning(false);
             setAgentPhase(null);
             dispatch({ type: "end" });
           }
-          // Reset autoContinueSentRef so watchdog can try again if needed
-          autoContinueSentRef.current = false;
+
+          // 原路重试耗尽后，自动执行一次与用户“继续”等价的恢复。
+          // 使用与看门狗共享的每回合预算，避免上游持续故障时无限循环。
+          const sid = sessionIdRef.current;
+          if (
+            sid
+            && autoRecoveryMode !== "off"
+            && !retryExhaustedRecoveryUsedRef.current
+            && !autoContinueSentRef.current
+            && !autoContinueInProgressRef.current
+            && !isCompactingRef.current
+            && agentPhaseRef.current?.kind !== "running_tools"
+            && autoRecoveryAttemptsRef.current < MAX_AUTO_RECOVERIES_PER_TURN
+          ) {
+            retryExhaustedRecoveryUsedRef.current = true;
+            autoRecoveryAttemptsRef.current += 1;
+            console.log("[Retry-Recovery] retries exhausted; continuing automatically (attempt %d/%d)", autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES_PER_TURN);
+            void executeRecoveryRef.current(sid, autoRecoveryAttemptsRef.current, "retry_exhausted");
+          }
         }
+        retryInfoRef.current = null;
         setRetryInfo(null);
         break;
       }
@@ -1465,14 +1623,68 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "compaction_start":
         setIsCompacting(true);
         setCompactError(null);
+        setCompactionProgress({
+          phase: "preparing",
+          message: "压缩已开始…",
+          updatedAt: Date.now(),
+        });
         break;
+      case "compaction_progress": {
+        const progressEvent = event as {
+          phase?: import("@/lib/compaction-ui").CompactionProgressPhase;
+          message?: string;
+          batchIndex?: number;
+          batchTotal?: number;
+          tokensBefore?: number;
+          tokensAfter?: number;
+          model?: { provider?: string; modelId?: string };
+        };
+        if (progressEvent.phase && progressEvent.message) {
+          setIsCompacting(true);
+          setCompactionProgress({
+            phase: progressEvent.phase,
+            message: progressEvent.message,
+            batchIndex: progressEvent.batchIndex,
+            batchTotal: progressEvent.batchTotal,
+            tokensBefore: progressEvent.tokensBefore,
+            tokensAfter: progressEvent.tokensAfter,
+            model: progressEvent.model?.provider && progressEvent.model?.modelId
+              ? { provider: progressEvent.model.provider, modelId: progressEvent.model.modelId }
+              : undefined,
+            updatedAt: Date.now(),
+          });
+        }
+        break;
+      }
       case "auto_compaction_end":
       case "compaction_end":
         setIsCompacting(false);
         if (event.errorMessage) {
           setCompactError(event.errorMessage as string);
-        } else if (!event.aborted) {
+          setCompactionProgress(null);
+        } else if (event.aborted) {
+          setCompactionProgress({
+            phase: "done",
+            message: "压缩已中止",
+            updatedAt: Date.now(),
+          });
+          // 短暂保留「已中止」提示后清掉。
+          window.setTimeout(() => {
+            setCompactionProgress((prev) => (prev?.message === "压缩已中止" ? null : prev));
+          }, 1500);
+        } else {
           if (sessionIdRef.current) loadSession(sessionIdRef.current);
+          // done 文案通常已由 compaction_progress 推送；若没有则补一条。
+          setCompactionProgress((prev) => prev?.phase === "done"
+            ? prev
+            : {
+                phase: "done",
+                message: "压缩完成",
+                updatedAt: Date.now(),
+              });
+          window.setTimeout(() => {
+            setCompactionProgress((prev) => (prev?.phase === "done" ? null : prev));
+          }, 2500);
         }
         break;
     }
@@ -1485,11 +1697,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (agentRunningRef.current) return;
     // Set the ref immediately to prevent duplicate sends before React re-renders
     agentRunningRef.current = true;
+    terminalTurnEndedSessionIdRef.current = null;
     pendingAbortOnSessionReadyRef.current = false;
     turnIdRef.current += 1;
     // Explicitly clear recovery state — a user-initiated send always starts a fresh turn
     autoContinueSentRef.current = false;
     autoContinueInProgressRef.current = false;
+    retryExhaustedRecoveryUsedRef.current = false;
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
     awaitingAgentStartRef.current = true;
@@ -1639,8 +1853,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      cancelPendingMessageUpdate();
     }
-  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, connectEvents, ensureEventsConnected, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
+  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, cancelPendingMessageUpdate, connectEvents, ensureEventsConnected, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
 
   const forceStopLocally = useCallback((opts?: { keepPendingAbort?: boolean }) => {
     clearAwaitingAgentStartGuard();
@@ -1655,8 +1870,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     stopSubagentLiveRefresh();
     agentRunningRef.current = false;
     setAgentRunning(false);
+    setIsCompacting(false);
+    setCompactionProgress(null);
     setAgentPhase(null);
     setStallLevel(null);
+    retryInfoRef.current = null;
     setRetryInfo(null);
     dispatch({ type: "end" });
   }, [clearAwaitingAgentStartGuard, stopSubagentLiveRefresh]);
@@ -1677,11 +1895,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoContinueInProgressRef.current = false;
     setAgentPhase({ kind: "stopping" });
     setStallLevel(null);
+    retryInfoRef.current = null;
     setRetryInfo(null);
+    // 压缩窗口与普通回合共用停止按钮：后端 abort 已覆盖 abortCompaction，
+    // 这里再发一次是兜底，并立刻清掉本地「正在压缩…」文案。
+    if (isCompactingRef.current) {
+      setIsCompacting(false);
+      setCompactionProgress(null);
+      void sendAgentCommand(sid, { type: "abort_compaction" }).catch(() => {});
+    }
     try {
       const result = await sendAgentCommand<{ stopped?: boolean }>(
         sid,
-        { type: "abort" },
+        { type: "abort", source: "user", reason: "stop_button" },
         { timeoutMs: 3_000 },
       );
       if (result?.stopped) {
@@ -1762,16 +1988,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew, setNewSessionModel]);
 
-  const handleCompact = useCallback(async () => {
+  const handleCompact = useCallback(async (opts?: { provider?: string; modelId?: string }) => {
     const sid = sessionIdRef.current;
     if (!sid || isCompacting) return;
     setIsCompacting(true);
     setCompactError(null);
     try {
-      await sendAgentCommand(sid, { type: "compact" });
-      await loadSession(sid, true);
+      await sendAgentCommand(sid, {
+        type: "compact",
+        ...(opts?.provider && opts?.modelId
+          ? { provider: opts.provider, modelId: opts.modelId }
+          : {}),
+      });
+      // compaction_end 的 SSE handler 会刷新消息；这里不再把重复的 session 读取
+      // 放在用户发送的关键路径上。SSE 断开时仍做一次非阻塞兜底刷新。
+      void loadSession(sid, true);
     } catch (e) {
-      setCompactError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setCompactError(message);
+      throw e instanceof Error ? e : new Error(message);
     } finally {
       setIsCompacting(false);
     }
@@ -1820,9 +2055,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       clientMessageId,
       timestamp: Date.now(),
     } as AgentMessage]);
-    // Explicitly clear recovery state — a user-initiated follow_up always starts a fresh turn
     autoContinueSentRef.current = false;
     autoContinueInProgressRef.current = false;
+    retryExhaustedRecoveryUsedRef.current = false;
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
     const piImages = images?.map((img) => ({
@@ -1854,7 +2089,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   //
   // Backend handles: abort + settle + optional set_model + fresh prompt turn.
   // This replaces the old manual abort + while-wait + sleep(150) + follow_up.
-  const executeRecovery = useCallback(async (sid: string, attempt = 1) => {
+  const executeRecovery = useCallback(async (
+    sid: string,
+    attempt = 1,
+    source: "watchdog" | "stale_warning" | "retry_exhausted" | "manual" | "ttft" = "watchdog",
+  ) => {
     if (autoContinueSentRef.current) return;
     autoContinueSentRef.current = true;
     setStallLevel("recovering");
@@ -1871,6 +2110,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // turn. The continue message is echoed back via message_end/user SSE.
       await sendAgentCommand(sid, {
         type: "recover",
+        source,
+        reason: source === "retry_exhausted" ? "auto_retry_exhausted" : source,
         message: AUTO_CONTINUE_MESSAGE,
         ...(fallbackModel ? { provider: fallbackModel.provider, modelId: fallbackModel.modelId } : {}),
       });
@@ -1941,15 +2182,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const isAggressive = autoRecoveryMode === "aggressive";
     const baseWarningMs = isAggressive ? 30_000 : 60_000;
     const baseReconnectMs = isAggressive ? 60_000 : 120_000;
+    // 激进按钮固定 120s 自动续跑；不再被思考级别 xhigh/high 放大。
     const baseRecoverMs = isAggressive ? 120_000 : 0; // 0 = never auto-recover in conservative
 
-    // Scale thresholds up for high/xhigh thinking (reasoning models)
+    // warning / reconnect 仍可按思考级别略放宽；recoverMs 与按钮绑定保持 120s。
     const thinkingMultiplier =
       thinkingLevel === "xhigh" ? 2.0 :
       thinkingLevel === "high" ? 1.5 : 1.0;
     const warningMs = Math.round(baseWarningMs * thinkingMultiplier);
     const reconnectMs = Math.round(baseReconnectMs * thinkingMultiplier);
-    const recoverMs = baseRecoverMs > 0 ? Math.round(baseRecoverMs * thinkingMultiplier) : 0;
+    const recoverMs = baseRecoverMs;
 
     const CHECK_INTERVAL_MS = 5_000;
 
@@ -1957,11 +2199,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // follow_up with a clear continue instruction so the model resumes
     // without duplicating completed content.
     const recoverWithContinue = async (sid: string) => {
-      await executeRecovery(sid, autoRecoveryAttemptsRef.current);
+      await executeRecovery(sid, autoRecoveryAttemptsRef.current, "watchdog");
     };
 
     // Session already finished — just reload and stop gracefully
-    const recoverStop = async (sid: string) => {
+    const recoverStop = async (sid: string, diagnostic: string) => {
       await loadSession(sid);
       agentRunningRef.current = false;
       setAgentRunning(false);
@@ -1969,6 +2211,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setStallLevel(null);
       dispatch({ type: "end" });
       autoContinueSentRef.current = false;
+      lastModelErrorRef.current = diagnostic;
+      setLastModelError(diagnostic);
     };
 
     const id = setInterval(async () => {
@@ -2033,7 +2277,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // waiting-for-model or between tool-execution batches.
         if (!d.running || d.status?.isRunning === false) {
           console.log('[Watchdog] Backend stopped, calling recoverStop');
-          await recoverStop(sid);
+          await recoverStop(
+            sid,
+            `检测到回复停滞后，后端回合已停止，但前端没有收到终止事件（session=${sid}，lastEventType=${status?.lastEventType ?? "unknown"}，eventIdleMs=${status?.eventIdleMs ?? "unknown"}，contentIdleMs=${status?.contentIdleMs ?? "unknown"}）。若回复不完整可发送“继续”。`,
+          );
           return;
         }
 
@@ -2048,7 +2295,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           && status?.isStreaming !== true
         ) {
           console.log('[Watchdog] Assistant message completed without agent_end, stopping locally');
-          await recoverStop(sid);
+          await recoverStop(
+            sid,
+            `模型消息已经结束，但服务端没有发送回合终止事件（session=${sid}，lastEventType=message_end，contentIdleMs=${status?.contentIdleMs ?? "unknown"}）。已在前端解除运行状态；若回复不完整可发送“继续”。`,
+          );
           return;
         }
 
@@ -2075,7 +2325,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (recoverMs > 0 && contentIdleMs >= recoverMs && !autoContinueSentRef.current) {
           if (autoRecoveryAttemptsRef.current >= MAX_AUTO_RECOVERIES_PER_TURN) {
             console.log('[Watchdog] Max auto-recoveries (%d) reached, stopping', MAX_AUTO_RECOVERIES_PER_TURN);
-            await recoverStop(sid);
+            await recoverStop(
+              sid,
+              `模型响应持续停滞，自动恢复已达到上限（${MAX_AUTO_RECOVERIES_PER_TURN} 次，session=${sid}，eventIdleMs=${status?.eventIdleMs ?? "unknown"}，contentIdleMs=${status?.contentIdleMs ?? contentIdleMs}）。已停止自动续写，请检查模型服务或手动发送“继续”。`,
+            );
             return;
           }
           autoRecoveryAttemptsRef.current += 1;
@@ -2114,11 +2367,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (retryInfo) return;
 
       const isAggressive = autoRecoveryMode === "aggressive";
-      const baseRecoverMs = isAggressive ? 120_000 : 0;
-      const thinkingMultiplier =
-        thinkingLevel === "xhigh" ? 2.0 :
-        thinkingLevel === "high" ? 1.5 : 1.0;
-      const recoverMs = baseRecoverMs > 0 ? Math.round(baseRecoverMs * thinkingMultiplier) : 0;
+      // 与主 watchdog 一致：激进 = 固定 120s，不随思考级别放大。
+      const recoverMs = isAggressive ? 120_000 : 0;
       if (recoverMs <= 0) return;
 
       const contentIdleMs = Date.now() - lastContentChangedAtRef.current;
@@ -2133,11 +2383,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
       autoRecoveryAttemptsRef.current += 1;
       console.log('[Watchdog] visibilitychange recovery (attempt %d/%d), contentIdleMs=%d', autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES_PER_TURN, contentIdleMs);
-      void executeRecovery(visSid, autoRecoveryAttemptsRef.current);
+      void executeRecovery(visSid, autoRecoveryAttemptsRef.current, "watchdog");
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);
-  }, [autoRecoveryMode, thinkingLevel, retryInfo, executeRecovery]);
+  }, [autoRecoveryMode, retryInfo, executeRecovery]);
 
   // Manual recovery trigger — user clicks "中断并继续" when stall warning shown
   const handleAutoRecover = useCallback(async () => {
@@ -2147,7 +2397,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Reset auto-recovery counter — a manual user action indicates the user
     // is actively engaged and the watchdog should get a fresh allowance.
     autoRecoveryAttemptsRef.current = 0;
-    await executeRecovery(sid, 1);
+    await executeRecovery(sid, 1, "manual");
   }, [executeRecovery]);
 
   // User dismissed the stall warning — suppress further escalation this turn
@@ -2156,11 +2406,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setStallLevel(null);
   }, []);
 
-  // Persist auto-recovery mode to localStorage
+  // Persist auto-recovery mode to localStorage，并同步到后端（影响 TTFT 120s）。
   const handleAutoRecoveryModeChange = useCallback((mode: AutoRecoveryMode) => {
+    autoRecoveryModeRef.current = mode;
     setAutoRecoveryModeState(mode);
     if (typeof window !== "undefined") {
       window.localStorage.setItem("deerhux.auto-recovery-mode", mode);
+    }
+    const sid = sessionIdRef.current;
+    if (sid) {
+      void sendAgentCommand(sid, { type: "set_auto_recovery_mode", mode }).catch((e) => {
+        console.error("Failed to sync auto recovery mode:", e);
+      });
     }
   }, []);
 
@@ -2186,8 +2443,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     try {
       await sendAgentCommand(sid, { type: "abort_compaction" });
+      setCompactionProgress({
+        phase: "done",
+        message: "正在停止压缩…",
+        updatedAt: Date.now(),
+      });
     } catch (e) {
       console.error("Failed to abort compaction:", e);
+      setCompactError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
@@ -2324,6 +2587,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
+    cancelPendingMessageUpdate();
+    lastEventSeqRef.current = 0;
     // Abort any inflight background loadSession / polling requests from the
     // previous session so they don't keep hitting the backend (and racing
     // this new session's requests). A fresh controller is installed for the
@@ -2354,6 +2619,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     lastModelErrorRef.current = null;
     setLastModelError(null);
     receivedAssistantMessageRef.current = false;
+    retryInfoRef.current = null;
     setRetryInfo(null);
     setContextUsage(null);
     setSystemPrompt(null);
@@ -2411,10 +2677,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       cancelled = true;
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      cancelPendingMessageUpdate();
       activeSubagentToolIds.clear();
       stopSubagentLiveRefresh();
     };
-  }, [connectEvents, loadRecentMessages, loadSession, loadSessionState, loadTools, activeTabId, newSessionCwd, activeSessionId, stopSubagentLiveRefresh]);
+  }, [cancelPendingMessageUpdate, connectEvents, loadRecentMessages, loadSession, loadSessionState, loadTools, activeTabId, newSessionCwd, activeSessionId, stopSubagentLiveRefresh]);
 
   useEffect(() => {
     entryIdsRef.current = entryIds;
@@ -2544,7 +2811,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     data, loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, systemPrompt: systemPrompt ?? lastSystemPromptRef.current, forkingEntryId,
-    isCompacting, compactError, lastModelError, currentModel, displayModel, sessionStats,
+    isCompacting, compactionProgress, clearCompactionProgress: () => setCompactionProgress(null), compactError, lastModelError, currentModel, displayModel, sessionStats,
     agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,
     subagentEnabled,
     isNew,

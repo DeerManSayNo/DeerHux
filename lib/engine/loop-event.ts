@@ -144,6 +144,17 @@ export type LoopEvent =
       type: "compaction_start";
       reason: "manual" | "threshold" | "overflow";
     }
+  /** 压缩过程分步进度（准备 / 分批摘要 / 归档 / 落盘），供 UI 实时展示。 */
+  | {
+      type: "compaction_progress";
+      phase: "preparing" | "summarizing" | "archiving" | "applying" | "done";
+      message: string;
+      batchIndex?: number;
+      batchTotal?: number;
+      tokensBefore?: number;
+      tokensAfter?: number;
+      model?: { provider: string; modelId: string };
+    }
   | {
       type: "compaction_end";
       reason: "manual" | "threshold" | "overflow";

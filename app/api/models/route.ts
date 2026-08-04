@@ -103,7 +103,7 @@ export async function GET() {
     const available = registry
       .getAvailable()
       .filter((m: { id: string; provider: string }) => configuredModels.has(`${m.provider}:${m.id}`));
-    const mergedModels = new Map(configuredModels);
+    const mergedModels = new Map<string, ConfiguredModel>();
     for (const m of available) {
       const key = `${m.provider}:${m.id}`;
       mergedModels.set(key, { ...m, name: m.name || m.id });
@@ -111,7 +111,12 @@ export async function GET() {
       thinkingLevels[key] = getSupportedThinkingLevels(m);
       if (m.thinkingLevelMap) thinkingLevelMaps[key] = m.thinkingLevelMap;
     }
-    for (const [key, m] of mergedModels) {
+    // models.json 可能含无效条目导致 registry 整文件加载失败；UI 只能展示
+    // registry 实际能 resolve 的模型，避免选中后 set_model 100% 报 500。
+    for (const [key, m] of configuredModels) {
+      if (mergedModels.has(key)) continue;
+      if (!registry.find(m.provider, m.id)) continue;
+      mergedModels.set(key, m);
       nameMap.set(key, m.name);
       if (m.thinkingLevelMap && !thinkingLevelMaps[key]) thinkingLevelMaps[key] = m.thinkingLevelMap;
     }
@@ -125,7 +130,7 @@ export async function GET() {
     const settings = SettingsManager.create(process.cwd(), agentDir);
     const provider = settings.getDefaultProvider();
     const modelId = settings.getDefaultModel();
-    if (provider && modelId && configuredModels.has(`${provider}:${modelId}`)) {
+    if (provider && modelId && registry.find(provider, modelId)) {
       defaultModel = { provider, modelId };
     }
   } catch { /* return empty */ }

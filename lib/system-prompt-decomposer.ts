@@ -120,7 +120,7 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
 const DEFAULT_SECTION_CONTENT: Record<string, string> = {
   identity: "You are an expert coding assistant operating inside DeerHux, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
   tools: "Available tools:\n[自动生成：根据当前会话启用的工具生成工具列表]",
-  guidelines: "Guidelines:\n- 回答和思考过程（thinking）全部使用中文；言简意赅，不要啰嗦\n- 处理文件时清晰显示文件路径",
+  guidelines: "Guidelines:\n- 回答和思考过程（thinking）全部使用中文；言简意赅，不要啰嗦\n- 处理文件时清晰显示文件路径\n- Dynamic Context Discovery：会话压缩后摘要可能不够细；完整历史在 `~/.deerhux/agent/context/<sessionId>/history/`，长工具输出在同目录 `tool-outputs/`。摘要含 Full transcript / Full output 路径时，用 grep/read/bash（如 tail）按需取回细节，不要猜测",
   mode_control: getDefaultModePromptSectionContent(),
   project_context: "<project_context>\n[自动生成：来自 AGENTS.md 等项目上下文文件]\n</project_context>",
   skills: "<available_skills>\n[自动生成：当前可用 skills 列表]\n</available_skills>",

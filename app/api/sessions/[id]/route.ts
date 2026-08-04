@@ -154,6 +154,12 @@ export async function DELETE(
 
     getRpcSession(id)?.destroy();
     unlinkSync(filePath);
+    try {
+      const { deleteContextArchive } = await import("@/lib/engine/context-archive");
+      deleteContextArchive(id);
+    } catch {
+      /* ignore archive cleanup errors */
+    }
     invalidateSessionPathCache(id);
     invalidateSessionFileCache(filePath);
     forceRefreshSessionList();

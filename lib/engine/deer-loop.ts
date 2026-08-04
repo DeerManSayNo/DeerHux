@@ -14,6 +14,7 @@
 import type {
   Api,
   AssistantMessage,
+  AssistantMessageEvent,
   AssistantMessageEventStream,
   Context,
   Message,
@@ -24,6 +25,7 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai";
 import type {
   AgentSessionEvent,
   SessionManager,
@@ -40,6 +42,15 @@ import type { AgentEnginePort } from "./port.ts";
 import type { AgentMessage, CompactionResult, LoopEvent, QueueMode } from "./loop-event.ts";
 import { ToolRegistry, type AnyToolDefinition } from "./tool-registry.ts";
 import { ToolExecutor, toPiAiTool, type ToolExecOutput } from "./tool-executor.ts";
+import {
+  appendHistoryArchiveFooter,
+  newCompactionArchiveId,
+  writeHistoryTranscript,
+} from "./context-archive.ts";
+import {
+  computeCompactionBatchTokenLimit,
+  partitionCompactionItems,
+} from "./compaction-planner.ts";
 import {
   createMinimalExtensionContext,
 } from "./extension-context.ts";
@@ -60,6 +71,7 @@ import {
   type NormalizedLlmError,
 } from "../llm-gateway";
 import {
+  incrementLlmMetric,
   recordLlmError,
   recordLlmRequest,
   recordLlmSuccess,
@@ -93,6 +105,63 @@ export type StreamFn = (
   context: Context,
   options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
+
+const HISTORICAL_USER_IMAGE_PLACEHOLDER = "(historical image omitted; it was already provided in an earlier turn)";
+const HISTORICAL_TOOL_IMAGE_PLACEHOLDER = "(historical tool image omitted; it was already provided in an earlier turn)";
+
+function replaceHistoricalImages(content: unknown[], placeholder: string): unknown[] {
+  const next: unknown[] = [];
+  let previousWasPlaceholder = false;
+  for (const block of content) {
+    const isImage = typeof block === "object"
+      && block !== null
+      && "type" in block
+      && block.type === "image";
+    if (isImage) {
+      if (!previousWasPlaceholder) next.push({ type: "text", text: placeholder });
+      previousWasPlaceholder = true;
+      continue;
+    }
+    next.push(block);
+    previousWasPlaceholder = false;
+  }
+  return next;
+}
+
+/**
+ * 原图只参与上传它的当前 turn。进入后续 turn 后，历史消息仅保留文本占位，
+ * 避免切换模型时把已处理过的图片再次发送给新 provider。
+ *
+ * 不修改持久 transcript：UI 仍可展示原图；当前 turn 新上传的图片和工具图片
+ * 也会保留，以便本轮模型实际读取。
+ */
+function omitImagesBeforeCurrentTurn(
+  messages: readonly AgentMessage[],
+  currentTurnStartIndex: number,
+): AgentMessage[] {
+  return messages.map((message, index) => {
+    if (index >= currentTurnStartIndex) return message;
+    if (message.role !== "user" && message.role !== "toolResult") return message;
+
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) return message;
+    const hasImage = content.some((block) => (
+      typeof block === "object"
+      && block !== null
+      && "type" in block
+      && block.type === "image"
+    ));
+    if (!hasImage) return message;
+
+    const placeholder = message.role === "user"
+      ? HISTORICAL_USER_IMAGE_PLACEHOLDER
+      : HISTORICAL_TOOL_IMAGE_PLACEHOLDER;
+    return {
+      ...message,
+      content: replaceHistoricalImages(content, placeholder),
+    } as unknown as AgentMessage;
+  });
+}
 
 export interface DeerLoopModelRegistry {
   find(provider: string, modelId: string): AnyModel | undefined;
@@ -172,6 +241,57 @@ function extractText(message: { content?: unknown }): string {
     }
   }
   return text;
+}
+
+/** 将模型的非正常停止原因转换成可直接展示的诊断信息。 */
+function describeUnexpectedStop(
+  stopReason: string | undefined,
+  model: { provider: string; id: string },
+  message: AssistantMessage | null,
+): string | undefined {
+  if (!stopReason || stopReason === "stop" || stopReason === "toolUse" || stopReason === "aborted") {
+    return undefined;
+  }
+  const outputChars = message ? extractText(message).length : 0;
+  const context = `provider=${model.provider}, model=${model.id}, stopReason=${stopReason}, 已输出字符=${outputChars}`;
+  if (stopReason === "length") {
+    return `模型回复因达到单次输出长度上限而提前停止（${context}）。回复可能不完整，可发送“继续”要求续写。`;
+  }
+  if (stopReason === "error") {
+    return message?.errorMessage
+      ? `${message.errorMessage}（${context}）`
+      : `模型以错误状态结束，但上游没有返回具体错误信息（${context}）。`;
+  }
+  return `模型以非正常原因提前停止（${context}）。回复可能不完整。`;
+}
+
+/** stop 成功但 content 全空 → 视为失败（避免 UI 静默空白气泡）。 */
+function describeEmptySuccessfulStop(
+  stopReason: string | undefined,
+  message: AssistantMessage | null,
+  model: { provider: string; id: string },
+): string | undefined {
+  if (stopReason && stopReason !== "stop") return undefined;
+  if (!message) {
+    return `模型未返回任何内容（provider=${model.provider}, model=${model.id}）。可发送“继续”重试。`;
+  }
+  const content = message.content;
+  const hasBlocks = Array.isArray(content) && content.length > 0;
+  if (hasBlocks) return undefined;
+  const usage = message.usage;
+  const zeroUsage = !usage
+    || ((usage.input ?? 0) === 0
+      && (usage.output ?? 0) === 0
+      && (usage.cacheRead ?? 0) === 0
+      && (usage.cacheWrite ?? 0) === 0);
+  return [
+    "模型返回了空回复",
+    `provider=${model.provider}`,
+    `model=${model.id}`,
+    `stopReason=${stopReason || "stop"}`,
+    zeroUsage ? "usage 全为 0（常见于上下文过大被中转站静默丢弃）" : "content 为空",
+    "可压缩上下文后发送“继续”，或切换模型重试。",
+  ].join("；");
 }
 
 /**
@@ -445,12 +565,24 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** ★ M4：是否启用自动重试。installRetryHardening 后默认 true；setAutoRetryEnabled 可运行时关闭。 */
   private _autoRetryEnabled = false;
 
+  /**
+   * 前端「激进/保守/关闭」自动续跑模式（由 set_auto_recovery_mode 同步）。
+   * 默认 aggressive，与 ChatInput 激进按钮的 localStorage 默认一致。
+   */
+  private _autoRecoveryMode: "off" | "conservative" | "aggressive" = "aggressive";
+
   /** ★ M6：是否正在进行 compact（互斥标记）。 */
   private _isCompacting = false;
   /** ★ M6：compact 的独立 AbortController（与 prompt 的 abortController 分离）。 */
   private compactionAbortController: AbortController | null = null;
   /** ★ M6：是否启用自动压缩。默认开启，在每个新回合前检查安全阈值。 */
   private _autoCompactionEnabled = true;
+  /**
+   * 用户/系统请求中止当前回合。覆盖「自动压缩尚未创建 abortController」窗口：
+   * compactBeforePromptIfNeeded 发生在 `_isRunning=true` 之前，普通 abort() 过去会空返回，
+   * 导致停止按钮对「正在压缩上下文…」无效。
+   */
+  private _abortRequested = false;
 
   // ─── ★ M5：steering / followUp 队列 ─────────────────────
   /** steering 队列：用户在 turn 进行中「插嘴补充」（steer 命令）。
@@ -505,9 +637,9 @@ export class DeerLoopEngine implements AgentEnginePort {
       thinkingLevel: this._thinkingLevel ?? "off",
     };
 
-    // M2：初始化工具注册表与执行器。
+    // M2：初始化工具注册表与执行器（executor 带 sessionId，用于长输出 spill）。
     this.registry = new ToolRegistry();
-    this.toolExecutor = new ToolExecutor(this.registry);
+    this.toolExecutor = new ToolExecutor(this.registry, { sessionId: this._sessionId });
     this._maxToolRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     // M4：可选注入自定义重试策略（测试用极小 delay/settle）。未传时为 null，
     // 等 installRetryHardening() 安装 DefaultRetryPolicy（生产路径）。
@@ -588,11 +720,24 @@ export class DeerLoopEngine implements AgentEnginePort {
     let agentErrorCode: NormalizedLlmError["code"] | undefined; // 记录标准化错误码
 
     try {
+      // 新回合开始时清掉上一轮残留的中止请求；abort() 可能在上一回合结束后才到达。
+      this._abortRequested = false;
+
       // ★ R9：进入 prompt 立即发射 agent_start（幂等；内层若重复 emit 也安全）
       guard.ensureAgentStart();
 
       // 在写入下一条用户消息前先压缩旧历史，避免请求抵达模型时已经超过上下文窗口。
       await this.compactBeforePromptIfNeeded();
+
+      // 自动压缩阶段用户点了停止：不要再写入 user 消息、不要启动 LLM 回合。
+      if (this._abortRequested) {
+        agentError = "aborted";
+        return;
+      }
+
+      // 记录当前 turn 在 transcript 中的边界。此前的图片已经参与过旧 turn，
+      // 后续构造 LLM context 时不再重复发送；本轮新图片仍正常发送。
+      const currentTurnStartIndex = this._messages.length;
 
       // 1. 把用户输入包成 UserMessage，追加到 transcript。
       const userContent = this.buildUserContent(text, options?.images);
@@ -647,7 +792,9 @@ export class DeerLoopEngine implements AgentEnginePort {
           const activeTools = this.registry.getActive();
           const context: Context = {
             systemPrompt: this._baseSystemPrompt || undefined,
-            messages: convertToLlm(this._messages as never) as Message[],
+            messages: convertToLlm(
+              omitImagesBeforeCurrentTurn(this._messages, currentTurnStartIndex) as never,
+            ) as Message[],
             ...(activeTools.length > 0
               ? { tools: activeTools.map(toPiAiTool) }
               : {}),
@@ -668,11 +815,16 @@ export class DeerLoopEngine implements AgentEnginePort {
             }
             // ★ M4 修复（问题 #3）：abort 时不 push endMessage 到 transcript（aborted 不算有效对话）。
             //   error（不可重试/全部重试失败）仍 push（保留错误上下文，下次 prompt LLM 能看到）。
+            //   若 abort 发生在工具结果之后，外层 finally 会补一条可展示的失败消息，避免 UI 静默。
             if (!consumed.aborted) {
               this._messages.push(consumed.endMessage);
               this.persistMessage(consumed.endMessage);
             }
-            if (consumed.errorMessage) agentError = consumed.errorMessage;
+            if (consumed.aborted) {
+              agentError = "aborted";
+            } else if (consumed.errorMessage) {
+              agentError = consumed.errorMessage;
+            }
             if (consumed.normalizedError) agentErrorCode = consumed.normalizedError.code;
             break;
           }
@@ -799,6 +951,17 @@ export class DeerLoopEngine implements AgentEnginePort {
         this.abortController = null;
         // ★ R9：agent_end 由外层 guard.ensureAgentEnd 统一发射，此处不再重复
       }
+    } catch (err) {
+      // 覆盖进入主循环前的异常（例如自动压缩、上下文构造或用户消息持久化）。
+      // 这些异常过去会先由 finally 发出一个“正常”agent_end，再由 wrapper 异步补错，
+      // 容易让前端先静默结束。统一在唯一的终止事件中附带完整诊断。
+      if (this.isAbortError(err)) {
+        agentError = "aborted";
+      } else {
+        const cause = err instanceof Error ? err.message : String(err);
+        agentError = `Agent 回合异常终止（provider=${this._model.provider}，model=${this._model.id}，stage=prompt_setup_or_loop）：${cause}`;
+        agentErrorCode = classifyLlmError(err).code;
+      }
     } finally {
       // ★ R9：守卫兜底——保证 agent_end 一定发射（若内部已发射则幂等跳过）。
       //   无论 prompt 正常完成、abort、error、或 compactBeforePromptIfNeeded 抛异常，
@@ -808,19 +971,28 @@ export class DeerLoopEngine implements AgentEnginePort {
         this._isRunning = false;
         this.abortController = null;
 
+        // 工具跑完后若下一轮 LLM 失败/中止且未落盘错误消息，会话会停在 toolResult，
+        // 前端又因本回合已收到过 tool-call assistant 而不再显示“模型响应失败”。
+        // 这里补一条可持久化、可展示的失败 assistant，避免静默空回复。
+        const failureMessage = this.persistIncompleteTurnFailure(agentError);
+
         const agentEndEvent: LoopEvent = {
           type: "agent_end",
           messages: [...this._messages],
           willRetry: false,
         };
-        if (agentError && agentError !== "aborted") {
-          (agentEndEvent as { error?: string }).error = agentError;
+        const endError =
+          (agentError && agentError !== "aborted" ? agentError : undefined)
+          ?? failureMessage;
+        if (endError) {
+          (agentEndEvent as { error?: string }).error = endError;
         }
         if (agentErrorCode) {
           (agentEndEvent as { errorCode?: NormalizedLlmError["code"] }).errorCode = agentErrorCode;
         }
-        this.emit(agentEndEvent);
-        guard.ensureAgentEnd();
+        // 通过 guard 发射并同时标记已结束，避免先 emit 后 ensureAgentEnd()
+        // 再补出一个缺少 messages/willRetry/error 的重复 agent_end。
+        guard.ensureAgentEnd(agentEndEvent);
       }
 
       // ★ R8：释放 mutex（无论成功/失败/abort，finally 确保锁一定释放）
@@ -891,24 +1063,61 @@ export class DeerLoopEngine implements AgentEnginePort {
     let permit: LlmPermit | null = null;
     let meta: LlmRequestMeta | null = null;
 
-    // ★ TTFT（首事件超时）：独立于用户 abortController，用于在中转站高峰排队、
-    //   HTTP 已建连但迟迟不返回首个流事件时主动取消本次上游请求。触发时
-    //   aborted=false（非用户主动停止），归类为 UPSTREAM_TTFT_TIMEOUT，由
-    //   consumeStreamWithRetry + RetryPolicy 走自动退避重试。
+    // ★ 流停滞超时（TTFT / idle）：独立于用户 abortController。
+    //   - 非激进：经典 TTFT——仅等首个流事件；收到后取消计时。
+    //   - 激进：stream idle——任意 120s 无新事件即打断并重试（含工具后下一轮、
+    //     以及「已有首包但后续卡住」）。不能只依赖上游尊重 AbortSignal：
+    //     实测 Hajimi 等中转站会忽略 signal，硬等到 ~300s 才以 terminated 断开，
+    //     被误分类为 STREAM_INTERRUPTED，表现为「总是约 300s 才重试」。
     let ttftController: AbortController | null = null;
     let ttftTimer: ReturnType<typeof setTimeout> | undefined;
-    let ttftCancelled = false;
-    const cancelTtft = (): void => {
-      ttftCancelled = true;
+    const aggressiveIdle = this._autoRecoveryMode === "aggressive";
+    const cancelStallTimer = (): void => {
       if (ttftTimer) {
         clearTimeout(ttftTimer);
         ttftTimer = undefined;
       }
     };
+    const scheduleStallTimer = (timeoutMs: number): void => {
+      cancelStallTimer();
+      ttftTimer = setTimeout(() => {
+        if (ttftController && !ttftController.signal.aborted) {
+          ttftController.abort();
+        }
+      }, timeoutMs);
+      // unref：避免请求进行中的 timer 拖住 Node 进程优雅退出。
+      ttftTimer.unref?.();
+    };
+
+    // TTFT/idle 超时归类：合成 signal 任一触发时，pi-ai 常以 error{reason:"aborted"}
+    // 结束（不一定 throw）。必须与用户 abort 区分，否则会跳过自动重试，
+    // 并在工具结果后误报「回合已中止：工具执行后模型未返回最终回复」。
+    const isTtftAbort = (): boolean =>
+      Boolean(ttftController?.signal.aborted)
+      && !this.abortController?.signal.aborted;
+
+    const markTtftTimeout = (): void => {
+      const ttftMsg = getLlmUserMessage("UPSTREAM_TTFT_TIMEOUT");
+      aborted = false;
+      errorMessage = started
+        ? "模型服务长时间无增量响应（UPSTREAM_TTFT_TIMEOUT）"
+        : "模型服务长时间未返回首个响应（UPSTREAM_TTFT_TIMEOUT）";
+      normalizedError = {
+        code: "UPSTREAM_TTFT_TIMEOUT",
+        message: errorMessage,
+        retryable: true,
+        provider: this._model.provider,
+        modelId: this._model.id,
+        userMessage: ttftMsg,
+        suggestedAction: "wait",
+      };
+      stopReason = "error";
+    };
 
     try {
       ttftController = new AbortController();
-      // 合成用户 abort 与 TTFT 两个信号：任一触发都让 stream 抛 AbortError。
+      // 合成用户 abort 与停滞超时两个信号：传给上游；同时用 abort-aware next
+      // 强制打断 for-await，避免上游忽略 signal 时空等到连接被对端掐断。
       const combinedSignal = AbortSignal.any([
         this.abortController!.signal,
         ttftController.signal,
@@ -937,18 +1146,26 @@ export class DeerLoopEngine implements AgentEnginePort {
       permit = await acquireLlmPermit(meta, this.abortController!.signal);
       const stream = this._streamFn(this._model, context, streamOptions);
 
-      // 启动 TTFT 计时器：首个流事件到达前若超时，abort ttftController。
-      const ttftMs = this.computeTtftTimeoutMs();
-      ttftTimer = setTimeout(() => {
-        if (!ttftCancelled && ttftController) {
-          ttftController.abort();
-        }
-      }, ttftMs);
-      // unref：与 rate-limiter.drainTimer 一致，避免请求进行中的 45-120s timer
-      // 拖住 Node 进程优雅退出。正常路径 cancelTtft() 在 finally 清理。
-      ttftTimer.unref?.();
+      const stallMs = this.computeTtftTimeoutMs();
+      scheduleStallTimer(stallMs);
 
-      for await (const ev of stream) {
+      const iterator = stream[Symbol.asyncIterator]();
+      while (true) {
+        let iterResult: IteratorResult<AssistantMessageEvent>;
+        try {
+          iterResult = await this.nextStreamEvent(iterator, combinedSignal);
+        } catch (err) {
+          // 停滞定时器 abort：即便上游 stream 不抛、不产事件，也能在此打断。
+          if (isTtftAbort()) {
+            markTtftTimeout();
+            rawError = err;
+            break;
+          }
+          throw err;
+        }
+        if (iterResult.done) break;
+        const ev = iterResult.value;
+
         // abort 检查：即便 stream 没抛，也主动退出。
         if (this.abortController?.signal.aborted) {
           aborted = true;
@@ -956,17 +1173,21 @@ export class DeerLoopEngine implements AgentEnginePort {
         }
 
         if (ev.type === "done") {
-          cancelTtft();
+          cancelStallTimer();
           finalMessage = ev.message;
           stopReason = ev.reason;
           break;
         }
 
         if (ev.type === "error") {
-          // 上游已响应（即便错误），TTFT 不再适用——取消计时器。
-          cancelTtft();
-          // stream 显式报告错误（含 aborted）。
-          if (ev.reason === "aborted") {
+          // 先判定是否停滞超时：cancelStallTimer() 会清 timer，但不清除
+          // ttftController.signal.aborted，仍可据此区分用户 abort。
+          const ttftAbort = ev.reason === "aborted" && isTtftAbort();
+          cancelStallTimer();
+          if (ttftAbort) {
+            markTtftTimeout();
+            rawError = ev.error;
+          } else if (ev.reason === "aborted") {
             aborted = true;
           } else {
             errorMessage = ev.error.errorMessage ?? ev.reason;
@@ -976,19 +1197,26 @@ export class DeerLoopEngine implements AgentEnginePort {
           //   ev.error 通常是空 content 的错误壳；若 lastPartial 有内容，用它
           //   并注入 errorMessage，避免丢弃 LLM 已产出的有效内容。
           finalMessage = lastPartial ?? ev.error;
-          stopReason = ev.reason;
+          if (!ttftAbort) stopReason = ev.reason;
           break;
         }
 
         // start / text_* / thinking_* / toolcall_* 事件：partial 是累计 AssistantMessage。
         lastPartial = ev.partial;
         if (!started) {
-          // 首个流事件到达：立即取消 TTFT 计时器，不再因排队超时中断。
-          cancelTtft();
           started = true;
           // 上游健康：首事件到达 = 该 endpoint 健康，清零连续失败/退出冷却。
           recordUpstreamSuccess(this.modelRef, meta?.apiKeyHash);
           this.emit({ type: "message_start", message: ev.partial });
+          if (aggressiveIdle) {
+            // 激进：首包后继续盯增量空闲，防止「有 start 却再也没输出」。
+            scheduleStallTimer(stallMs);
+          } else {
+            // 非激进：经典 TTFT，首事件后取消。
+            cancelStallTimer();
+          }
+        } else if (aggressiveIdle) {
+          scheduleStallTimer(stallMs);
         }
         this.emit({
           type: "message_update",
@@ -996,21 +1224,27 @@ export class DeerLoopEngine implements AgentEnginePort {
           assistantMessageEvent: ev,
         });
       }
+      // 某些中转站会在输出一部分内容后直接关闭连接，不发送 done/error。
+      // 过去这里会合成 stopReason=error 的消息，却因 errorMessage 为空被当成成功，
+      // 最终表现为回复无提示中断。把协议级 EOF 明确升级为错误。
+      if (!finalMessage && !aborted && !errorMessage) {
+        errorMessage = [
+          "模型响应流意外关闭：未收到 done 或 error 终止事件",
+          `provider=${this._model.provider}`,
+          `model=${this._model.id}`,
+          `已收到流事件=${started ? "是" : "否"}`,
+          `已输出字符=${lastPartial ? extractText(lastPartial).length : 0}`,
+        ].join("；");
+        // 使用分类器可识别的底层原因，让现有自动重试策略按瞬时网络错误处理；
+        // 对用户展示的 errorMessage 仍保留上面的完整中文诊断。
+        rawError = new Error(`connection lost: response stream ended without done/error; ${errorMessage}`);
+        stopReason = "error";
+      }
     } catch (err) {
-      // TTFT 超时：ttftController 触发但用户未 abort → 归类为可重试的上游排队超时，
-      // 不算用户主动停止（aborted=false），交由 consumeStreamWithRetry 走退避重试。
-      if (ttftController?.signal.aborted && !this.abortController?.signal.aborted && !ttftCancelled) {
-        const ttftMsg = getLlmUserMessage("UPSTREAM_TTFT_TIMEOUT");
-        errorMessage = "模型服务长时间未返回首个响应（UPSTREAM_TTFT_TIMEOUT）";
-        normalizedError = {
-          code: "UPSTREAM_TTFT_TIMEOUT",
-          message: errorMessage,
-          retryable: true,
-          provider: this._model.provider,
-          modelId: this._model.id,
-          userMessage: ttftMsg,
-          suggestedAction: "wait",
-        };
+      // 停滞超时：ttftController 触发但用户未 abort → 归类为可重试错误。
+      // 常见竞态：已 markTtftTimeout 后 generator 再抛 AbortError；不得覆盖成用户中止。
+      if (isTtftAbort() || normalizedError?.code === "UPSTREAM_TTFT_TIMEOUT") {
+        markTtftTimeout();
       } else if (this.isAbortError(err)) {
         // 用户 abort 导致的抛错。
         aborted = true;
@@ -1019,10 +1253,46 @@ export class DeerLoopEngine implements AgentEnginePort {
         rawError = err;
       }
     } finally {
-      cancelTtft();
+      // for-await 正常结束但未留下结果时，也可能是 TTFT 掐断后流静默退出。
+      if (!finalMessage && !aborted && !errorMessage && isTtftAbort()) {
+        markTtftTimeout();
+      }
+      // 最终守卫：只要是 TTFT 触发且用户未停，绝不能以 aborted=true 返回。
+      if (aborted && isTtftAbort()) {
+        markTtftTimeout();
+      }
+      cancelStallTimer();
       permit?.release();
       this._isStreaming = false;
       ttftController = null;
+    }
+
+    if (!aborted && !errorMessage) {
+      const unexpectedStop = describeUnexpectedStop(
+        stopReason,
+        { provider: this._model.provider, id: this._model.id },
+        finalMessage ?? lastPartial,
+      );
+      if (unexpectedStop) {
+        errorMessage = unexpectedStop;
+        rawError = new Error(unexpectedStop);
+        normalizedError = classifyLlmError(rawError, meta ?? undefined);
+      }
+    }
+
+    // 上游返回 stopReason=stop 但 content 全空（常见于上下文被撑爆后中转站静默空响应）。
+    // 过去会当成功结束 → UI 无任何错误提示。升级为可展示错误。
+    if (!aborted && !errorMessage) {
+      const emptyStop = describeEmptySuccessfulStop(
+        stopReason,
+        finalMessage ?? lastPartial,
+        { provider: this._model.provider, id: this._model.id },
+      );
+      if (emptyStop) {
+        errorMessage = emptyStop;
+        rawError = new Error(emptyStop);
+        normalizedError = classifyLlmError(rawError, meta ?? undefined);
+      }
     }
 
     if (errorMessage && !aborted) {
@@ -1140,6 +1410,7 @@ export class DeerLoopEngine implements AgentEnginePort {
         errorMessage: consumed.errorMessage,
         partialMessage: consumed.endMessage,
         contentLength,
+        stopReason: consumed.stopReason,
         normalizedError,
       });
 
@@ -1348,11 +1619,13 @@ export class DeerLoopEngine implements AgentEnginePort {
    *   followUp 是 turn 结束后的「追问」，abort 后用户仍可能想继续追问，保留。
    *   如需全部清空，调 clearQueues()。 */
   async abort(): Promise<void> {
+    this._abortRequested = true;
+    // 自动压缩发生在 abortController 创建之前；必须同步打断，否则停止按钮对
+    // 「正在压缩上下文…」无效。
+    this.abortCompaction();
+
     const controller = this.abortController;
-    if (!controller || this._isRunning === false) {
-      return;
-    }
-    if (!controller.signal.aborted) {
+    if (controller && !controller.signal.aborted) {
       controller.abort();
     }
     // ★ 清空 steering（插嘴绑当前 turn，abort 应作废），保留 followUp。
@@ -1360,7 +1633,7 @@ export class DeerLoopEngine implements AgentEnginePort {
       this.steeringQueue.splice(0);
       this.emitQueueUpdate();
     }
-    // 等待 prompt 主循环感知到 abort 并完成收尾。
+    // 等待 prompt / 压缩都收尾（仅等 _isRunning 会在压缩窗口空转立刻返回）。
     await this.waitForIdle();
   }
 
@@ -1387,6 +1660,8 @@ export class DeerLoopEngine implements AgentEnginePort {
    * ★ M5：dispose 会清空 steering/followUp 队列（与 abort 不同——dispose 是「销毁」，
    *   保留排队消息无意义）。 */
   dispose(): void {
+    this._abortRequested = true;
+    this.abortCompaction();
     if (this.abortController && !this.abortController.signal.aborted) {
       this.abortController.abort();
     }
@@ -1650,6 +1925,12 @@ export class DeerLoopEngine implements AgentEnginePort {
   async compact(
     customInstructions?: string,
     reason: "manual" | "threshold" | "overflow" = "manual",
+    options?: {
+      /** 预解析好的摘要模型（优先）。仅用于本次压缩，不改会话主模型。 */
+      model?: AnyModel;
+      provider?: string;
+      modelId?: string;
+    },
   ): Promise<CompactionResult> {
     if (this._isRunning) {
       throw new Error("DeerLoopEngine.compact: 无法压缩——prompt 正在运行");
@@ -1663,11 +1944,44 @@ export class DeerLoopEngine implements AgentEnginePort {
     this.emit({ type: "compaction_start", reason });
 
     const tokensBefore = this.getContextUsage()?.tokens ?? estimateTokens(this._messages);
+    const emitProgress = (
+      phase: "preparing" | "summarizing" | "archiving" | "applying" | "done",
+      message: string,
+      extra?: {
+        batchIndex?: number;
+        batchTotal?: number;
+        tokensAfter?: number;
+        model?: { provider: string; modelId: string };
+      },
+    ): void => {
+      this.emit({
+        type: "compaction_progress",
+        phase,
+        message,
+        tokensBefore,
+        ...extra,
+      });
+    };
+
     try {
       const manager = this._sessionManager;
       if (!manager?.isPersisted()) {
         throw new Error("当前会话尚未持久化，无法安全压缩");
       }
+
+      // 摘要可用独立模型；切点/保留区仍按会话主模型窗口计算。
+      let summaryModel = options?.model ?? this._model;
+      if (!options?.model && options?.provider && options?.modelId) {
+        const found = this.modelRegistry.find(options.provider, options.modelId);
+        if (!found) {
+          throw new Error(`压缩模型不存在: ${options.provider}/${options.modelId}`);
+        }
+        summaryModel = found as AnyModel;
+      }
+
+      emitProgress("preparing", "正在分析会话并确定压缩边界…", {
+        model: { provider: summaryModel.provider, modelId: summaryModel.id },
+      });
 
       const entries = manager.getBranch();
       const contextWindow = this._model.contextWindow ?? 8192;
@@ -1733,13 +2047,32 @@ export class DeerLoopEngine implements AgentEnginePort {
       });
       if (!messagesToSummarize.length) throw new Error("Conversation too short to compact");
 
-      const apiKey = this._getApiKey ? await this._getApiKey(this._model.provider) : undefined;
+      const summaryContextWindow = summaryModel.contextWindow ?? contextWindow;
+      const summaryReserveTokens = Math.max(
+        256,
+        Math.min(settings.reserveTokens, Math.floor(summaryContextWindow * 0.2)),
+      );
+      const apiKey = this._getApiKey ? await this._getApiKey(summaryModel.provider) : undefined;
       const summary = await this.generateCompactionSummary(
         messagesToSummarize,
-        settings.reserveTokens,
+        summaryReserveTokens,
         apiKey,
         customInstructions,
         previousSummary,
+        summaryModel,
+        (batchIndex, batchTotal) => {
+          emitProgress(
+            "summarizing",
+            batchTotal > 1
+              ? `正在用 ${summaryModel.provider}/${summaryModel.id} 生成摘要（第 ${batchIndex}/${batchTotal} 批）…`
+              : `正在用 ${summaryModel.provider}/${summaryModel.id} 生成摘要…`,
+            {
+              batchIndex,
+              batchTotal,
+              model: { provider: summaryModel.provider, modelId: summaryModel.id },
+            },
+          );
+        },
       );
       if (this.compactionAbortController.signal.aborted) {
         const result = { summary: "", tokensBefore, tokensAfter: tokensBefore };
@@ -1748,12 +2081,53 @@ export class DeerLoopEngine implements AgentEnginePort {
       }
       if (!summary.trim()) throw new Error("压缩模型未返回有效摘要");
 
-      manager.appendCompaction(summary, firstKeptEntryId, tokensBefore);
+      // Dynamic Context Discovery：被摘要的完整历史落盘，摘要不够时 Agent 可检索。
+      emitProgress("archiving", "摘要完成，正在归档被压缩的历史…", {
+        model: { provider: summaryModel.provider, modelId: summaryModel.id },
+      });
+      const compactionId = newCompactionArchiveId();
+      const fromEntryId = entries[boundaryStart]?.id;
+      const toEntryId = entries[historyEnd - 1]?.id;
+      let historyFile: string | undefined;
+      try {
+        historyFile = writeHistoryTranscript({
+          sessionId: this._sessionId,
+          compactionId,
+          messages: messagesToSummarize,
+          fromEntryId,
+          toEntryId,
+        });
+      } catch (archiveError) {
+        console.warn("DeerLoopEngine: 写入 history archive 失败，仍继续压缩", archiveError);
+      }
+      const summaryWithArchive = historyFile
+        ? appendHistoryArchiveFooter(summary, historyFile, this._sessionId)
+        : summary;
+
+      emitProgress("applying", "正在写入压缩结果并更新会话上下文…", {
+        model: { provider: summaryModel.provider, modelId: summaryModel.id },
+      });
+      manager.appendCompaction(
+        summaryWithArchive,
+        firstKeptEntryId,
+        tokensBefore,
+        historyFile
+          ? { historyFile, compactionId, fromEntryId, toEntryId }
+          : undefined,
+      );
       const compactedContext = buildSessionContext(manager.getEntries(), manager.getLeafId());
       this._messages.splice(0, this._messages.length, ...(compactedContext.messages as AgentMessage[]));
 
       const tokensAfter = this.getContextUsage()?.tokens ?? estimateTokens(this._messages);
-      const result: CompactionResult = { summary, tokensBefore, tokensAfter };
+      const result: CompactionResult = { summary: summaryWithArchive, tokensBefore, tokensAfter };
+      emitProgress(
+        "done",
+        `压缩完成：约 ${tokensBefore.toLocaleString()} → ${tokensAfter.toLocaleString()} tokens`,
+        {
+          tokensAfter,
+          model: { provider: summaryModel.provider, modelId: summaryModel.id },
+        },
+      );
       this.emit({ type: "compaction_end", reason, result, aborted: false, willRetry: false });
       return result;
     } catch (err) {
@@ -1781,53 +2155,211 @@ export class DeerLoopEngine implements AgentEnginePort {
     apiKey: string | undefined,
     customInstructions: string | undefined,
     previousSummary: string | undefined,
+    summaryModel: AnyModel = this._model,
+    onBatch?: (batchIndex: number, batchTotal: number) => void,
   ): Promise<string> {
     // 摘要模型不需要复现原始工具协议；统一转成带原角色标记的文本，
     // 从而可在任意位置安全切批，避免 toolCall/toolResult 被拆开后被 API 拒绝。
-    const summaryMessages = messages.map((message) => this.toCompactionTextMessage(
+    const rawSummaryMessages = messages.map((message) => this.toCompactionTextMessage(
       this.truncateMessageForCompaction(message),
     ));
-    const contextWindow = this._model.contextWindow ?? 8192;
-    const outputAndPromptReserve = Math.max(1_024, Math.floor(contextWindow * 0.125));
-    // 当前批次 + 上一份滚动摘要 + 新摘要输出 + 系统提示词必须同时装进窗口。
-    const batchTokenLimit = Math.max(
-      512,
-      Math.min(12_000, contextWindow - reserveTokens * 2 - outputAndPromptReserve),
+    const contextWindow = summaryModel.contextWindow ?? this._model.contextWindow ?? 8192;
+    const batchTokenLimit = computeCompactionBatchTokenLimit(contextWindow, reserveTokens);
+    const summaryMessages = rawSummaryMessages.map((message) => (
+      this.fitCompactionMessageToBatch(message, batchTokenLimit)
+    ));
+    const batches = partitionCompactionItems(
+      summaryMessages,
+      batchTokenLimit,
+      (message) => estimateTokens([message]),
     );
-    const batches: AgentMessage[][] = [];
-    let batch: AgentMessage[] = [];
-    let batchTokens = 0;
-
-    for (const message of summaryMessages) {
-      const messageTokens = estimateTokens([message]);
-      if (batch.length > 0 && batchTokens + messageTokens > batchTokenLimit) {
-        batches.push(batch);
-        batch = [];
-        batchTokens = 0;
-      }
-      batch.push(message);
-      batchTokens += messageTokens;
-    }
-    if (batch.length) batches.push(batch);
 
     let summary = previousSummary;
-    for (const currentBatch of batches) {
+    for (let i = 0; i < batches.length; i++) {
       if (this.compactionAbortController?.signal.aborted) return "";
+      onBatch?.(i + 1, batches.length);
+      const batchStartedAt = Date.now();
+      // 压缩摘要关闭 thinking：减少中转站卡死概率，也不需要推理链。
       summary = await generateSummary(
-        currentBatch as never,
-        this._model as never,
+        batches[i] as never,
+        summaryModel as never,
         reserveTokens,
         apiKey,
         undefined,
         this.compactionAbortController?.signal,
         customInstructions,
         summary,
-        this._thinkingLevel,
-        this._streamFn as never,
+        undefined,
+        this.createGuardedCompactionStreamFn() as never,
       );
+      const batchElapsedMs = Date.now() - batchStartedAt;
+      console.info("[DeerLoopEngine] compaction batch completed", {
+        sessionId: this._sessionId,
+        provider: summaryModel.provider,
+        modelId: summaryModel.id,
+        batchIndex: i + 1,
+        batchTotal: batches.length,
+        inputTokens: estimateTokens(batches[i]),
+        elapsedMs: batchElapsedMs,
+      });
       if (!summary.trim()) throw new Error("压缩模型未返回有效摘要");
     }
     return summary ?? "";
+  }
+
+  /**
+   * 单条历史消息也不能突破摘要模型的单批容量。
+   *
+   * partition 只能在消息边界切批；若一条中文日志本身就超过小模型窗口，必须在
+   * 转成纯文本后再做一次 token-aware 首尾裁剪。
+   */
+  private fitCompactionMessageToBatch(
+    message: AgentMessage,
+    batchTokenLimit: number,
+  ): AgentMessage {
+    if (typeof message.content !== "string" || estimateTokens([message]) <= batchTokenLimit) {
+      return message;
+    }
+
+    const original = message.content;
+    const marker = "\n\n[... 单条历史过长，已为摘要模型省略中间内容 ...]\n\n";
+    let low = 0;
+    let high = original.length;
+    let fitted = marker;
+
+    while (low <= high) {
+      const keptChars = Math.floor((low + high) / 2);
+      const headChars = Math.ceil(keptChars / 2);
+      const tailChars = Math.floor(keptChars / 2);
+      const candidate = `${original.slice(0, headChars)}${marker}${original.slice(original.length - tailChars)}`;
+      const candidateMessage = { ...message, content: candidate } as AgentMessage;
+      if (estimateTokens([candidateMessage]) <= batchTokenLimit) {
+        fitted = candidate;
+        low = keptChars + 1;
+      } else {
+        high = keptChars - 1;
+      }
+    }
+    return { ...message, content: fitted } as AgentMessage;
+  }
+
+  /**
+   * 摘要专用 stream 适配器。
+   *
+   * generateSummary() 只调用 stream.result()；若直接透传 pi-ai stream，上游忽略
+   * AbortSignal 时 result() 可永久不结束。这里主动消费事件流，对每个 next() 设置
+   * idle 超时，并把请求纳入与主回合相同的本地限流和 metrics。
+   */
+  private createGuardedCompactionStreamFn(): StreamFn {
+    return ((model: AnyModel, context: Context, options?: SimpleStreamOptions) => {
+      const result = async (): Promise<AssistantMessage> => {
+        const startedAt = Date.now();
+        const apiKeyHash = hashLlmApiKey(options?.apiKey);
+        const meta: LlmRequestMeta = {
+          provider: model.provider,
+          modelId: model.id,
+          ...(apiKeyHash ? { apiKeyHash } : {}),
+          sessionId: this._sessionId,
+          requestKind: "compaction",
+          priority: "low",
+          stream: true,
+          estimatedInputTokens: Math.ceil(
+            (JSON.stringify(context.messages ?? []).length + (context.systemPrompt?.length ?? 0)) / 4,
+          ),
+        };
+        const requestController = new AbortController();
+        const combinedSignal = options?.signal
+          ? AbortSignal.any([options.signal, requestController.signal])
+          : requestController.signal;
+        let permit: LlmPermit | null = null;
+        let iterator: AsyncIterator<AssistantMessageEvent> | null = null;
+        let idleTimedOut = false;
+
+        try {
+          if (isLlmGatewayEnabled()) recordLlmRequest(meta);
+          permit = await acquireLlmPermit(meta, combinedSignal);
+          if (isLlmGatewayEnabled() && permit.queuedMs > 0) {
+            incrementLlmMetric("llm.queue.duration_ms.total", {
+              provider: model.provider,
+              model: model.id,
+              kind: "compaction",
+            }, permit.queuedMs);
+          }
+
+          const stream = this._streamFn(model, context, {
+            ...options,
+            signal: combinedSignal,
+            sessionId: this._sessionId,
+          });
+          iterator = stream[Symbol.asyncIterator]();
+          const idleTimeoutMs = this.computeCompactionIdleTimeoutMs();
+
+          while (true) {
+            const timer = setTimeout(() => {
+              idleTimedOut = true;
+              requestController.abort();
+            }, idleTimeoutMs);
+            timer.unref?.();
+
+            let next: IteratorResult<AssistantMessageEvent>;
+            try {
+              next = await this.nextStreamEvent(iterator, combinedSignal);
+            } catch (error) {
+              if (idleTimedOut) {
+                throw new Error(
+                  `压缩模型连续 ${Math.round(idleTimeoutMs / 1000)} 秒无响应，已自动停止`,
+                );
+              }
+              throw error;
+            } finally {
+              clearTimeout(timer);
+            }
+
+            if (next.done) {
+              throw new Error("压缩模型响应流意外关闭：未收到 done 或 error");
+            }
+            const event = next.value;
+            if (event.type === "done") {
+              if (isLlmGatewayEnabled()) {
+                recordLlmSuccess(meta);
+                incrementLlmMetric("llm.request.duration_ms.total", {
+                  provider: model.provider,
+                  model: model.id,
+                  kind: "compaction",
+                }, Date.now() - startedAt);
+              }
+              return event.message;
+            }
+            if (event.type === "error") {
+              const rawError = event.error.errorMessage ?? event.reason;
+              const normalized = classifyLlmError(rawError, meta);
+              if (isLlmGatewayEnabled()) recordLlmError(meta, normalized.code);
+              return event.error;
+            }
+          }
+        } catch (error) {
+          if (!options?.signal?.aborted || idleTimedOut) {
+            const normalized = classifyLlmError(error, meta);
+            if (isLlmGatewayEnabled()) recordLlmError(meta, normalized.code);
+          }
+          throw error;
+        } finally {
+          permit?.release();
+          if (iterator?.return) {
+            void iterator.return().catch(() => undefined);
+          }
+        }
+      };
+
+      // generateSummary 当前只依赖 result()。保留 AsyncIterable 形状，避免未来调用方
+      // 在结构检查阶段失败；真正的事件消费由上面的 result() 独占执行。
+      return {
+        result,
+        async *[Symbol.asyncIterator]() {
+          throw new Error("compaction stream events are consumed by result()");
+        },
+      } as unknown as AssistantMessageEventStream;
+    }) as StreamFn;
   }
 
   /** 将超大记录裁成可摘要的代表性片段，不修改原始会话内容。 */
@@ -1895,19 +2427,13 @@ export class DeerLoopEngine implements AgentEnginePort {
     } as AgentMessage;
   }
 
-  /** 在下一回合开始前预留足够空间，避免模型先因超上下文失败。 */
+  /**
+   * 旧路径：回合前静默自动压缩。
+   * 现已改为前端弹框确认并可选摘要模型（见 CompactionConfirmModal），
+   * 此处保留钩子但不执行，避免再用会话主模型（常为不稳定中转）静默卡死。
+   */
   private async compactBeforePromptIfNeeded(): Promise<void> {
-    if (!this._autoCompactionEnabled || !this._sessionManager?.isPersisted()) return;
-    const usage = this.getContextUsage();
-    if (!usage?.tokens || usage.contextWindow <= 0) return;
-    // 标准 reserveTokens 对小窗口模型会过大；统一在 70% 时提前压缩。
-    if (usage.tokens / usage.contextWindow < 0.7) return;
-    try {
-      await this.compact(undefined, "threshold");
-    } catch (error) {
-      // 压缩失败不丢弃用户本轮请求；原 prompt/重试链仍可报告上游错误。
-      console.warn("DeerLoopEngine: 自动压缩失败，将继续本轮请求", error);
-    }
+    return;
   }
 
   setAutoCompactionEnabled(enabled: boolean): void {
@@ -1917,6 +2443,15 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** ★ M4：运行时开关自动重试（set_auto_retry 命令用）。 */
   setAutoRetryEnabled(enabled: boolean): void {
     this._autoRetryEnabled = enabled;
+  }
+
+  /** 同步前端激进/保守/关闭模式（影响 TTFT 首包超时）。 */
+  setAutoRecoveryMode(mode: "off" | "conservative" | "aggressive"): void {
+    this._autoRecoveryMode = mode;
+  }
+
+  get autoRecoveryMode(): "off" | "conservative" | "aggressive" {
+    return this._autoRecoveryMode;
   }
 
   async steer(
@@ -2126,12 +2661,49 @@ export class DeerLoopEngine implements AgentEnginePort {
   }
 
   /**
-   * 计算本次上游请求的首事件（首 token）超时阈值。
+   * 带 AbortSignal 的 async iterator next。
+   * 上游忽略 signal 时，for-await 会永久挂起；这里在 signal abort 时立刻 reject，
+   * 让激进模式的 120s 空闲超时真正能打断消费循环。
+   */
+  private nextStreamEvent(
+    iterator: AsyncIterator<AssistantMessageEvent>,
+    signal: AbortSignal,
+  ): Promise<IteratorResult<AssistantMessageEvent>> {
+    if (signal.aborted) {
+      return Promise.reject(new DOMException("Aborted", "AbortError"));
+    }
+    return new Promise<IteratorResult<AssistantMessageEvent>>((resolve, reject) => {
+      const onAbort = () => {
+        cleanup();
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      const cleanup = () => {
+        signal.removeEventListener("abort", onAbort);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve(iterator.next()).then(
+        (value) => {
+          cleanup();
+          resolve(value);
+        },
+        (err) => {
+          cleanup();
+          reject(err);
+        },
+      );
+    });
+  }
+
+  /**
+   * 计算本次上游请求的流停滞超时阈值。
    *
-   * 按思考级别放大：普通模型 45s，high 90s，xhigh 120s。可被环境变量覆盖
-   *（DEERHUX_LLM_TTFT_TIMEOUT_MS / _HIGH_MS / _XHIGH_MS，仅正整数生效）。
-   * 仅用于上游中转站「HTTP 已建连但迟迟不发首事件」的排队场景；本地限流
-   * 队列等待不受此值影响（acquireLlmPermit 用独立信号）。
+   * 优先级：
+   * 1. 前端「激进」按钮开启 → 120s stream-idle（首包后仍续盯；可用
+   *    DEERHUX_LLM_TTFT_TIMEOUT_AGGRESSIVE_MS 覆盖）
+   * 2. 否则按思考级别的经典 TTFT：默认 180s / high 240s / xhigh 300s
+   *    （DEERHUX_LLM_TTFT_TIMEOUT_MS / _HIGH_MS / _XHIGH_MS）
+   *
+   * 本地限流队列等待不受此值影响（acquireLlmPermit 用独立信号）。
    */
   private computeTtftTimeoutMs(): number {
     const readEnv = (name: string, fallback: number): number => {
@@ -2140,14 +2712,33 @@ export class DeerLoopEngine implements AgentEnginePort {
       const parsed = Number(raw);
       return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
     };
+    // 120s 绑「激进」按钮，不再绑思考级别 xhigh。
+    if (this._autoRecoveryMode === "aggressive") {
+      return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_AGGRESSIVE_MS", 120_000);
+    }
     const level = this._thinkingLevel;
     if (level === "xhigh") {
-      return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_XHIGH_MS", 120_000);
+      return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_XHIGH_MS", 300_000);
     }
     if (level === "high") {
-      return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_HIGH_MS", 90_000);
+      return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_HIGH_MS", 240_000);
     }
-    return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_MS", 45_000);
+    return readEnv("DEERHUX_LLM_TTFT_TIMEOUT_MS", 180_000);
+  }
+
+  /**
+   * 压缩摘要流的连续无事件超时。
+   *
+   * 这是 idle timeout，不是整批总时长：模型只要持续返回增量就不会被误杀。
+   * 独立环境变量便于慢速私有模型按需放宽。
+   */
+  private computeCompactionIdleTimeoutMs(): number {
+    const raw = process.env.DEERHUX_COMPACTION_IDLE_TIMEOUT_MS;
+    if (raw) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+    }
+    return 120_000;
   }
 
   /**
@@ -2214,11 +2805,75 @@ export class DeerLoopEngine implements AgentEnginePort {
     };
   }
 
-  /** 等待 loop 进入 idle 态（_isRunning=false）。 */
+  /**
+   * 若回合异常结束且 transcript 没有可展示的失败回复，补写一条失败 assistant。
+   * 典型静默场景：工具结果已落盘，但下一轮 LLM abort/崩溃，会话停在 toolResult。
+   * 返回供 agent_end.error 使用的文案；无需处理时返回 undefined。
+   */
+  private persistIncompleteTurnFailure(agentError: string | undefined): string | undefined {
+    const last = this._messages[this._messages.length - 1] as
+      | { role?: string; stopReason?: string; errorMessage?: string; content?: unknown[] }
+      | undefined;
+    if (!last) return undefined;
+
+    if (last.role === "assistant" && (last.stopReason === "error" || last.errorMessage)) {
+      return last.errorMessage || agentError;
+    }
+
+    const lastIsToolResult = last.role === "toolResult";
+    const lastIsUser = last.role === "user";
+    const lastAssistantHasPendingTools =
+      last.role === "assistant"
+      && Array.isArray(last.content)
+      && last.content.some((block) => (
+        typeof block === "object"
+        && block !== null
+        && "type" in block
+        && (block as { type?: string }).type === "toolCall"
+      ));
+
+    const needsFailureMessage =
+      Boolean(agentError && agentError !== "aborted")
+      || lastIsToolResult
+      || (lastIsUser && Boolean(agentError))
+      || (lastAssistantHasPendingTools && Boolean(agentError));
+
+    if (!needsFailureMessage) return undefined;
+
+    const message =
+      agentError && agentError !== "aborted"
+        ? agentError
+        : lastIsToolResult
+          ? (
+            agentError === "aborted"
+              ? "回合已中止：工具执行后模型未返回最终回复。"
+              : "模型在工具执行后未返回最终回复（无错误详情）。可发送“继续”重试，或切换模型后再试。"
+          )
+          : (
+            agentError === "aborted"
+              ? "回合已中止，模型未返回回复。"
+              : "模型未返回回复（无错误详情）。可发送“继续”重试。"
+          );
+
+    const failure = {
+      ...this.synthesizeEmptyAssistantMessage(
+        agentError === "aborted" ? "aborted" : "error",
+        message,
+      ),
+      content: [{ type: "text" as const, text: message }],
+    };
+    this._messages.push(failure);
+    this.persistMessage(failure);
+    this.emit({ type: "message_start", message: failure });
+    this.emit({ type: "message_end", message: failure });
+    return message;
+  }
+
+  /** 等待 loop 进入 idle 态（prompt 与压缩都结束）。 */
   private async waitForIdle(): Promise<void> {
-    // 简单轮询：每 10ms 检查一次，最多等 10s（避免死锁）。
-    const deadline = Date.now() + 10_000;
-    while (this._isRunning && Date.now() < deadline) {
+    // 简单轮询：每 10ms 检查一次，最多等 30s（压缩流响应 abort 可能稍慢）。
+    const deadline = Date.now() + 30_000;
+    while ((this._isRunning || this._isCompacting) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
@@ -2230,22 +2885,14 @@ export class DeerLoopEngine implements AgentEnginePort {
 
 /**
  * 默认 StreamFn 实现：直接调 pi-ai 的 streamSimple。
- *
- * 拆成单独函数是为了：
- * 1. 延迟 import（避免模块加载时就拉起 pi-ai provider 注册）。
- * 2. 测试可注入 mock，绕过此默认实现。
+ * 保留原始 AssistantMessageEventStream，压缩摘要需要调用其 result() 方法。
  */
 function defaultStreamFn(
   model: AnyModel,
   context: Context,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-  // pi-ai 是 ESM-only，不能用 require()；这里用动态 import 包一层 async generator，
-  // 既保持 StreamFn 的同步返回契约（返回 AsyncIterable），也避免 top-level provider 注册副作用。
-  return (async function* streamFromPiAi() {
-    const { streamSimple } = await import("@earendil-works/pi-ai");
-    yield* streamSimple(model, context, options);
-  })() as unknown as AssistantMessageEventStream;
+  return streamSimple(model, context, options);
 }
 
 // ===========================================================================

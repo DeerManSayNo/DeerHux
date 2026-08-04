@@ -21,7 +21,7 @@
 
 import { SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
-import { rename, writeFile, mkdir } from "node:fs/promises";
+import { rename, writeFile, mkdir, readdir } from "node:fs/promises";
 import { existsSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionInfo } from "../types";
@@ -75,7 +75,9 @@ declare global {
   var __deerhuxSessionIndexLastRebuildAt: number | undefined;
 }
 
-const STALE_MS = 30_000; // §6.4
+// Changes already invalidate the index explicitly. Time-based staleness is a
+// safety-net reconciliation, so it should be infrequent and invisible to UI.
+const STALE_MS = 5 * 60_000;
 const REBUILD_DEBOUNCE_MS = 1_500; // coalesce rapid invalidate bursts
 const REBUILD_MIN_INTERVAL_MS = 1_000; // guard against rebuild thrash
 
@@ -209,6 +211,8 @@ export interface ListSessionsFromIndexResult {
   sessions: SessionInfo[];
   stale: boolean;
   rebuilding: boolean;
+  /** True only when no usable index exists and the UI must wait for recovery. */
+  recovering: boolean;
   warning?: string;
 }
 
@@ -229,7 +233,7 @@ export async function listSessionsFromIndex(): Promise<ListSessionsFromIndexResu
   if (!index) {
     // No usable index yet — kick off a rebuild and tell the UI we're building.
     scheduleSessionIndexRebuild("missing-index");
-    return { sessions: [], stale: false, rebuilding: true };
+    return { sessions: [], stale: false, rebuilding: true, recovering: true };
   }
 
   const stale = isStale(index);
@@ -241,7 +245,12 @@ export async function listSessionsFromIndex(): Promise<ListSessionsFromIndexResu
   return {
     sessions,
     stale,
-    rebuilding: Boolean(globalThis.__deerhuxSessionIndexRebuildPromise),
+    rebuilding: Boolean(
+      globalThis.__deerhuxSessionIndexRebuildPromise
+      || globalThis.__deerhuxSessionIndexRebuildTimer
+    ),
+    // A stale last-good index remains fully usable while it refreshes.
+    recovering: false,
     ...(index.lastRebuildError ? { warning: index.lastRebuildError } : {}),
   };
 }
@@ -254,8 +263,12 @@ export async function listSessionsFromIndex(): Promise<ListSessionsFromIndexResu
  * Schedule a (debounced, single-flighted) background rebuild. Never throws.
  */
 export function scheduleSessionIndexRebuild(reason: string): void {
-  // Single-flight: if a rebuild is already running, do not start another.
-  if (globalThis.__deerhuxSessionIndexRebuildPromise) return;
+  // Single-flight across both queued and running rebuilds. Re-arming the timer
+  // on every /api/sessions poll can postpone a cold-start rebuild forever.
+  if (
+    globalThis.__deerhuxSessionIndexRebuildPromise
+    || globalThis.__deerhuxSessionIndexRebuildTimer
+  ) return;
 
   // Throttle: avoid rebuild storms.
   const now = Date.now();
@@ -270,9 +283,7 @@ export function scheduleSessionIndexRebuild(reason: string): void {
 }
 
 function armRebuildTimer(reason: string, delayMs: number): void {
-  if (globalThis.__deerhuxSessionIndexRebuildTimer) {
-    clearTimeout(globalThis.__deerhuxSessionIndexRebuildTimer);
-  }
+  if (globalThis.__deerhuxSessionIndexRebuildTimer) return;
   globalThis.__deerhuxSessionIndexRebuildTimer = setTimeout(() => {
     globalThis.__deerhuxSessionIndexRebuildTimer = undefined;
     void runRebuild(reason).catch((err) => {
@@ -313,7 +324,11 @@ async function runRebuild(reason: string): Promise<SessionIndexFile> {
  */
 export async function rebuildSessionIndex(): Promise<SessionIndexFile> {
   const start = Date.now();
-  const piSessions: PiSessionInfo[] = await SessionManager.listAll();
+  const [piSessions, sourceFileCount] = await Promise.all([
+    SessionManager.listAll() as Promise<PiSessionInfo[]>,
+    countSessionSourceFiles(),
+  ]);
+  assertSessionScanIsCredible(piSessions.length, sourceFileCount);
 
   const records: SessionIndexRecord[] = piSessions.map((s) => {
     let sizeBytes = 0;
@@ -391,9 +406,54 @@ async function writeIndexFile(file: SessionIndexFile): Promise<void> {
     console.error("[session-index] atomic write failed, falling back to sync:", err);
     try {
       writeFileSync(path, payload, "utf8");
-    } catch {
-      /* swallow — rebuild will retry */
+    } catch (fallbackError) {
+      throw new Error(
+        `Failed to persist session index: ${String(fallbackError)}`,
+        { cause: err },
+      );
     }
+  }
+}
+
+/**
+ * SessionManager.listAll() deliberately converts broad filesystem/parse
+ * failures into an empty or partial array. That is convenient for callers,
+ * but unsafe for a materialized index: a transient read failure must never
+ * overwrite the last-good index as if every session had been deleted.
+ */
+async function countSessionSourceFiles(): Promise<number> {
+  const sessionsDir = join(getAgentDir(), "sessions");
+  let projectDirs;
+  try {
+    projectDirs = await readdir(sessionsDir, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return 0;
+    throw error;
+  }
+
+  let count = 0;
+  for (const entry of projectDirs) {
+    if (!entry.isDirectory()) continue;
+    const files = await readdir(join(sessionsDir, entry.name), { withFileTypes: true });
+    count += files.filter((file) => file.isFile() && file.name.endsWith(".jsonl")).length;
+  }
+  return count;
+}
+
+function assertSessionScanIsCredible(parsedCount: number, sourceFileCount: number): void {
+  if (sourceFileCount > 0 && parsedCount === 0) {
+    throw new Error(
+      `Session scan returned 0 records while ${sourceFileCount} JSONL files still exist; preserving last-good index`,
+    );
+  }
+
+  const missingCount = sourceFileCount - parsedCount;
+  const toleratedMissing = Math.max(3, Math.ceil(sourceFileCount * 0.05));
+  if (missingCount > toleratedMissing) {
+    throw new Error(
+      `Session scan parsed ${parsedCount}/${sourceFileCount} files; preserving last-good index`,
+    );
   }
 }
 

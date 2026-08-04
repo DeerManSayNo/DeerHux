@@ -31,6 +31,12 @@ import {
   type SubagentConcurrencyRejectionDetails,
   makeSubagentToolCallLimitDetails,
 } from "../parallel-agent/subagent-concurrency.ts";
+import { spillLargeText } from "./context-archive.ts";
+
+export interface ToolExecutorOptions {
+  /** 用于长工具输出 spill；缺失时跳过落盘。 */
+  sessionId?: string;
+}
 
 /**
  * 单个工具执行后的标准化输出。
@@ -69,9 +75,11 @@ export interface ToolExecuteBatchOptions {
 export class ToolExecutor {
   /** 绑定的工具注册表（查 executionMode / 取工具定义）。 */
   private readonly registry: ToolRegistry;
+  private readonly sessionId?: string;
 
-  constructor(registry: ToolRegistry) {
+  constructor(registry: ToolRegistry, options?: ToolExecutorOptions) {
     this.registry = registry;
+    this.sessionId = options?.sessionId;
   }
 
   /**
@@ -185,8 +193,9 @@ export class ToolExecutor {
       // pi 的 AgentToolResult 类型不保证有 changedFiles（那是 DeerHux 的扩展），
       // 但内置 bash/edit/write 工具会在运行时塞这个字段。用类型断言安全提取。
       const changedFiles = (result as { changedFiles?: string[] })?.changedFiles;
+      const spilledResult = this.spillResultContent(result, toolCallId, toolName);
       const output: ToolExecOutput = {
-        result,
+        result: spilledResult,
         isError: false,
         changedFiles,
       };
@@ -299,6 +308,42 @@ export class ToolExecutor {
       }
     }
     return raw;
+  }
+
+  /**
+   * 长工具输出 spill：超过阈值时全文写入 context archive，LLM 只看到预览 + 路径。
+   * 覆盖 bash / MCP / 任意自定义工具；已 spill 过的文本不会二次落盘。
+   */
+  private spillResultContent(
+    result: AgentToolResult,
+    toolCallId: string,
+    toolName: string,
+  ): AgentToolResult {
+    if (!this.sessionId || !Array.isArray(result.content)) return result;
+    let changed = false;
+    const nextContent = result.content.map((block) => {
+      if (!block || typeof block !== "object") return block;
+      const b = block as { type?: string; text?: string };
+      if (b.type !== "text" || typeof b.text !== "string") return block;
+      try {
+        const spilled = spillLargeText(b.text, {
+          sessionId: this.sessionId!,
+          toolCallId,
+          toolName,
+        });
+        if (!spilled.spilled) return block;
+        changed = true;
+        return { ...b, text: spilled.preview };
+      } catch (error) {
+        console.warn(`ToolExecutor: spill failed for ${toolName}`, error);
+        return block;
+      }
+    });
+    if (!changed) return result;
+    const details = result.details && typeof result.details === "object"
+      ? { ...(result.details as Record<string, unknown>), spilledToArchive: true }
+      : { spilledToArchive: true, originalDetails: result.details };
+    return { ...result, content: nextContent, details };
   }
 
   /** 合成错误输出（content 是一段错误文本，给 LLM 看）。 */

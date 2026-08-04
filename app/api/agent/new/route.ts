@@ -60,6 +60,15 @@ export async function POST(req: Request) {
     if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
       return NextResponse.json({ error: "会话启动超时，本次发送已安全取消" }, { status: 504 });
     }
+    if (error instanceof Error) {
+      if (error.message.startsWith("Model not found:")) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      if (error.message.startsWith("AGENT_BUSY:")) {
+        return NextResponse.json({ error: error.message.slice("AGENT_BUSY:".length).trim() }, { status: 409 });
+      }
+      console.error("[POST /api/agent/new]", error);
+    }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

@@ -39,6 +39,7 @@ export async function GET() {
       sessions: result.sessions,
       stale: result.stale,
       rebuilding: result.rebuilding,
+      recovering: result.recovering,
       pagingEnabled: isSessionPagingEnabled(),
       ...(result.warning ? { warning: result.warning } : {}),
       source: "index",

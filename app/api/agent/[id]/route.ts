@@ -15,7 +15,9 @@ export async function POST(
     const body = await req.json() as { type: string; [key: string]: unknown };
     const commandSignal = body.type === "prompt"
       ? AbortSignal.any([req.signal, AbortSignal.timeout(40_000)])
-      : req.signal;
+      : body.type === "compact"
+        ? AbortSignal.any([req.signal, AbortSignal.timeout(5 * 60_000)])
+        : req.signal;
 
     // Abort is a control-plane command: it must be low-latency and must not
     // cold-start a session just to stop it. If the runtime is already gone,

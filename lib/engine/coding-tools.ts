@@ -3,12 +3,19 @@ import fs from "fs";
 import path from "path";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { AnyToolDefinition } from "./tool-registry";
+import type { AnyToolDefinition } from "./tool-registry.ts";
+import { ensureContextDir, getContextDir, previewForExistingSpill, spillLargeText } from "./context-archive.ts";
 
 export const STANDARD_CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 
+export interface CreateStandardCodingToolsOptions {
+  /** 当前 session id；用于长输出 spill 与 context 目录白名单。 */
+  sessionId?: string;
+}
+
 const MAX_TEXT_BYTES = 200_000;
-const MAX_PROCESS_OUTPUT_BYTES = 120_000;
+/** 进程输出内存硬上限；超过后截断。LLM 侧由 spill（~12KB）控制上下文体积。 */
+const MAX_PROCESS_OUTPUT_BYTES = 2_000_000;
 const DEFAULT_PROCESS_TIMEOUT_MS = 120_000;
 const MAX_PROCESS_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_FIND_LIMIT = 200;
@@ -105,20 +112,36 @@ function truncateText(text: string, maxBytes = MAX_TEXT_BYTES): string {
 }
 
 function normalizeRoot(root: string): string {
-  return fs.realpathSync.native(path.resolve(root));
+  try {
+    return fs.realpathSync.native(path.resolve(root));
+  } catch {
+    return path.resolve(root);
+  }
 }
 
-function resolveInsideCwd(cwd: string, input: string | null, label = "path"): string {
+function isInsideRoot(candidateParent: string, root: string): boolean {
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  return candidateParent === root || candidateParent.startsWith(rootWithSep);
+}
+
+/**
+ * 解析路径：必须落在 cwd 或 extraRoots（当前 session 的 context archive）内。
+ * 写操作应只传 cwd，避免 Agent 改写归档目录。
+ */
+function resolveAllowedPath(
+  cwd: string,
+  input: string | null,
+  label = "path",
+  extraRoots: string[] = [],
+): string {
   if (!input) throw new Error(`${label} is required`);
-  const root = normalizeRoot(cwd);
-  const candidate = path.isAbsolute(input) ? path.resolve(input) : path.resolve(root, input);
+  const roots = [normalizeRoot(cwd), ...extraRoots.map(normalizeRoot)];
+  const primary = roots[0];
+  const candidate = path.isAbsolute(input) ? path.resolve(input) : path.resolve(primary, input);
   const parent = fs.existsSync(candidate) ? candidate : path.dirname(candidate);
   const realParent = fs.existsSync(parent) ? fs.realpathSync.native(parent) : path.resolve(parent);
-  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-  if (realParent !== root && !realParent.startsWith(rootWithSep)) {
-    throw new Error(`${label} must be inside cwd: ${cwd}`);
-  }
-  return candidate;
+  if (roots.some((root) => isInsideRoot(realParent, root))) return candidate;
+  throw new Error(`${label} must be inside cwd or session context archive`);
 }
 
 function lineSlice(content: string, offset: number, limit: number): string {
@@ -160,7 +183,31 @@ async function walkFiles(root: string, current: string, out: string[], options: 
   }
 }
 
-function runProcess(command: string, args: string[], opts: { cwd: string; signal: AbortSignal; timeoutMs?: number; shell?: boolean }): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }> {
+type ProcessRunResult = {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  /** 超过内存上限时全文落盘路径（stdout+stderr 合并文件）；未溢出则为 undefined。 */
+  fullOutputPath?: string;
+};
+
+/**
+ * 运行子进程。若提供 spillDir 且输出超过 MAX_PROCESS_OUTPUT_BYTES，
+ * 改为把完整输出写入 spill 文件，内存只保留预览头——避免旧逻辑 truncate 丢尾。
+ */
+function runProcess(
+  command: string,
+  args: string[],
+  opts: {
+    cwd: string;
+    signal: AbortSignal;
+    timeoutMs?: number;
+    shell?: boolean;
+    spillDir?: string;
+    spillId?: string;
+  },
+): Promise<ProcessRunResult> {
   if (opts.signal.aborted) {
     return Promise.reject(new DOMException("Process aborted", "AbortError"));
   }
@@ -176,9 +223,26 @@ function runProcess(command: string, args: string[], opts: { cwd: string; signal
     });
     let stdout = "";
     let stderr = "";
+    let combinedFile: string | undefined;
     let settled = false;
     let terminationError: Error | null = null;
     let postExitTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const ensureSpillFile = (): string => {
+      if (combinedFile) return combinedFile;
+      if (!opts.spillDir) throw new Error("spillDir required to create spill file");
+      fs.mkdirSync(opts.spillDir, { recursive: true });
+      const id = (opts.spillId ?? `proc-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80);
+      combinedFile = path.join(opts.spillDir, `${id}.full.txt`);
+      // 首次溢出：把已有内存缓冲完整写入；后续 chunk 带 channel 标记 append。
+      fs.writeFileSync(
+        combinedFile,
+        `--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`,
+        "utf8",
+      );
+      return combinedFile;
+    };
+
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
@@ -191,8 +255,31 @@ function runProcess(command: string, args: string[], opts: { cwd: string; signal
     };
     const append = (chunk: Buffer, target: "stdout" | "stderr") => {
       const text = chunk.toString("utf8");
-      if (target === "stdout") stdout = truncateText(stdout + text, MAX_PROCESS_OUTPUT_BYTES);
-      else stderr = truncateText(stderr + text, MAX_PROCESS_OUTPUT_BYTES);
+      if (combinedFile) {
+        fs.appendFileSync(combinedFile, `\n--- ${target} continued ---\n${text}`, "utf8");
+        if (target === "stdout") stdout = truncateText(stdout + text, MAX_PROCESS_OUTPUT_BYTES);
+        else stderr = truncateText(stderr + text, MAX_PROCESS_OUTPUT_BYTES);
+        return;
+      }
+      const nextStdout = target === "stdout" ? stdout + text : stdout;
+      const nextStderr = target === "stderr" ? stderr + text : stderr;
+      const totalBytes = Buffer.byteLength(nextStdout, "utf8") + Buffer.byteLength(nextStderr, "utf8");
+      if (totalBytes <= MAX_PROCESS_OUTPUT_BYTES) {
+        stdout = nextStdout;
+        stderr = nextStderr;
+        return;
+      }
+      // 超内存上限：有 spillDir 则落盘保全文，否则退回旧 truncate（丢尾）。
+      if (opts.spillDir) {
+        stdout = nextStdout;
+        stderr = nextStderr;
+        ensureSpillFile();
+        stdout = truncateText(stdout, MAX_PROCESS_OUTPUT_BYTES);
+        stderr = truncateText(stderr, MAX_PROCESS_OUTPUT_BYTES);
+        return;
+      }
+      if (target === "stdout") stdout = truncateText(nextStdout, MAX_PROCESS_OUTPUT_BYTES);
+      else stderr = truncateText(nextStderr, MAX_PROCESS_OUTPUT_BYTES);
     };
     const onAbort = () => {
       terminationError = new DOMException("Process aborted", "AbortError");
@@ -212,24 +299,40 @@ function runProcess(command: string, args: string[], opts: { cwd: string; signal
       postExitTimer = setTimeout(() => {
         finish(() => terminationError
           ? reject(terminationError)
-          : resolve({ stdout, stderr, code, signal }));
+          : resolve({ stdout, stderr, code, signal, fullOutputPath: combinedFile }));
       }, 100);
     });
     child.on("close", (code, signal) => finish(() => terminationError
       ? reject(terminationError)
-      : resolve({ stdout, stderr, code, signal })));
+      : resolve({ stdout, stderr, code, signal, fullOutputPath: combinedFile })));
   });
 }
 
-export function createStandardCodingTools(cwd: string): AnyToolDefinition[] {
+export function createStandardCodingTools(
+  cwd: string,
+  options?: CreateStandardCodingToolsOptions,
+): AnyToolDefinition[] {
+  const sessionId = options?.sessionId;
+  const contextDir = sessionId ? getContextDir(sessionId) : null;
+  // 读/搜允许访问本 session 的 context archive；写/编辑仍仅限 cwd。
+  const readRoots = contextDir ? [contextDir] : [];
+  const resolveReadPath = (input: string | null, label = "path") =>
+    resolveAllowedPath(cwd, input, label, readRoots);
+  const resolveWritePath = (input: string | null, label = "path") =>
+    resolveAllowedPath(cwd, input, label, []);
+
+  const contextHint = contextDir
+    ? ` Also readable: session context archive at ${contextDir} (compacted history + spilled tool outputs).`
+    : "";
+
   return [
     defineTool({
       name: "read",
       label: "Read File",
-      description: "Read a text file under the current workspace. Supports optional 1-based offset and line limit.",
-      promptSnippet: "read: Read a text file by path. Use filePath/path, optional offset and limit.",
+      description: `Read a text file under the current workspace${contextHint ? " or this session's context archive" : ""}. Supports optional 1-based offset and line limit.`,
+      promptSnippet: `read: Read a text file by path (cwd${contextDir ? " or context archive" : ""}). Use filePath/path, optional offset and limit.`,
       parameters: Type.Object({
-        filePath: Type.Optional(Type.String({ description: "File path to read, relative to cwd or absolute under cwd" })),
+        filePath: Type.Optional(Type.String({ description: "File path to read, relative to cwd or absolute under cwd/context archive" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
         offset: Type.Optional(Type.Number({ description: "1-based line offset" })),
         limit: Type.Optional(Type.Number({ description: "Maximum number of lines" })),
@@ -237,7 +340,7 @@ export function createStandardCodingTools(cwd: string): AnyToolDefinition[] {
       executionMode: "parallel" as const,
       execute: async (_toolCallId, raw) => {
         const params = raw as Record<string, unknown>;
-        const filePath = resolveInsideCwd(cwd, stringParam(params, ["filePath", "file_path", "path"]), "filePath");
+        const filePath = resolveReadPath(stringParam(params, ["filePath", "file_path", "path"]), "filePath");
         const stat = await fs.promises.stat(filePath);
         if (!stat.isFile()) throw new Error(`Not a file: ${filePath}`);
         if (stat.size > MAX_TEXT_BYTES * 4) throw new Error(`File is too large to read: ${stat.size} bytes`);
@@ -261,7 +364,7 @@ export function createStandardCodingTools(cwd: string): AnyToolDefinition[] {
       executionMode: "sequential" as const,
       execute: async (_toolCallId, raw) => {
         const params = raw as Record<string, unknown>;
-        const filePath = resolveInsideCwd(cwd, stringParam(params, ["filePath", "file_path", "path"]), "filePath");
+        const filePath = resolveWritePath(stringParam(params, ["filePath", "file_path", "path"]), "filePath");
         const content = typeof params.content === "string" ? params.content : "";
         await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
         await fs.promises.writeFile(filePath, content, "utf8");
@@ -284,7 +387,7 @@ export function createStandardCodingTools(cwd: string): AnyToolDefinition[] {
       executionMode: "sequential" as const,
       execute: async (_toolCallId, raw) => {
         const params = raw as Record<string, unknown>;
-        const filePath = resolveInsideCwd(cwd, stringParam(params, ["filePath", "file_path", "path"]), "filePath");
+        const filePath = resolveWritePath(stringParam(params, ["filePath", "file_path", "path"]), "filePath");
         const oldString = rawStringParam(params, ["oldString", "old_string", "old"]);
         if (oldString === null || oldString.length === 0) throw new Error("oldString is required");
         const newString = rawStringParam(params, ["newString", "new_string", "new"]) ?? "";
@@ -302,36 +405,75 @@ export function createStandardCodingTools(cwd: string): AnyToolDefinition[] {
     defineTool({
       name: "bash",
       label: "Run Shell Command",
-      description: "Run a shell command in the current workspace and return stdout, stderr, and exit code.",
-      promptSnippet: "bash: Run a shell command in cwd. Use command, optional timeoutMs.",
+      description: `Run a shell command in the current workspace and return stdout, stderr, and exit code. Long output may be truncated in-context with a Full output path under the session context archive — use read/grep/tail to recover details.${contextHint}`,
+      promptSnippet: "bash: Run a shell command in cwd. Use command, optional timeoutMs. Long output spills to context archive.",
       parameters: Type.Object({
         command: Type.String({ description: "Shell command to run" }),
         timeoutMs: Type.Optional(Type.Number({ description: "Timeout in milliseconds" })),
       }),
       executionMode: "sequential" as const,
-      execute: async (_toolCallId, raw, signal) => {
+      execute: async (toolCallId, raw, signal) => {
         const params = raw as Record<string, unknown>;
         const command = stringParam(params, ["command", "cmd"]);
         if (!command) throw new Error("command is required");
         const timeoutMs = numberParam(params, ["timeoutMs", "timeout"], DEFAULT_PROCESS_TIMEOUT_MS);
-        const result = await runProcess(command, [], { cwd, signal: activeSignal(signal), timeoutMs, shell: true });
+        const spillDir = sessionId
+          ? path.join(ensureContextDir(sessionId), "tool-outputs")
+          : undefined;
+        const result = await runProcess(command, [], {
+          cwd,
+          signal: activeSignal(signal),
+          timeoutMs,
+          shell: true,
+          spillDir,
+          spillId: toolCallId,
+        });
         const text = [
           `exit_code: ${result.code ?? "null"}${result.signal ? ` signal: ${result.signal}` : ""}`,
           result.stdout ? `stdout:\n${result.stdout}` : "",
           result.stderr ? `stderr:\n${result.stderr}` : "",
-        ].filter(Boolean).join("\n\n");
-        return textResult(text || "Command completed with no output", { command, ...result });
+        ].filter(Boolean).join("\n\n") || "Command completed with no output";
+
+        // 进程已因超内存上限落盘：引用该文件，但 LLM 只收 ~12KB 预览（勿把 2MB 缓冲塞进 context）。
+        if (result.fullOutputPath) {
+          const preview = previewForExistingSpill(text, result.fullOutputPath);
+          return textResult(preview, {
+            command,
+            ...result,
+            spilled: true,
+            fullOutputPath: result.fullOutputPath,
+          });
+        }
+
+        if (sessionId) {
+          try {
+            const spilled = spillLargeText(text, {
+              sessionId,
+              toolCallId,
+              toolName: "bash",
+            });
+            return textResult(spilled.preview, {
+              command,
+              ...result,
+              spilled: spilled.spilled,
+              fullOutputPath: spilled.path,
+            });
+          } catch (error) {
+            console.warn("bash: spillLargeText failed", error);
+          }
+        }
+        return textResult(text, { command, ...result });
       },
     }),
 
     defineTool({
       name: "grep",
       label: "Search Text",
-      description: "Search file contents under the current workspace using ripgrep.",
-      promptSnippet: "grep: Search text with ripgrep. Use pattern, optional path/glob/limit/ignoreCase.",
+      description: `Search file contents under the current workspace${contextDir ? " or this session's context archive" : ""} using ripgrep.`,
+      promptSnippet: `grep: Search text with ripgrep (cwd${contextDir ? " or context archive" : ""}). Use pattern, optional path/glob/limit/ignoreCase.`,
       parameters: Type.Object({
         pattern: Type.String({ description: "Regex or text pattern to search for" }),
-        path: Type.Optional(Type.String({ description: "Directory or file under cwd" })),
+        path: Type.Optional(Type.String({ description: "Directory or file under cwd or context archive" })),
         glob: Type.Optional(Type.String({ description: "Optional glob filter" })),
         limit: Type.Optional(Type.Number({ description: "Maximum matches" })),
         ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search" })),
@@ -342,7 +484,7 @@ export function createStandardCodingTools(cwd: string): AnyToolDefinition[] {
         const pattern = stringParam(params, ["pattern", "query"]);
         if (!pattern) throw new Error("pattern is required");
         const target = stringParam(params, ["path", "filePath", "file_path"]);
-        const targetPath = target ? resolveInsideCwd(cwd, target, "path") : cwd;
+        const targetPath = target ? resolveReadPath(target, "path") : cwd;
         const args = ["--line-number", "--no-heading", "--color", "never"];
         if (booleanParam(params, ["ignoreCase", "ignore_case", "i"], false)) args.push("--ignore-case");
         const glob = stringParam(params, ["glob", "include"]);
@@ -369,7 +511,7 @@ export function createStandardCodingTools(cwd: string): AnyToolDefinition[] {
       executionMode: "parallel" as const,
       execute: async (_toolCallId, raw) => {
         const params = raw as Record<string, unknown>;
-        const root = resolveInsideCwd(cwd, stringParam(params, ["path", "dir", "directory"]) ?? ".", "path");
+        const root = resolveWritePath(stringParam(params, ["path", "dir", "directory"]) ?? ".", "path");
         const stat = await fs.promises.stat(root);
         if (!stat.isDirectory()) throw new Error(`Not a directory: ${root}`);
         const pattern = stringParam(params, ["pattern", "name", "glob"]);
@@ -385,15 +527,15 @@ export function createStandardCodingTools(cwd: string): AnyToolDefinition[] {
     defineTool({
       name: "ls",
       label: "List Directory",
-      description: "List directory entries under the current workspace.",
-      promptSnippet: "ls: List a directory. Use optional path.",
+      description: `List directory entries under the current workspace${contextDir ? " or this session's context archive" : ""}.`,
+      promptSnippet: `ls: List a directory (cwd${contextDir ? " or context archive" : ""}). Use optional path.`,
       parameters: Type.Object({
-        path: Type.Optional(Type.String({ description: "Directory under cwd" })),
+        path: Type.Optional(Type.String({ description: "Directory under cwd or context archive" })),
       }),
       executionMode: "parallel" as const,
       execute: async (_toolCallId, raw) => {
         const params = raw as Record<string, unknown>;
-        const dir = resolveInsideCwd(cwd, stringParam(params, ["path", "dir", "directory"]) ?? ".", "path");
+        const dir = resolveReadPath(stringParam(params, ["path", "dir", "directory"]) ?? ".", "path");
         const entries = await fs.promises.readdir(dir, { withFileTypes: true });
         const lines = entries
           .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))

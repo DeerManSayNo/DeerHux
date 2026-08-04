@@ -6,13 +6,16 @@ import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboratio
 import { MessageView } from "./MessageView";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
+import { CompactionConfirmModal } from "./CompactionConfirmModal";
 import { useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
 import { useAgentSession, type AgentPhase, type RetryInfo, type WatchdogInfo } from "@/hooks/useAgentSession";
 import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
+import { useTransientNotice } from "@/hooks/useTransientNotice";
 import { agentEventBus } from "@/lib/agent-event-bus";
+import { needsCompaction, type CompactionModelRef } from "@/lib/compaction-ui";
 
 interface AgentRole {
   id: string;
@@ -56,6 +59,34 @@ function getProjectName(cwd: string): string {
   return parts.at(-1) ?? cwd;
 }
 
+function parseMessageTimestamp(message: AgentMessage | undefined): number | undefined {
+  const timestamp = (message as { timestamp?: unknown } | undefined)?.timestamp;
+  if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+  if (typeof timestamp === "string") {
+    const parsed = Date.parse(timestamp);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+  return undefined;
+}
+
+function getTurnKey(message: AgentMessage | undefined, entryId?: string): string | undefined {
+  if (message?.role !== "user") return undefined;
+  if (message.clientMessageId) return `client:${message.clientMessageId}`;
+  if (entryId) return `entry:${entryId}`;
+  const timestamp = parseMessageTimestamp(message);
+  return timestamp === undefined ? undefined : `time:${timestamp}`;
+}
+
+function formatTurnDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return mins ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
 function phaseLabel(
   phase: AgentPhase,
   opts: {
@@ -63,10 +94,11 @@ function phaseLabel(
     retryInfo: RetryInfo | null;
     isCompacting: boolean;
     stallLevel: string | null;
+    compactionMessage?: string | null;
   }
 ): string {
-  const { serverStatus, retryInfo, isCompacting, stallLevel } = opts;
-  if (isCompacting) return "正在压缩上下文...";
+  const { serverStatus, retryInfo, isCompacting, stallLevel, compactionMessage } = opts;
+  if (isCompacting) return compactionMessage ?? "正在压缩上下文...";
   if (retryInfo?.userMessage) return retryInfo.userMessage;
   if (retryInfo?.errorCode === "UPSTREAM_TTFT_TIMEOUT")
     return `模型首个响应超时，服务可能处于高峰排队中，正在第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次重试…`;
@@ -221,7 +253,7 @@ function AgentStatusTicker(props: TickerProps) {
       message_start: "消息开始", message_update: "消息更新", message_end: "消息结束",
       tool_execution_start: "工具开始", tool_execution_end: "工具结束",
       auto_retry_start: "重试开始", auto_retry_end: "重试结束",
-      compaction_start: "压缩开始", compaction_end: "压缩结束",
+      compaction_start: "压缩开始", compaction_progress: "压缩进度", compaction_end: "压缩结束",
       auto_compaction_start: "压缩开始", auto_compaction_end: "压缩结束",
     };
     const displayType = typeMap[serverStatus.lastEventType] ?? serverStatus.lastEventType;
@@ -380,6 +412,17 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
   const [currentRoleId, setCurrentRoleId] = useState("default");
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [pendingRoleSetting, setPendingRoleSetting] = useState<{ roleId: string; roleName: string; block: string; setting: string } | null>(null);
+  const [compactionDialog, setCompactionDialog] = useState<null | {
+    reason: "threshold" | "manual";
+    pendingSend?: {
+      message: string;
+      images?: AttachedImage[];
+      references?: FileReference[];
+      skill?: SkillReference;
+    };
+  }>(null);
+  const [compactionBusy, setCompactionBusy] = useState(false);
+  const [compactionDialogError, setCompactionDialogError] = useState<string | null>(null);
   const [lastUserMsgExpanded, setLastUserMsgExpanded] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const wrappedOnAgentEnd = useCallback((sessionId: string, cf?: string[]) => {
@@ -394,14 +437,14 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     loading, error, data, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId, watchdogInfo,
-    isCompacting, compactError, lastModelError, displayModel: displayModelValue, sessionStats,
+    isCompacting, compactionProgress, clearCompactionProgress, compactError, lastModelError, displayModel: displayModelValue, sessionStats,
     agentPhase,
     isNew,
     stallLevel, autoRecoveryMode,
     subagentEnabled,
     // TODO 3 — first-paint pagination affordance
     hasOlderMessages, loadingFullHistory, loadFullHistory,
-    handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange,
+    handleAutoRecoveryModeChange,
     handleSubagentToggle,
     messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
@@ -414,18 +457,46 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     modelsRefreshKey,
     activeTabId,
   });
+  const transientPhaseNoticeKey = retryInfo
+    ? [
+        "retry",
+        retryInfo.attempt,
+        retryInfo.maxAttempts,
+        retryInfo.errorCode ?? "",
+        retryInfo.userMessage ?? retryInfo.errorMessage ?? "",
+      ].join(":")
+    : stallLevel === "warning" || stallLevel === "recovering"
+      ? `stall:${stallLevel}`
+      : null;
+  const showTransientPhaseNotice = useTransientNotice(transientPhaseNoticeKey);
 
   // 实时轮询服务端 agent 状态（用于状态 ticker）
   const { server: serverStatus } = useAgentStatus(session?.id, agentRunning, watchdogInfo);
 
-  // subagent 运行中不要反复全量读取父 session；改走轻量内存态 runs 接口。
+  const mergeLiveCollaborationRuns = useCallback((incoming: CollaborationRunSnapshot[]) => {
+    setLiveCollaborationRuns((current) => {
+      const byId = new Map<string, CollaborationRunSnapshot>();
+      for (const run of current) byId.set(run.runId, run);
+      for (const run of incoming) {
+        const previous = byId.get(run.runId);
+        if (!previous || run.updatedAt >= previous.updatedAt) byId.set(run.runId, run);
+      }
+      return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    });
+  }, []);
+
+  const handleCollaborationRunUpdate = useCallback((run: CollaborationRunSnapshot) => {
+    mergeLiveCollaborationRuns([run]);
+  }, [mergeLiveCollaborationRuns]);
+
+  // 运行中走轻量内存态 runs 接口；工具刚结束时依赖变化会再做一次最终拉取，
+  // 确保父级拿到终态后把卡片从底部迁入历史。
   const hasRunningSubagentTool = agentPhase?.kind === "running_tools" && agentPhase.tools.some((tool) => tool.name === "subagent");
   useEffect(() => {
     if (!session?.id) {
       setLiveCollaborationRuns([]);
       return;
     }
-    if (!agentRunning || !hasRunningSubagentTool) return;
     let cancelled = false;
     let timer: ReturnType<typeof setInterval> | null = null;
     const fetchRuns = async () => {
@@ -433,18 +504,18 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         const res = await fetch(`/api/agent-runs?parentSessionId=${encodeURIComponent(session.id)}`, { cache: "no-store" });
         if (!res.ok) return;
         const runs = (await res.json()) as CollaborationRunSnapshot[];
-        if (!cancelled) setLiveCollaborationRuns(runs);
+        if (!cancelled) mergeLiveCollaborationRuns(runs);
       } catch {
         // best effort：实时 tag 失败不影响主 agent 运行。
       }
     };
     void fetchRuns();
-    timer = setInterval(fetchRuns, 1200);
+    if (agentRunning && hasRunningSubagentTool) timer = setInterval(fetchRuns, 1200);
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
     };
-  }, [session?.id, agentRunning, hasRunningSubagentTool]);
+  }, [session?.id, agentRunning, hasRunningSubagentTool, mergeLiveCollaborationRuns]);
 
   useEffect(() => {
     setLiveCollaborationRuns([]);
@@ -452,8 +523,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
 
   const collaborationRuns = useMemo(() => {
     const byId = new Map<string, CollaborationRunSnapshot>();
-    for (const run of data?.context?.collaborationRuns ?? []) byId.set(run.runId, run);
-    for (const run of liveCollaborationRuns) byId.set(run.runId, run);
+    for (const run of [...(data?.context?.collaborationRuns ?? []), ...liveCollaborationRuns]) {
+      const previous = byId.get(run.runId);
+      if (!previous || run.updatedAt >= previous.updatedAt) byId.set(run.runId, run);
+    }
     return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   }, [data?.context?.collaborationRuns, liveCollaborationRuns]);
   const activeSubagentRuns = useMemo(
@@ -536,6 +609,87 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     handleSend(message, images, currentRoleId, references, skill);
   }, [detectSetting, handleSend, currentRoleId]);
 
+  const compactionModelOptions = useMemo(() => {
+    if (modelList && modelList.length > 0) {
+      return modelList.map((m) => ({
+        provider: m.provider,
+        modelId: m.id,
+        name: m.name || m.id,
+      }));
+    }
+    return Object.entries(modelNames ?? {}).map(([id, name]) => ({
+      provider: displayModelValue?.provider ?? "unknown",
+      modelId: id,
+      name: name || id,
+    }));
+  }, [modelList, modelNames, displayModelValue?.provider]);
+
+  const openCompactionDialog = useCallback((
+    reason: "threshold" | "manual",
+    pendingSend?: {
+      message: string;
+      images?: AttachedImage[];
+      references?: FileReference[];
+      skill?: SkillReference;
+    },
+  ) => {
+    if (!session?.id || isCompacting || compactionBusy) return;
+    setCompactionDialogError(null);
+    setCompactionDialog({ reason, pendingSend });
+  }, [session?.id, isCompacting, compactionBusy]);
+
+  const handleBeforeSend = useCallback((
+    message: string,
+    images?: AttachedImage[],
+    references?: FileReference[],
+    skill?: SkillReference,
+  ): boolean => {
+    // 新会话无历史；无 session 时无法单独压缩。
+    if (!session?.id || agentRunning || isCompacting) return true;
+    if (!needsCompaction(contextUsage)) return true;
+    openCompactionDialog("threshold", { message, images, references, skill });
+    return false;
+  }, [session?.id, agentRunning, isCompacting, contextUsage, openCompactionDialog]);
+
+  const closeCompactionDialog = useCallback(() => {
+    if (compactionBusy || isCompacting) return;
+    setCompactionDialog(null);
+    setCompactionDialogError(null);
+    clearCompactionProgress();
+  }, [compactionBusy, isCompacting, clearCompactionProgress]);
+
+  const runCompactionThenMaybeSend = useCallback(async (model: CompactionModelRef) => {
+    if (!compactionDialog || !session?.id) return;
+    setCompactionBusy(true);
+    setCompactionDialogError(null);
+    try {
+      await handleCompact({ provider: model.provider, modelId: model.modelId });
+      const pending = compactionDialog.pendingSend;
+      setCompactionDialog(null);
+      if (pending) {
+        chatInputRef?.current?.clearInput?.();
+        const detected = detectSetting(pending.message);
+        if (detected) setPendingRoleSetting(detected);
+        await handleSend(pending.message, pending.images, currentRoleId, pending.references, pending.skill);
+      }
+    } catch (e) {
+      setCompactionDialogError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCompactionBusy(false);
+    }
+  }, [compactionDialog, session?.id, handleCompact, detectSetting, handleSend, currentRoleId, chatInputRef]);
+
+  const skipCompactionAndSend = useCallback(() => {
+    if (!compactionDialog?.pendingSend || compactionBusy) return;
+    const pending = compactionDialog.pendingSend;
+    setCompactionDialog(null);
+    setCompactionDialogError(null);
+    chatInputRef?.current?.clearInput?.();
+    const detected = detectSetting(pending.message);
+    if (detected) setPendingRoleSetting(detected);
+    handleSend(pending.message, pending.images, currentRoleId, pending.references, pending.skill);
+  }, [compactionDialog, compactionBusy, detectSetting, handleSend, currentRoleId, chatInputRef]);
+
   const confirmRoleSetting = useCallback(async (mode: "save" | "temporary" | "cancel") => {
     const pending = pendingRoleSetting;
     if (!pending) return;
@@ -566,9 +720,13 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     if (agentRunning && handleSteer) {
       handleSteer(message, undefined, references, skill);
     } else if (!agentRunning) {
+      if (session?.id && needsCompaction(contextUsage)) {
+        openCompactionDialog("threshold", { message, references, skill });
+        return;
+      }
       handleSend(message, undefined, currentRoleId, references, skill);
     }
-  }, [agentRunning, handleSteer, handleSend, currentRoleId]);
+  }, [agentRunning, handleSteer, handleSend, currentRoleId, session?.id, contextUsage, openCompactionDialog]);
 
   useEffect(() => {
     onAgentRunningChange?.(session?.id, agentRunning);
@@ -850,6 +1008,70 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
+  const activeTurnStartedAt = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      if (messages[index].role !== "user") continue;
+      return parseMessageTimestamp(messages[index]);
+    }
+    return undefined;
+  }, [messages]);
+  const activeTurnKey = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      if (messages[index].role !== "user") continue;
+      return getTurnKey(messages[index], entryIds[index]);
+    }
+    return undefined;
+  }, [messages, entryIds]);
+  const [activeTurnElapsedSeconds, setActiveTurnElapsedSeconds] = useState<number | null>(null);
+  const [completedTurnDurations, setCompletedTurnDurations] = useState<Record<string, number>>({});
+  const activeTurnTimerRef = useRef<{
+    sessionKey: string;
+    initialTurnKey?: string;
+    startedAt: number;
+  } | null>(null);
+  useEffect(() => {
+    const sessionKey = activeSessionKey ?? `new:${activeTabId ?? ""}:${newSessionCwd ?? ""}`;
+    if (agentRunning) {
+      const existing = activeTurnTimerRef.current;
+      if (!existing || (existing.sessionKey !== sessionKey && existing.initialTurnKey !== activeTurnKey)) {
+        activeTurnTimerRef.current = {
+          sessionKey,
+          initialTurnKey: activeTurnKey,
+          startedAt: activeTurnStartedAt ?? Date.now(),
+        };
+      } else if (activeTurnStartedAt !== undefined && activeTurnStartedAt < existing.startedAt) {
+        existing.startedAt = activeTurnStartedAt;
+      }
+      const tick = () => {
+        const runtime = activeTurnTimerRef.current;
+        if (!runtime) return;
+        setActiveTurnElapsedSeconds(Math.max(0, Math.floor((Date.now() - runtime.startedAt) / 1000)));
+      };
+      tick();
+      const timer = window.setInterval(tick, 500);
+      return () => window.clearInterval(timer);
+    }
+
+    const completed = activeTurnTimerRef.current;
+    if (completed) {
+      const sameLogicalTurn = completed.sessionKey === sessionKey
+        || (completed.initialTurnKey !== undefined && completed.initialTurnKey === activeTurnKey);
+      if (sameLogicalTurn) {
+        const duration = Math.max(0, Math.round((Date.now() - completed.startedAt) / 1000));
+        const keys = [completed.initialTurnKey, activeTurnKey].filter((key): key is string => Boolean(key));
+        if (keys.length > 0) {
+          setCompletedTurnDurations((current) => {
+            const next = { ...current };
+            for (const key of keys) next[key] = duration;
+            return next;
+          });
+        }
+      }
+      activeTurnTimerRef.current = null;
+    }
+    setActiveTurnElapsedSeconds(null);
+  }, [agentRunning, activeTurnStartedAt, activeTurnKey, activeSessionKey, activeTabId, newSessionCwd]);
+
   // Input state cache — preserves text / images / selected skill across tab switches
   const inputStateCache = useRef<Map<string, ChatInputState>>(new Map());
   const currentInputKey = session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`;
@@ -895,11 +1117,29 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
           </div>
         </div>
       )}
+      {agentRunning && activeTurnElapsedSeconds !== null && (
+        <div
+          style={{
+            width: "100%",
+            maxWidth: contentMaxWidth,
+            margin: "0 auto 6px",
+            padding: `0 ${contentSidePadding}px 0 16px`,
+            color: "var(--text-dim)",
+            fontSize: 11,
+            fontVariantNumeric: "tabular-nums",
+            textAlign: "right",
+          }}
+          title="从本轮用户消息发出开始计算"
+        >
+          本轮已耗时 {formatTurnDuration(activeTurnElapsedSeconds)}
+        </div>
+      )}
       <ChatInput
         key={session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`}
         ref={chatInputRef}
         compact={compact}
         onSend={sendWithRole}
+        onBeforeSend={handleBeforeSend}
         onAbort={handleAbort}
         onSteer={agentRunning ? handleSteer : undefined}
         onFollowUp={agentRunning ? handleFollowUp : undefined}
@@ -908,10 +1148,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         modelNames={modelNames}
         modelList={modelList}
         onModelChange={handleModelChange}
-        onCompact={session || isNew ? handleCompact : undefined}
+        onCompact={session?.id ? () => openCompactionDialog("manual") : undefined}
         onAbortCompaction={handleAbortCompaction}
-        isCompacting={isCompacting}
-        compactError={compactError}
+        isCompacting={isCompacting || compactionBusy}
+        compactError={compactError || compactionDialogError}
         lastModelError={lastModelError}
         onClearModelError={() => setLastModelError(null)}
         agentMode={agentMode}
@@ -932,8 +1172,6 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         onOpenRoleConfig={onOpenRoleConfig}
         stallLevel={stallLevel}
         autoRecoveryMode={autoRecoveryMode}
-        onAutoRecover={handleAutoRecover}
-        onDismissStall={handleDismissStall}
         onAutoRecoveryModeChange={handleAutoRecoveryModeChange}
         subagentEnabled={subagentEnabled}
         onSubagentToggle={handleSubagentToggle}
@@ -967,6 +1205,20 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      <CompactionConfirmModal
+        open={Boolean(compactionDialog) || ((isCompacting || Boolean(compactionProgress)) && Boolean(session?.id))}
+        reason={compactionDialog?.reason ?? "manual"}
+        contextUsage={contextUsage}
+        sessionModel={displayModelValue ? { provider: displayModelValue.provider, modelId: displayModelValue.modelId } : null}
+        modelOptions={compactionModelOptions}
+        busy={compactionBusy || isCompacting}
+        error={compactionDialogError || compactError}
+        progress={compactionProgress}
+        onConfirm={(model) => { void runCompactionThenMaybeSend(model); }}
+        onCancel={closeCompactionDialog}
+        onAbort={() => { void handleAbortCompaction(); }}
+        onSkipSend={compactionDialog?.reason === "threshold" ? skipCompactionAndSend : undefined}
+      />
       {isDragOver && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[rgba(37,99,235,0.06)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -1312,12 +1564,18 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = isVisible ? refIdx++ : -1;
                 let showTimestamp = false;
+                let isLastAssistantInTurn = false;
                 if (msg.role === "assistant") {
                   showTimestamp = true;
+                  isLastAssistantInTurn = true;
                   for (let j = idx + 1; j < messages.length; j++) {
                     const r = messages[j].role;
                     if (r === "user") break;
-                    if (r === "assistant") { showTimestamp = false; break; }
+                    if (r === "assistant") {
+                      showTimestamp = false;
+                      isLastAssistantInTurn = false;
+                      break;
+                    }
                   }
                   // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp)
                   if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
@@ -1334,6 +1592,43 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                   }
                   return undefined;
                 })();
+                const nextUserIndex = (() => {
+                  for (let j = idx + 1; j < messages.length; j++) {
+                    if (messages[j].role === "user") return j;
+                  }
+                  return messages.length;
+                })();
+                const turnStartIndex = (() => {
+                  for (let j = idx; j >= 0; j--) {
+                    if (messages[j].role === "user") return j;
+                  }
+                  return -1;
+                })();
+                const turnStartTimestamp = turnStartIndex >= 0
+                  ? parseMessageTimestamp(messages[turnStartIndex])
+                  : undefined;
+                const turnKey = turnStartIndex >= 0
+                  ? getTurnKey(messages[turnStartIndex], entryIds[turnStartIndex])
+                  : undefined;
+                let turnEndTimestamp: number | undefined;
+                if (turnStartIndex >= 0) {
+                  let turnLimit = messages.length;
+                  for (let j = turnStartIndex + 1; j < messages.length; j++) {
+                    if (messages[j].role === "user") {
+                      turnLimit = j;
+                      break;
+                    }
+                  }
+                  for (let j = turnStartIndex; j < turnLimit; j++) {
+                    const timestamp = parseMessageTimestamp(messages[j]);
+                    if (timestamp !== undefined && (turnEndTimestamp === undefined || timestamp > turnEndTimestamp)) {
+                      turnEndTimestamp = timestamp;
+                    }
+                  }
+                }
+                const turnEntryIds = msg.role === "user"
+                  ? entryIds.slice(idx, nextUserIndex).filter((id): id is string => Boolean(id))
+                  : undefined;
                 const view = (
                   <MessageView
                     key={idx}
@@ -1344,12 +1639,18 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                     onFork={agentRunning || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     showTimestamp={showTimestamp}
+                    showTurnDuration={isLastAssistantInTurn && (idx < lastUserIdx || !agentRunning)}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as import("@/lib/types").AgentMessage & { timestamp?: number }).timestamp : undefined}
+                    turnStartTimestamp={turnStartTimestamp}
+                    turnEndTimestamp={turnEndTimestamp}
+                    turnDurationSeconds={turnKey ? completedTurnDurations[turnKey] : undefined}
                     nextUserTimestamp={nextUser}
                     onResend={session && entryIds[idx] ? handleResend : undefined}
                     systemPrompt={systemPrompt}
                     collaborationRuns={collaborationRuns}
+                    turnEntryIds={turnEntryIds}
                     onOpenSession={onOpenSession}
+                    onCollaborationRunUpdate={handleCollaborationRunUpdate}
                   />
                 );
                 if (!isVisible) return view;
@@ -1376,7 +1677,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             {activeSubagentRuns.length > 0 && (
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
                 {activeSubagentRuns.map((run) => (
-                  <SubagentRunCard key={run.runId} run={run} onOpenSession={onOpenSession} />
+                  <SubagentRunCard key={run.runId} run={run} onOpenSession={onOpenSession} onRunUpdate={handleCollaborationRunUpdate} />
                 ))}
               </div>
             )}
@@ -1384,7 +1685,9 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             {agentRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
                 <div className="flex items-center gap-0 flex-wrap">
-                  <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabel(agentPhase, { serverStatus, retryInfo, isCompacting, stallLevel })}</span>
+                  {(!transientPhaseNoticeKey || showTransientPhaseNotice) && (
+                    <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabel(agentPhase, { serverStatus, retryInfo, isCompacting, stallLevel, compactionMessage: compactionProgress?.message })}</span>
+                  )}
                   <AgentStatusTicker
                     serverStatus={serverStatus}
                     watchdog={watchdogInfo}

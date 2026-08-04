@@ -6,10 +6,12 @@
  * - **H2**（`MIN_AUTO_RETRY_DELAY_MS = 5000`）：最小退避下限，避免 provider 限流风暴。
  *   pi 路径在 `settingsManager.getRetrySettings` 里 clamp；自研 loop 在 {@link DefaultRetryPolicy.isRetryable}
  *   返回的 `delayMs` 里 clamp（>= minDelayMs）。
- * - **H3**（`PREMATURE_STREAM_ERROR_RE` + `contentLength >= 20`）：假性流错误不重试。
+ * - **H3**（`PREMATURE_STREAM_ERROR_RE` + `isCompletedStreamStopReason`）：假性流错误不重试。
  *   Provider 在完整 assistant 消息后仍可能 emit `connection lost` / `websocket closed`，
- *   重试这些场景只会多发一次无意义的 continue。pi 路径在 `_isRetryableError` 里拦截；
- *   自研 loop 在 {@link DefaultRetryPolicy.isRetryable} 里判定。
+ *   重试这些场景只会多发一次无意义的 continue。判定依据是 stopReason 表示模型已主动
+ *   终止（stop/end_turn/toolUse/length 等），而非输出字数——后者会误伤"输出几十字
+ *   后中途断开"。pi 路径在 `_isRetryableError` 里拦截；自研 loop 在
+ *   {@link DefaultRetryPolicy.isRetryable} 里判定。
  * - **H4**（`AUTO_RETRY_SETTLE_MS = 1000`）：重试前静默窗口。让 SSE/tool/agent-end
  *   bookkeeping 有干净的收尾窗口，避免与异步清理路径竞争。pi 路径在 `_prepareRetry`
  *   里 sleep；自研 loop 在 {@link DefaultRetryPolicy.getSettleMs} 返回的 ms 里 sleep。
@@ -89,6 +91,22 @@ export function getAssistantContentLength(message: AssistantLike): number {
   return length;
 }
 
+/**
+ * 判断 stopReason 是否表示流已正常完成（H3 用）。
+ *
+ * 只有"模型主动终止回答"（stop / end_turn / toolUse / length / pause_turn 等）
+ * 之后出现的 transport 断开才是"假性流错误"——内容已完整，重试只会多发一次无意义的
+ * continue。而 `error` / `aborted` / `undefined` 表示流未正常完成（中途断开、静默 EOF、
+ * 协议错误），正是最需要重试的场景。
+ *
+ * ★ 这取代了旧的 `contentLength >= 20` 判据：旧判据会把"模型输出几十字后中途断开"
+ *   误判为假性流错误而跳过重试，导致连接中断时直接报错、毫无恢复。
+ */
+export function isCompletedStreamStopReason(stopReason?: string): boolean {
+  if (!stopReason) return false;
+  return stopReason !== "error" && stopReason !== "aborted";
+}
+
 /** Promise 延时（与 pi-engine-adapter.ts 同名 helper 一致）。 */
 export function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,6 +128,11 @@ export interface RetryContext {
   partialMessage: AssistantMessage | null;
   /** 已经收到的有效内容长度（H3 判定用，由 {@link getAssistantContentLength} 计算）。 */
   contentLength: number;
+  /**
+   * consumeStream 返回的原始 stopReason（done.reason / error.reason）。
+   * H3 用它判断流是否已正常完成——只有模型主动终止后的 transport 断开才是假性流错误。
+   */
+  stopReason?: string;
   /** 标准化后的模型错误。传入时优先使用它判断不可重试错误与 Retry-After。 */
   normalizedError?: NormalizedLlmError;
 }
@@ -137,7 +160,7 @@ export interface RetryDecision {
 export interface RetryPolicy {
   /** 最大重试次数（0 = 禁用重试；不含初始尝试，即总尝试 = 1 + maxAttempts）。 */
   readonly maxAttempts: number;
-  /** 判定是否重试（H3：premature-stream + contentLength >= 20 → 不重试）。 */
+  /** 判定是否重试（H3：premature-stream + stopReason 表示已正常完成 → 不重试）。 */
   isRetryable(ctx: RetryContext): RetryDecision;
   /** 重试前的 settle 等待 ms（H4：默认 1000ms）。 */
   getSettleMs(): number;
@@ -164,7 +187,7 @@ export interface DefaultRetryPolicyOptions {
  *
  * - **H2**（退避下限）：`delayMs = max(minDelayMs, minDelayMs * 2^(attempt-1))`。
  *   attempt=1 → 5000ms，attempt=2 → 10000ms，attempt=3 → 20000ms。
- * - **H3**（假性流错误）：`PREMATURE_STREAM_ERROR_RE.test(errorMessage) && contentLength >= 20` → `{retry:false}`。
+ * - **H3**（假性流错误）：`PREMATURE_STREAM_ERROR_RE.test(errorMessage) && isCompletedStreamStopReason(stopReason)` → `{retry:false}`。
  * - **H4**（静默窗口）：`getSettleMs()` 返回 settleMs（默认 1000ms）。
  *
  * 构造选项允许覆盖默认值，便于测试（用极小 delay/settle 加速）与灰度（运行时换策略）。
@@ -189,7 +212,7 @@ export class DefaultRetryPolicy implements RetryPolicy {
    *
    * 判定顺序：
    * 1. 超过 maxAttempts → 不重试（防御性，调用方也会检查）。
-   * 2. H3：premature-stream 错误且已有 >= 20 字有效内容 → 不重试。
+   * 2. H3：premature-stream 错误且流已正常完成（stopReason 表示模型主动终止）→ 不重试。
    * 3. 否则 → 重试，delayMs = max(minDelayMs, 指数退避)。
    */
   isRetryable(ctx: RetryContext): RetryDecision {
@@ -197,10 +220,13 @@ export class DefaultRetryPolicy implements RetryPolicy {
     if (ctx.attempt > this._maxAttempts) {
       return { retry: false, delayMs: 0 };
     }
-    // 2. H3：premature-stream + 已有有效内容 >= 20 字 → 不重试
+    // 2. H3：premature-stream 错误 + 流已正常完成 → 假性流错误，不重试。
+    //    依据是 stopReason 表示模型主动终止（stop/end_turn/toolUse/length 等），
+    //    而非"输出过多少字"。旧实现用 contentLength>=20 会把"输出几十字后中途断开"
+    //    误判为假性流错误而跳过重试——那正是最需要重试的场景。
     if (
       PREMATURE_STREAM_ERROR_RE.test(ctx.errorMessage) &&
-      ctx.contentLength >= 20
+      isCompletedStreamStopReason(ctx.stopReason)
     ) {
       return { retry: false, delayMs: 0 };
     }

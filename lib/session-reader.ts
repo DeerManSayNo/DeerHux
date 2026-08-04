@@ -1,6 +1,6 @@
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { statSync } from "fs";
-import type { SessionEntry, SessionInfo, SessionContext, SessionHeader, AssistantMessage, FileReference, SkillReference } from "./types";
+import type { SessionEntry, SessionInfo, SessionContext, SessionHeader, AgentMessage, AssistantMessage, FileReference, SkillReference } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import type { CollaborationRunSnapshot } from "./parallel-agent/collaboration-types";
 import { normalizeToolCalls } from "./normalize";
@@ -553,7 +553,16 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
         timestamp: raw.timestamp as number | undefined,
       };
     }
-    const normalized = normalizeToolCalls(msg);
+    const normalizedBase = normalizeToolCalls(msg);
+    // 模型 message 内部的 timestamp 在部分 provider 中表示“请求创建时间”，
+    // 最终 assistant 即使实际运行十几秒，也可能只比 user 晚 1–2ms。
+    // JSONL entry 外层 timestamp 才是该消息真正落盘完成的时间，统一覆盖给 UI，
+    // 供整轮耗时、思考耗时和工具耗时在刷新后准确复算。
+    const entryTimestampRaw = entryIds[index] ? byId.get(entryIds[index])?.timestamp : undefined;
+    const entryTimestamp = typeof entryTimestampRaw === "string" ? Date.parse(entryTimestampRaw) : NaN;
+    const normalized = Number.isNaN(entryTimestamp)
+      ? normalizedBase
+      : { ...normalizedBase, timestamp: entryTimestamp } as AgentMessage;
     if (normalized.role === "user") {
       const rawContent = typeof normalized.content === "string" ? normalized.content : "";
       const messageMode = extractTurnMode(rawContent) ?? undefined;
@@ -607,6 +616,4 @@ export function getLeafId(entries: SessionEntry[]): string | null {
   if (entries.length === 0) return null;
   return entries[entries.length - 1].id;
 }
-
-
 

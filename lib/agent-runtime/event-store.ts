@@ -34,7 +34,20 @@ export class EventStore {
     };
 
     bucket.nextSeq += 1;
-    bucket.events.push(next);
+
+    // message_update 携带累计完整消息。连续保留每一份快照会让长回复的
+    // EventStore 内存占用接近平方增长；重连只需要最近一份累计快照。
+    // message_start/message_end、工具事件、生命周期事件和 turn 切换都是顺序屏障。
+    const previous = bucket.events[bucket.events.length - 1];
+    if (
+      input.event.type === "message_update"
+      && previous?.event.type === "message_update"
+      && previous.turnId === next.turnId
+    ) {
+      bucket.events[bucket.events.length - 1] = next;
+    } else {
+      bucket.events.push(next);
+    }
     if (bucket.events.length > this.maxEventsPerRun) {
       bucket.events.splice(0, bucket.events.length - this.maxEventsPerRun);
     }

@@ -373,6 +373,8 @@ export class AgentSessionWrapper {
    *  Unlike isStreaming, this stays true during gaps between tool execution
    *  and the next model response, and during auto-retry backoff. */
   private _isRunning = false;
+  /** 对外可见的逻辑回合状态；以最终 agent_end 为终态边界。 */
+  private _turnActive = false;
   /** prompt 正在做异步预处理、尚未进入 engine.prompt 的准入锁。 */
   private pendingPromptController: AbortController | null = null;
   /** 用户已请求停止；直到准入任务和 engine turn 都停止前保持为 true。 */
@@ -652,6 +654,15 @@ export class AgentSessionWrapper {
     return this._alive;
   }
 
+  private appendRuntimeAudit(customType: "auto_retry" | "abort" | "recover", data: Record<string, unknown>): void {
+    try {
+      this.inner.appendCustomEntry?.(customType, data);
+    } catch (error) {
+      // 审计记录不能阻断正常的重试 / 中止 / 恢复控制流。
+      console.warn(`Failed to persist ${customType} audit entry`, error);
+    }
+  }
+
   start(): void {
     if (this.unsubscribe) return;
 
@@ -665,6 +676,24 @@ export class AgentSessionWrapper {
       if (!this._alive) return;
 
       const turnKey = this.currentTurnKey;
+      if (event.type === "auto_retry_start") {
+        this.appendRuntimeAudit("auto_retry", {
+          phase: "start",
+          attempt: event.attempt,
+          maxAttempts: event.maxAttempts,
+          delayMs: event.delayMs,
+          errorCode: event.errorCode,
+          errorMessage: event.errorMessage,
+          retryAfterMs: event.retryAfterMs,
+        });
+      } else if (event.type === "auto_retry_end") {
+        this.appendRuntimeAudit("auto_retry", {
+          phase: "end",
+          success: event.success,
+          attempt: event.attempt,
+          ...(event.finalError ? { finalError: event.finalError } : {}),
+        });
+      }
       // Tag every event with the current turn key so real-time broadcasts
       // match SSE replay semantics (where turnId comes from the store).
       const tagged = turnKey ? { ...event, turnId: turnKey } as AgentEvent : event;
@@ -822,12 +851,16 @@ export class AgentSessionWrapper {
     // Auto-retry keeps the turn alive: SDK emits agent_end with willRetry=true,
     // then either agent_start (retry success) or auto_retry_end with success=false.
     if (event.type === "agent_start") {
+      this._turnActive = true;
       this._isRunning = true;
       this.sawAssistantEventInTurn = false;
     }
     if (event.type === "agent_end") {
       const willRetry = (event as { willRetry?: boolean }).willRetry ?? false;
       if (!willRetry) {
+        // agent_end 是对外的终态边界。内部 Promise 仍可能在 finally 中收尾，
+        // 但不能再把 UI/API 误报为运行中。
+        this._turnActive = false;
         this._isRunning = false;
         this._stopRequested = false;
         forceRefreshSessionList();
@@ -836,6 +869,7 @@ export class AgentSessionWrapper {
     if (event.type === "auto_retry_end") {
       const success = (event as { success?: boolean }).success ?? true;
       if (!success) {
+        this._turnActive = false;
         this._isRunning = false;
       }
     }
@@ -866,7 +900,7 @@ export class AgentSessionWrapper {
       eventRate: runningForMs > 0 ? this.eventCount / (runningForMs / 1000) : 0,
       eventIdleMs: this.lastEventAt ? now - this.lastEventAt : null,
       contentIdleMs: this.lastContentAt ? now - this.lastContentAt : null,
-      isRunning: this.isTurnBusy(),
+      isRunning: this.isTurnRunningForUi(),
       stopRequested: this._stopRequested,
     };
   }
@@ -891,6 +925,7 @@ export class AgentSessionWrapper {
       // If a recovery follow_up has already started, this rejection belongs to
       // the aborted old turn and must not mark the new turn as failed.
       if (!this._alive || this.activeTurnId !== turnId) return;
+      this._turnActive = false;
       this._isRunning = false;
       this._stopRequested = false;
       const msg = err instanceof Error ? err.message : String(err);
@@ -908,9 +943,18 @@ export class AgentSessionWrapper {
       if (this.activeTurnId !== turnId) return;
       this.activeTurnPromise = null;
       if (this._isRunning && !this.inner.isStreaming && this.sawAssistantEventInTurn) {
+        this._turnActive = false;
         this._isRunning = false;
         this._stopRequested = false;
-        for (const l of this.listeners) l({ type: "agent_end", messages: [], willRetry: false });
+        const error = [
+          "Agent 回合 Promise 已结束，但底层引擎没有发送最终 agent_end",
+          `session=${this.inner.sessionId}`,
+          `lastEventType=${this.lastEventType || "unknown"}`,
+          `eventCount=${this.eventCount}`,
+        ].join("；");
+        for (const l of this.listeners) {
+          l({ type: "agent_end", messages: [], willRetry: false, error });
+        }
       }
     });
   }
@@ -930,7 +974,7 @@ export class AgentSessionWrapper {
     await this.waitForCurrentTurnToStop(8_000);
 
     // 8s 后仍在跑 —— turn 卡死，拒绝继续，避免与新 turn 竞争 SDK 状态
-    if (this._isRunning || this.inner.isStreaming) {
+    if (this._isRunning || this.inner.isStreaming || this.inner.isCompacting) {
       throw new Error("abort timeout: current turn did not settle within 8s");
     }
 
@@ -1130,8 +1174,24 @@ export class AgentSessionWrapper {
     return { turnId: turnKey };
   }
 
+  /** 内部准入保护：允许比实际回合状态更保守，防止旧清理与新 prompt 竞争。 */
   private isTurnBusy(): boolean {
-    return Boolean(this.pendingPromptController || this._isRunning || this.inner.isStreaming);
+    // isCompacting：自动压缩在 `_isRunning`/stream 之前就会占用回合；漏计会导致
+    // abort 认为已空闲、stopRequested 立刻被清掉，UI 卡在「正在压缩上下文…」。
+    return Boolean(
+      this.pendingPromptController
+      || this._isRunning
+      || this.inner.isStreaming
+      || this.inner.isCompacting,
+    );
+  }
+
+  /**
+   * 面向 UI/API 的回合状态。它以最终 agent_end 为终态，不受内部 Promise
+   * finally 收尾时序影响；避免前端在收到 agent_end 后又被状态刷新重新锁住。
+   */
+  private isTurnRunningForUi(): boolean {
+    return this._turnActive;
   }
 
   async send(command: Record<string, unknown>, requestSignal?: AbortSignal): Promise<unknown> {
@@ -1145,6 +1205,7 @@ export class AgentSessionWrapper {
           throw new Error("AGENT_BUSY: 当前会话仍有回合运行或正在停止，请等待回合结束后重试");
         }
         const admissionController = new AbortController();
+        this._turnActive = true;
         this.pendingPromptController = admissionController;
         const abortAdmission = () => admissionController.abort(requestSignal?.reason);
         if (requestSignal) {
@@ -1167,6 +1228,11 @@ export class AgentSessionWrapper {
             admissionController.signal,
             promptRoleId,
           );
+        } catch (error) {
+          // 失败发生在 trackTurn 建立前时，不会有 engine 的 agent_end 兜底；
+          // 必须在 wrapper 层撤销对外运行态，避免 get_state 残留 true。
+          this._turnActive = false;
+          throw error;
         } finally {
           requestSignal?.removeEventListener("abort", abortAdmission);
           if (this.pendingPromptController === admissionController) {
@@ -1200,7 +1266,10 @@ export class AgentSessionWrapper {
         return { ok: true, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
       }
 
-      case "abort":
+      case "abort": {
+        const source = typeof command.source === "string" ? command.source : "user";
+        const reason = typeof command.reason === "string" ? command.reason : "stop_requested";
+        this.appendRuntimeAudit("abort", { source, reason, running: this.isTurnBusy() });
         // Abort must be a low-latency control command. `inner.abort()` triggers
         // AbortController.abort() synchronously, but its returned promise only
         // resolves after the running prompt/tool loop has fully settled. If we
@@ -1208,6 +1277,8 @@ export class AgentSessionWrapper {
         // cleanup finishes, making the UI stop button feel ineffective.
         this._stopRequested = this.isTurnBusy();
         this.pendingPromptController?.abort(new DOMException("Stop requested", "AbortError"));
+        // 显式打断压缩（inner.abort 也会做）；保证压缩窗口 stop 一定生效。
+        this.inner.abortCompaction();
         void this.inner.abort().then(() => {
           if (!this.isTurnBusy()) this._stopRequested = false;
         }).catch((err: unknown) => {
@@ -1217,38 +1288,70 @@ export class AgentSessionWrapper {
           stopRequested: this._stopRequested,
           stopped: !this.isTurnBusy(),
         };
+      }
 
       case "recover": {
         // Atomic abort-and-continue: settle the old turn, optionally switch
         // model, then start a fresh prompt turn. Replaces the frontend's
         // manual abort + while-wait + sleep(150) + follow_up choreography.
-        //
-        // 先切模型：失败时旧 turn 还活着，session 状态完全不变，前端可安全重试
-        const provider = typeof command.provider === "string" ? command.provider.trim() : undefined;
-        const modelId = typeof command.modelId === "string" ? command.modelId.trim() : undefined;
-        let modelChanged = false;
-        if (provider && modelId) {
-          const registry = this.inner.modelRegistry;
-          let model = registry.find(provider, modelId);
-          if (!model) {
-            const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
-            model = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
+        const recoverySource = typeof command.source === "string" ? command.source : "manual";
+        const recoveryReason = typeof command.reason === "string" ? command.reason : "continue";
+        this.appendRuntimeAudit("recover", {
+          phase: "start",
+          source: recoverySource,
+          reason: recoveryReason,
+          running: this.isTurnBusy(),
+        });
+        this.appendRuntimeAudit("abort", {
+          source: recoverySource,
+          reason: `recover:${recoveryReason}`,
+          running: this.isTurnBusy(),
+        });
+        try {
+          // 先切模型：失败时旧 turn 还活着，session 状态完全不变，前端可安全重试
+          const provider = typeof command.provider === "string" ? command.provider.trim() : undefined;
+          const modelId = typeof command.modelId === "string" ? command.modelId.trim() : undefined;
+          let modelChanged = false;
+          if (provider && modelId) {
+            const registry = this.inner.modelRegistry;
+            let model = registry.find(provider, modelId);
+            if (!model) {
+              const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+              model = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
+            }
+            if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
+            await this.inner.setModel(model);
+            modelChanged = true;
           }
-          if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-          await this.inner.setModel(model);
-          modelChanged = true;
+
+          // 模型就绪后再 abort + settle + 开新 turn
+          await this.abortAndSettleCurrentTurn();
+
+          const recoverText = typeof command.message === "string" ? command.message : "";
+          const recoverImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+          const recoverClientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
+            ? command.clientMessageId.trim()
+            : undefined;
+          const recoverTurn = await this.commitAndTrackPromptTurn(recoverText, command.references, command.skillName, recoverImages, recoverClientMessageId);
+          this.appendRuntimeAudit("recover", {
+            phase: "end",
+            success: true,
+            source: recoverySource,
+            reason: recoveryReason,
+            modelChanged,
+            turnId: recoverTurn.turnId,
+          });
+          return { recovered: true, modelChanged, turnId: recoverTurn.turnId };
+        } catch (error) {
+          this.appendRuntimeAudit("recover", {
+            phase: "end",
+            success: false,
+            source: recoverySource,
+            reason: recoveryReason,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
         }
-
-        // 模型就绪后再 abort + settle + 开新 turn
-        await this.abortAndSettleCurrentTurn();
-
-        const recoverText = typeof command.message === "string" ? command.message : "";
-        const recoverImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const recoverClientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
-          ? command.clientMessageId.trim()
-          : undefined;
-        const recoverTurn = await this.commitAndTrackPromptTurn(recoverText, command.references, command.skillName, recoverImages, recoverClientMessageId);
-        return { recovered: true, modelChanged, turnId: recoverTurn.turnId };
       }
 
       case "get_state": {
@@ -1261,6 +1364,7 @@ export class AgentSessionWrapper {
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,
           autoRetryEnabled: this.inner.autoRetryEnabled,
+          autoRecoveryMode: this.inner.autoRecoveryMode,
           model: model ? { id: model.id, provider: model.provider } : undefined,
           messageCount: 0,
           pendingMessageCount: 0,
@@ -1270,7 +1374,7 @@ export class AgentSessionWrapper {
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           agentMode: this.agentMode,
-          isRunning: this.isTurnBusy(),
+          isRunning: this.isTurnRunningForUi(),
           stopRequested: this._stopRequested,
           mcp: this.mcpRuntime ? {
             toolNames: this.mcpRuntime.toolNames,
@@ -1352,7 +1456,29 @@ export class AgentSessionWrapper {
       }
 
       case "compact": {
-        return this.inner.compact(command.customInstructions as string | undefined);
+        const provider = typeof command.provider === "string" ? command.provider : undefined;
+        const modelId = typeof command.modelId === "string" ? command.modelId : undefined;
+        let summaryModel: ReturnType<typeof this.inner.modelRegistry.find> | undefined;
+        if (provider && modelId) {
+          summaryModel = this.inner.modelRegistry.find(provider, modelId);
+          // 与 set_model 一致：热更新过的 models.json 可能尚未进入当前 registry。
+          if (!summaryModel) {
+            const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+            summaryModel = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
+          }
+          if (!summaryModel) throw new Error(`压缩模型不存在: ${provider}/${modelId}`);
+        }
+        const abortOnDisconnect = () => this.inner.abortCompaction();
+        requestSignal?.addEventListener("abort", abortOnDisconnect, { once: true });
+        try {
+          return await this.inner.compact(
+            command.customInstructions as string | undefined,
+            "manual",
+            summaryModel ? { model: summaryModel as never, provider, modelId } : undefined,
+          );
+        } finally {
+          requestSignal?.removeEventListener("abort", abortOnDisconnect);
+        }
       }
 
       case "set_auto_compaction": {
@@ -1466,6 +1592,15 @@ export class AgentSessionWrapper {
         return null;
       }
 
+      case "set_auto_recovery_mode": {
+        const mode = command.mode;
+        if (mode !== "off" && mode !== "conservative" && mode !== "aggressive") {
+          throw new Error(`Invalid auto recovery mode: ${String(mode)}`);
+        }
+        this.inner.setAutoRecoveryMode(mode);
+        return { mode };
+      }
+
       default:
         throw new Error(`Unsupported command: ${type}`);
     }
@@ -1473,6 +1608,7 @@ export class AgentSessionWrapper {
 
   destroy(): void {
     if (!this._alive) return;
+    this._turnActive = false;
     this._alive = false;
     this.pendingPromptController?.abort(new DOMException("Session destroyed", "AbortError"));
     this.pendingPromptController = null;
@@ -1481,8 +1617,18 @@ export class AgentSessionWrapper {
     this.unsubscribe?.();
     // 广播合成 agent_end，确保正在连接此 session 的 SSE 客户端收到终止事件，
     // 不会因为 unsubscribe + clearRun 切断了事件流而永远挂起等待 agent_end。
+    const destroyError = this._isRunning || this.inner.isStreaming
+      ? `Agent 会话在回合尚未结束时被销毁（session=${this.inner.sessionId}，lastEventType=${this.lastEventType || "unknown"}，eventIdleMs=${this.lastEventAt ? Date.now() - this.lastEventAt : "unknown"}）。`
+      : undefined;
     for (const l of this.listeners) {
-      try { l({ type: "agent_end", messages: [], willRetry: false }); } catch { /* best effort */ }
+      try {
+        l({
+          type: "agent_end",
+          messages: [],
+          willRetry: false,
+          ...(destroyError ? { error: destroyError } : {}),
+        });
+      } catch { /* best effort */ }
     }
     // Abort any ongoing agent turn (streaming, tools, retries) so underlying
     // WebSocket connections and child processes are released promptly.
@@ -1746,7 +1892,16 @@ async function startDeerLoopSession(
   }
 
   // ─── 工具准备（与 pi 路径对齐：code_search + codegraph + subagent + mcp）───
-  const standardCodingTools = createStandardCodingTools(cwd);
+  // 尽早取真实 sessionId：coding tools 需要它做 context archive 白名单与 spill。
+  const realSessionIdEarly = sessionManager.getSessionId();
+  const standardCodingTools = createStandardCodingTools(cwd, { sessionId: realSessionIdEarly });
+  try {
+    const { getContextDir } = await import("./engine/context-archive");
+    const { addAllowedRoot } = await import("./file-access");
+    addAllowedRoot(getContextDir(realSessionIdEarly));
+  } catch {
+    // context archive 白名单失败不阻塞会话启动
+  }
   const allCodingToolNames = [...STANDARD_CODING_TOOL_NAMES];
   const hasCodeIndex = indexExists(cwd);
   const codeSearchTool = hasCodeIndex ? defineTool({
@@ -1780,6 +1935,10 @@ async function startDeerLoopSession(
   const sessionContextHolder: { id: string | undefined; engine?: AgentEnginePort } = { id: undefined };
   const subagentTool = allowSubagentTool ? createSubagentTool(cwd, {
     getParentSessionId: () => sessionContextHolder.id,
+    // Subagent 工具执行时，当前 leaf 通常是包含该 toolCall 的 assistant
+    // message。把它持久化为稳定锚点，前端可沿当前 user turn 精确归位，
+    // 不再依赖容易受刷新、分支和缺失时间戳影响的 createdAt 猜测。
+    getParentEntryId: () => sessionManager.getLeafId() ?? undefined,
     getParentModel: () => {
       const m = sessionContextHolder.engine?.model;
       return m ? { provider: String(m.provider), modelId: String(m.id ?? "") } : undefined;
@@ -1842,7 +2001,7 @@ async function startDeerLoopSession(
   //   subagent-registry 用临时 key 注册，而 SessionManager.listAll() 返回真实 uuid，
   //   两者对不上 → worker session 的 isSubagent 标记失效 → worker session 泄露到
   //   侧边栏项目列表（表现为「多出一模一样的 session」）。
-  const realSessionId = sessionManager.getSessionId();
+  const realSessionId = realSessionIdEarly;
 
   // ─── 构造 DeerLoopEngine ───
   const engine: AgentEnginePort = new DeerLoopEngine({

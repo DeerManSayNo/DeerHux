@@ -41,6 +41,12 @@ export async function POST(req: Request) {
         deletedIds.push(s.id);
         deletedDirs.add(dirname(s.path));
         invalidateSessionPathCache(s.id);
+        try {
+          const { deleteContextArchive } = await import("@/lib/engine/context-archive");
+          deleteContextArchive(s.id);
+        } catch {
+          /* ignore archive cleanup */
+        }
       } catch {
         /* ignore missing file */
       }

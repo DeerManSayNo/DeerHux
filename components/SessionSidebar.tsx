@@ -3,6 +3,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
 import type { ProjectMeta } from "@/lib/project-meta";
 import { FileExplorer } from "./FileExplorer";
@@ -119,8 +120,16 @@ function mergeStrings(...lists: Array<string[] | undefined>): string[] {
  * settings survive the switch to file-based storage. This is what makes
  * "deleted project references" stick across app reinstalls.
  */
-async function loadProjectMetaWithMigration(): Promise<ProjectMeta> {
-  let serverMeta: ProjectMeta = { ...EMPTY_PROJECT_META };
+async function loadProjectMetaWithMigration(
+  fallback: ProjectMeta = EMPTY_PROJECT_META,
+): Promise<ProjectMeta> {
+  let serverMeta: ProjectMeta = {
+    hiddenCwds: [...fallback.hiddenCwds],
+    pinnedCwds: [...fallback.pinnedCwds],
+    notes: { ...fallback.notes },
+    defaultPinInitializedCwds: [...fallback.defaultPinInitializedCwds],
+    customCwds: [...fallback.customCwds],
+  };
   let serverExists = false;
   try {
     const res = await fetch("/api/project-meta", { cache: "no-store" });
@@ -128,9 +137,12 @@ async function loadProjectMetaWithMigration(): Promise<ProjectMeta> {
       const data = (await res.json()) as { meta?: Partial<ProjectMeta>; exists?: boolean };
       serverMeta = { ...EMPTY_PROJECT_META, ...data.meta };
       serverExists = Boolean(data.exists);
+    } else {
+      return serverMeta;
     }
   } catch {
-    /* network error — fall back to empty meta */
+    // A transient refresh failure must not erase custom/hidden/pinned projects.
+    return serverMeta;
   }
 
   // One-time migration: only when the server file has never been written.
@@ -279,6 +291,7 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, optimisticSessions, onOptimisticSessionResolved, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Index control-plane state. `rebuilding` is non-fatal: a stale/missing
   // index triggers a background rebuild but the sidebar keeps showing data.
@@ -300,6 +313,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const lastGoodSessionsRef = useRef<SessionInfo[]>([]);
+  const hasCompletedInitialLoadRef = useRef(false);
+  const loadRequestIdRef = useRef(0);
+  const loadAbortControllerRef = useRef<AbortController | null>(null);
   // Load project meta from the server-persisted file, migrating from legacy
   // localStorage keys on first run. Runs after mount to avoid hydration mismatch.
   useEffect(() => {
@@ -335,11 +352,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   useEffect(() => { splitPercentRef.current = splitPercent; }, [splitPercent]);
 
-  const loadSessions = useCallback(async (showLoading = false) => {
+  const loadSessions = useCallback(async (showLoading = false): Promise<{
+    ok: boolean;
+    rebuilding: boolean;
+    error?: string;
+  }> => {
+    const requestId = ++loadRequestIdRef.current;
+    loadAbortControllerRef.current?.abort();
     const controller = new AbortController();
+    loadAbortControllerRef.current = controller;
     const timeout = setTimeout(() => controller.abort(), 30000);
     try {
-      if (showLoading) {
+      if (showLoading && !hasCompletedInitialLoadRef.current) {
         setError(null);
         setLoading(true);
       }
@@ -349,19 +373,53 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         sessions: SessionInfo[];
         stale?: boolean;
         rebuilding?: boolean;
+        recovering?: boolean;
         warning?: string;
         source?: "index" | "legacy";
       };
-      setAllSessions(data.sessions);
+      if (!Array.isArray(data.sessions)) throw new Error("Invalid sessions response");
+      if (requestId !== loadRequestIdRef.current) {
+        return { ok: false, rebuilding: false };
+      }
+
+      // A cold/corrupt index reports [] + rebuilding=true. Keep the last-good
+      // list visible until the background rebuild converges.
+      if (!(data.rebuilding && data.sessions.length === 0 && lastGoodSessionsRef.current.length > 0)) {
+        setAllSessions(data.sessions);
+      }
+      if (data.sessions.length > 0 || !data.rebuilding) {
+        lastGoodSessionsRef.current = data.sessions;
+      }
+      hasCompletedInitialLoadRef.current = true;
       // Index control-plane flags are advisory only — never surface as errors.
-      setIndexRebuilding(Boolean(data.rebuilding));
+      // Routine stale-while-revalidate is intentionally silent. Only a missing
+      // or corrupt index is a user-visible recovery state that needs polling.
+      setIndexRebuilding(Boolean(
+        data.recovering
+        ?? (data.rebuilding && data.sessions.length === 0)
+      ));
       setIndexWarning(data.warning ?? null);
       setError(null);
+      return { ok: true, rebuilding: Boolean(data.rebuilding) };
     } catch (e) {
-      setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
+      if (requestId !== loadRequestIdRef.current) {
+        return { ok: false, rebuilding: false };
+      }
+      const message = e instanceof DOMException && e.name === "AbortError"
+        ? "加载会话超时"
+        : String(e);
+      setError(
+        lastGoodSessionsRef.current.length > 0
+          ? `${message}（正在显示上次数据）`
+          : message,
+      );
+      return { ok: false, rebuilding: false, error: message };
     } finally {
       clearTimeout(timeout);
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        loadAbortControllerRef.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -369,8 +427,39 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   useEffect(() => {
     const isFirst = !initialLoadDone.current;
     initialLoadDone.current = true;
-    loadSessions(isFirst);
+    void loadSessions(isFirst);
   }, [loadSessions, refreshKey]);
+
+  // Missing/corrupt indexes rebuild in the background. Retry until the server
+  // reports convergence so users never need to click refresh to recover.
+  useEffect(() => {
+    if (!indexRebuilding) return;
+    let cancelled = false;
+    let attempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const retry = () => {
+      const delay = Math.min(1_500 * (2 ** attempt), 10_000);
+      retryTimer = setTimeout(async () => {
+        if (cancelled) return;
+        const result = await loadSessions(false);
+        if (cancelled || (result.ok && !result.rebuilding)) return;
+        attempt += 1;
+        retry();
+      }, delay);
+    };
+    retry();
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [indexRebuilding, loadSessions]);
+
+  useEffect(() => () => {
+    loadRequestIdRef.current += 1;
+    loadAbortControllerRef.current?.abort();
+  }, []);
 
   const handleSplitterMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -698,7 +787,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as { deletedCount?: number };
       // Server already cleaned cwd out of project-meta; reload the canonical copy.
-      const meta = await loadProjectMetaWithMigration();
+      const meta = await loadProjectMetaWithMigration(projectMeta);
       setProjectMeta(meta);
       await loadSessions();
       if ((selectedCwdProp ?? selectedCwd) === cwd) void handleDefaultCwd();
@@ -708,7 +797,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     } finally {
       setPurging(false);
     }
-  }, [confirmPurge, selectedCwdProp, selectedCwd, loadSessions, handleDefaultCwd]);
+  }, [confirmPurge, selectedCwdProp, selectedCwd, projectMeta, loadSessions, handleDefaultCwd]);
 
   useEffect(() => {
     if (!projectMenu) return;
@@ -767,24 +856,27 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const handleRefreshProjects = useCallback(async () => {
     setError(null);
-    setLoading(true);
+    setRefreshing(true);
     try {
-      const [meta] = await Promise.all([
-        loadProjectMetaWithMigration(),
+      const [meta, sessionsResult] = await Promise.all([
+        loadProjectMetaWithMigration(projectMeta),
         loadSessions(true),
         onRefreshRunningSessions?.(),
       ]);
       setProjectMeta(meta);
       void ensureDefaultCwd();
+      if (!sessionsResult.ok) {
+        return;
+      }
       setProjectsRefreshDone(true);
       if (projectsRefreshTimerRef.current) clearTimeout(projectsRefreshTimerRef.current);
       projectsRefreshTimerRef.current = setTimeout(() => setProjectsRefreshDone(false), 2000);
     } catch (e) {
       setError(String(e));
     } finally {
-      setLoading(false);
+      setRefreshing(false);
     }
-  }, [ensureDefaultCwd, loadSessions, onRefreshRunningSessions]);
+  }, [ensureDefaultCwd, loadSessions, onRefreshRunningSessions, projectMeta]);
 
   useEffect(() => {
     return () => {
@@ -1037,6 +1129,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 event.stopPropagation();
                 void handleRefreshProjects();
               }}
+              disabled={refreshing}
               title="刷新项目和会话"
               aria-label="刷新项目和会话"
               style={{
@@ -1045,7 +1138,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 background: projectsRefreshDone ? "rgba(74,222,128,0.18)" : "none",
                 border: "none",
                 color: projectsRefreshDone ? "#4ade80" : "var(--text-dim)",
-                cursor: "pointer",
+                cursor: refreshing ? "default" : "pointer",
+                opacity: refreshing ? 0.6 : 1,
                 borderRadius: 5,
                 flexShrink: 0,
                 transition: "color 0.3s, background 0.3s",
@@ -1072,7 +1166,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       <div style={{ flex: compact ? "1 1 auto" : explorerOpen && activeSelectedCwd ? `${splitPercent} 1 0` : "1 1 auto", overflowY: "auto", padding: compact ? "6px 0" : "0", minHeight: 80 }}>
         {indexRebuilding && allSessions.length > 0 && !compact && (
           <div style={{ padding: "6px 14px", background: "rgba(250, 204, 21, 0.08)", color: "#b45309", fontSize: 11, borderBottom: "1px solid rgba(250, 204, 21, 0.2)" }}>
-            正在刷新会话索引…
+            正在恢复会话索引…
           </div>
         )}
         {indexWarning && allSessions.length > 0 && !compact && (
@@ -1101,7 +1195,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   : "未找到任何会话"}
           </div>
         )}
-        {!loading && !error && (
+        {!loading && (
           <>
             {(normalizedSearchQuery || allProjectsState !== "collapsed") && projects.map((project) => (
           <ProjectSection
@@ -1724,7 +1818,9 @@ function SessionItem({
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; copied: boolean } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const contextMenuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   const sessionInitial = getInitial(title);
@@ -1776,12 +1872,69 @@ function SessionItem({
     setConfirmDelete(false);
   }, []);
 
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close, true);
+    window.addEventListener("blur", close);
+    window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close, true);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => () => {
+    if (contextMenuCloseTimerRef.current) clearTimeout(contextMenuCloseTimerRef.current);
+  }, []);
+
+  const copySessionId = useCallback(async (event: React.MouseEvent) => {
+    event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(session.id);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = session.id;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    setContextMenu((current) => current ? { ...current, copied: true } : current);
+    if (contextMenuCloseTimerRef.current) clearTimeout(contextMenuCloseTimerRef.current);
+    contextMenuCloseTimerRef.current = setTimeout(() => setContextMenu(null), 800);
+  }, [session.id]);
+
   // Fixed-height outer wrapper — content swaps in place so the list never reflows
   const ITEM_HEIGHT = compact ? 28 : 54;
 
   return (
     <div
       onClick={confirmDelete || renaming ? undefined : onClick}
+      onMouseDown={(event) => {
+        if (event.button === 2) event.stopPropagation();
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const menuWidth = 220;
+        const menuHeight = 72;
+        setContextMenu({
+          x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+          y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+          copied: false,
+        });
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); }}
       style={{
@@ -2030,6 +2183,62 @@ function SessionItem({
             </>
           )}
         </>
+      )}
+      {contextMenu && createPortal(
+        <div
+          role="menu"
+          aria-label="Session 操作"
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+          style={{
+            position: "fixed",
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 1100,
+            width: 220,
+            padding: 6,
+            background: "var(--bg-panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
+          }}
+        >
+          <div
+            title={session.id}
+            style={{
+              padding: "5px 8px 7px",
+              color: "var(--text-dim)",
+              fontSize: 10,
+              fontFamily: "var(--font-mono)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {session.id}
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={copySessionId}
+            style={{
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              padding: "7px 9px",
+              background: "transparent",
+              border: "none",
+              borderRadius: 7,
+              color: contextMenu.copied ? "var(--accent)" : "var(--text-muted)",
+              cursor: "pointer",
+              textAlign: "left",
+              fontSize: 12,
+            }}
+          >
+            {contextMenu.copied ? "已复制 Session ID" : "复制 Session ID"}
+          </button>
+        </div>,
+        document.body,
       )}
     </div>
   );

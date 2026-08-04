@@ -156,11 +156,11 @@ export function getLlmUserMessage(code: LlmErrorCode, retryAfterMs?: number): st
   switch (code) {
     case "RATE_LIMIT_REQUESTS":
       return waitSeconds
-        ? `服务商请求频率限流，正在等待 ${waitSeconds} 秒后重试。`
-        : "服务商请求频率限流，正在等待后自动重试。";
+        ? `服务商请求频率限流，建议等待约 ${waitSeconds} 秒后重试。`
+        : "服务商请求频率限流，请稍后重试。";
     case "RATE_LIMIT_TOKENS":
       return waitSeconds
-        ? `模型 token 吞吐达到上限，正在等待 ${waitSeconds} 秒后重试。`
+        ? `模型 token 吞吐达到上限，建议等待约 ${waitSeconds} 秒后重试。`
         : "模型 token 吞吐达到上限，建议压缩上下文或稍后重试。";
     case "QUOTA_EXCEEDED":
       return "当前 API Key 额度不足或账单达到上限，请更换 Key、充值，或切换其他模型。";
@@ -171,14 +171,14 @@ export function getLlmUserMessage(code: LlmErrorCode, retryAfterMs?: number): st
     case "CONTEXT_LENGTH_EXCEEDED":
       return "当前上下文超过模型窗口，请压缩会话或减少输入内容后重试。";
     case "SERVER_OVERLOADED":
-      return "当前模型服务繁忙，正在等待后自动重试。";
+      return "当前模型服务繁忙，请稍后重试。";
     case "SERVER_ERROR":
-      return "模型服务暂时异常，正在等待后自动重试。";
+      return "模型服务暂时异常，请稍后重试。";
     case "TIMEOUT":
-      return "模型请求超时，正在等待后自动重试。";
+      return "模型请求超时，请稍后重试。";
     case "NETWORK_ERROR":
     case "STREAM_INTERRUPTED":
-      return "模型连接中断，正在等待后自动重试。";
+      return "模型连接中断，请稍后重试或切换模型。";
     case "LOCAL_QUEUE_TIMEOUT":
       return "本地限流队列等待超时，请稍后重试。";
     case "LOCAL_QUEUE_FULL":

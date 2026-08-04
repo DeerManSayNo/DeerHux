@@ -6,6 +6,8 @@ import type { CollaborationRunSnapshot, CollaborationWorkerState, CollaborationR
 interface Props {
   run: CollaborationRunSnapshot;
   onOpenSession?: (sessionId: string) => void;
+  /** 把卡片自行拉取/SSE 收到的最新快照同步给父级，供父级决定历史归位。 */
+  onRunUpdate?: (run: CollaborationRunSnapshot) => void;
 }
 
 const TERMINAL_STATUSES: ReadonlySet<CollaborationRunStatus> = new Set(["complete", "aborted", "error", "applied"]);
@@ -72,7 +74,7 @@ function injectToolPulseStyle() {
   document.head.appendChild(style);
 }
 
-export function SubagentRunCard({ run, onOpenSession }: Props) {
+export function SubagentRunCard({ run, onOpenSession, onRunUpdate }: Props) {
   const [latest, setLatest] = useState<CollaborationRunSnapshot>(run);
   const closedRef = useRef(false);
 
@@ -98,6 +100,7 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
         if (!res.ok) return;
         const data = (await res.json()) as CollaborationRunSnapshot;
         if (cancelled || closedRef.current) return;
+        onRunUpdate?.(data);
         if (data?.updatedAt && data.updatedAt >= (latest.updatedAt ?? "")) {
           setLatest({ ...data, workers: data.workers ?? latest.workers });
         }
@@ -116,6 +119,7 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
           if (cancelled || closedRef.current) return;
           // SSE 推送有序，直接覆盖；保留 workers 回退以防某帧缺失。
           setLatest({ ...snap, workers: snap.workers ?? latest.workers });
+          onRunUpdate?.(snap);
           if (TERMINAL_STATUSES.has(snap.status)) es?.close();
         };
         es.onerror = () => { es?.close(); };
@@ -131,7 +135,7 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
       es?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [run.runId]);
+  }, [run.runId, onRunUpdate]);
 
   const workers = useMemo(() => latest.workers ?? [], [latest.workers]);
   const doneCount = useMemo(

@@ -50,6 +50,15 @@ export interface AgentRuntimePort {
   /** 安装自动重试加固（最小退避、假性流错误判定、settle 静默窗口）。 */
   installRetryHardening(): void;
 
+  /**
+   * 同步前端「激进/保守/关闭」自动续跑模式。
+   * 激进模式下 TTFT（首包）超时使用更短的 120s，与前端 watchdog 的 120s 对齐。
+   */
+  setAutoRecoveryMode(mode: "off" | "conservative" | "aggressive"): void;
+
+  /** 当前自动续跑模式（供 get_state 暴露）。 */
+  readonly autoRecoveryMode: "off" | "conservative" | "aggressive";
+
   /** 运行时热替换自定义工具（MCP 工具集）。 */
   replaceCustomTools(options: {
     removeNames: readonly string[];

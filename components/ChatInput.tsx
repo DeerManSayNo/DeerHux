@@ -4,6 +4,7 @@ import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useIm
 import type { AutoRecoveryMode, RetryInfo, StallLevel } from "@/hooks/useAgentSession";
 import type { AgentMode } from "@/lib/agent-modes";
 import type { FileReference, SkillReference } from "@/lib/types";
+import { useTransientNotice } from "@/hooks/useTransientNotice";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (legacy, kept for compatibility)
@@ -51,6 +52,8 @@ interface AgentRole {
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
+  /** 返回 false 则取消本次发送并保留输入（如弹出压缩确认框）。 */
+  onBeforeSend?: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => boolean | void;
   onAbort: () => void;
   onSteer?: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
   onFollowUp?: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
@@ -88,8 +91,6 @@ interface Props {
   compact?: boolean;
   stallLevel?: StallLevel;
   autoRecoveryMode?: AutoRecoveryMode;
-  onAutoRecover?: () => void;
-  onDismissStall?: () => void;
   onAutoRecoveryModeChange?: (mode: AutoRecoveryMode) => void;
   subagentEnabled?: boolean;
   onSubagentToggle?: () => void;
@@ -101,6 +102,7 @@ export interface ChatInputHandle {
   addImages: (files: File[]) => void;
   addReference: (path: string) => void;
   toggleReference: (path: string) => void;
+  clearInput: () => void;
 }
 
 const AGENT_MODES: { id: AgentMode; label: string; desc: string }[] = [
@@ -141,7 +143,7 @@ function skillPickerModeForValue(value: string): "all" | "project" | null {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, onModelChange,
+  onSend, onBeforeSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, lastModelError, onClearModelError,
   agentMode = "agent", onAgentModeChange, planReady, onBuildPlan,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
@@ -155,8 +157,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   compact = false,
   stallLevel,
   autoRecoveryMode,
-  onAutoRecover,
-  onDismissStall,
   onAutoRecoveryModeChange,
   subagentEnabled = false,
   onSubagentToggle,
@@ -271,6 +271,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       });
       requestAnimationFrame(() => textareaRef.current?.focus());
     },
+    clearInput() {
+      setValue("");
+      setSelectedSkill(null);
+      setFileReferences([]);
+      setAttachedImages((prev) => {
+        prev.forEach((img) => URL.revokeObjectURL(img.previewUrl));
+        return [];
+      });
+      saveInputStateRef?.current?.({
+        value: "",
+        attachedImages: [],
+        selectedSkill: null,
+        fileReferences: [],
+      });
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+      }
+    },
   }));
 
   const processImageFiles = useCallback(async (files: File[]) => {
@@ -373,19 +391,28 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       sendInFlightRef.current = false;
       sendInFlightTimerRef.current = null;
     }, 3000);
+    const images = attachedImages.length ? attachedImages : undefined;
+    if (onBeforeSend?.(msg, images, references, skill) === false) {
+      sendInFlightRef.current = false;
+      if (sendInFlightTimerRef.current) {
+        clearTimeout(sendInFlightTimerRef.current);
+        sendInFlightTimerRef.current = null;
+      }
+      return;
+    }
     // Clear cached input state BEFORE onSend because onSend may trigger a
     // ChatInput unmount/remount (e.g. new-session intro → chat view transition).
     // The remount reads from the cache via initialInputState — if we clear first,
     // the fresh mount sees empty input.
     saveInputStateRef?.current?.({ value: "", attachedImages: [], selectedSkill: null, fileReferences });
-    onSend(msg, attachedImages.length ? attachedImages : undefined, references, skill);
+    onSend(msg, images, references, skill);
     setValue("");
     setSelectedSkill(null);
     clearImages();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [value, selectedSkill, attachedImages, fileReferences, onSend, clearImages, cancelPendingEnterSend, saveInputStateRef]);
+  }, [value, selectedSkill, attachedImages, fileReferences, onSend, onBeforeSend, clearImages, cancelPendingEnterSend, saveInputStateRef]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
@@ -802,6 +829,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const roleSettingCount = selectedRole ? Object.values(selectedRole.blocks ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0) : 0;
   const hasSendableContent = Boolean(value.trim() || attachedImages.length || selectedSkill);
   const hasFileReferences = fileReferences.length > 0;
+  const retryNoticeKey = retryInfo
+    ? [
+        retryInfo.attempt,
+        retryInfo.maxAttempts,
+        retryInfo.errorCode ?? "",
+        retryInfo.userMessage ?? retryInfo.errorMessage ?? "",
+      ].join(":")
+    : null;
+  const modelErrorNoticeKey = lastModelError && !retryInfo ? lastModelError : null;
+  const recoveryNoticeKey = stallLevel === "recovering" ? "recovering" : null;
+  const showRetryNotice = useTransientNotice(retryNoticeKey);
+  const showModelErrorNotice = useTransientNotice(modelErrorNoticeKey);
+  const showRecoveryNotice = useTransientNotice(recoveryNoticeKey);
 
 
 
@@ -828,7 +868,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       />
       <div style={{ maxWidth: inputMaxWidth, margin: "0 auto" }}>
         {/* Retry banner */}
-        {retryInfo && (
+        {retryInfo && showRetryNotice && (
           <div style={{
             marginBottom: 8, padding: "5px 10px",
             background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.25)",
@@ -846,7 +886,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           </div>
         )}
         {/* Model error banner */}
-        {lastModelError && !retryInfo && (
+        {lastModelError && !retryInfo && showModelErrorNotice && (
           <div style={{
             marginBottom: 8, padding: "5px 10px",
             background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
@@ -858,7 +898,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <line x1="15" y1="9" x2="9" y2="15" />
               <line x1="9" y1="9" x2="15" y2="15" />
             </svg>
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={{ flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5 }}>
               模型调用失败{lastModelError ? `：${lastModelError}` : ""}
             </span>
             {onClearModelError && (
@@ -876,43 +916,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             )}
           </div>
         )}
-        {/* Stall warning banner — model hasn't produced content for a while */}
-        {stallLevel === "warning" && (
-          <div style={{
-            marginBottom: 8, padding: "6px 12px",
-            background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.28)",
-            borderRadius: 8, fontSize: 12, color: "rgba(200,150,40,0.9)",
-            display: "flex", alignItems: "center", gap: 8,
-          }}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
-            <span style={{ flex: 1 }}>模型长时间无输出，可能已卡住</span>
-            {onDismissStall && (
-              <button onClick={onDismissStall} style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 6px", color: "inherit", opacity: 0.6, fontSize: 11, whiteSpace: "nowrap" }}>
-                继续等待
-              </button>
-            )}
-            {onAutoRecover && (
-              <button
-                onClick={onAutoRecover}
-                style={{
-                  flexShrink: 0,
-                  background: "rgba(234,179,8,0.18)", border: "1px solid rgba(234,179,8,0.35)",
-                  borderRadius: 6, cursor: "pointer", padding: "3px 10px",
-                  color: "rgba(200,150,40,0.95)", fontSize: 11, fontWeight: 600,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                中断并继续
-              </button>
-            )}
-          </div>
-        )}
         {/* Recovering banner — auto-recovery in progress */}
-        {stallLevel === "recovering" && (
+        {stallLevel === "recovering" && showRecoveryNotice && (
           <div style={{
             marginBottom: 8, padding: "6px 12px",
             background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.25)",
