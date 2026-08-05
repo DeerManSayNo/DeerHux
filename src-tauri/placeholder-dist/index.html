@@ -1,1 +1,42 @@
-<!doctype html><html><head><meta charset="utf-8"><title>DeerHux</title></head><body>DeerHux</body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DeerHux</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111214; color: #f5f5f4; }
+    main { width: min(440px, calc(100vw - 48px)); text-align: center; }
+    .mark { width: 44px; height: 44px; margin: 0 auto 24px; border: 1px solid #484a4f; border-radius: 12px; display: grid; place-items: center; font-weight: 750; letter-spacing: -.06em; background: #1a1b1e; }
+    h1 { margin: 0; font-size: 22px; letter-spacing: -.02em; }
+    p { margin: 10px 0 0; color: #9b9da3; line-height: 1.6; font-size: 14px; }
+    .progress { width: 180px; height: 2px; margin: 28px auto 0; overflow: hidden; background: #292b2f; border-radius: 2px; }
+    .progress::after { content: ""; display: block; width: 45%; height: 100%; background: #e7e7e5; animation: loading 1.15s ease-in-out infinite; }
+    .error .progress { display: none; }
+    .error .mark { color: #ffb4ab; border-color: #713b37; }
+    #detail { display: none; padding: 12px 14px; margin-top: 20px; text-align: left; overflow-wrap: anywhere; border: 1px solid #4f3535; border-radius: 8px; color: #ffc7c2; background: #241a1a; }
+    .error #detail { display: block; }
+    @keyframes loading { from { transform: translateX(-110%); } to { transform: translateX(330%); } }
+    @media (prefers-reduced-motion: reduce) { .progress::after { animation-duration: 2.5s; } }
+  </style>
+</head>
+<body>
+  <main id="status" role="status" aria-live="polite">
+    <div class="mark">D</div>
+    <h1 id="title">正在启动 DeerHux</h1>
+    <p id="message">正在准备本地服务，通常只需几秒钟。</p>
+    <div class="progress" aria-hidden="true"></div>
+    <p id="detail"></p>
+  </main>
+  <script>
+    window.__DEERHUX_STARTUP_ERROR = function (message) {
+      document.getElementById('status').classList.add('error');
+      document.getElementById('title').textContent = 'DeerHux 启动失败';
+      document.getElementById('message').textContent = '请退出后重试。若问题持续，请将下方信息和启动日志提供给开发者。';
+      document.getElementById('detail').textContent = message + '\n日志：~/.deerhux/agent/logs/desktop-startup.log';
+    };
+  </script>
+</body>
+</html>

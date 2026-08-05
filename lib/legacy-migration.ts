@@ -1,13 +1,42 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "fs";
+import { copyFileSync, cpSync, existsSync, linkSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 const MIGRATION_MARKER = ".migrated-from-pi";
+const SCHEDULER_CONFIG = "scheduled-tasks.json";
 
 function copyFileIfMissing(src: string, dest: string): boolean {
-  if (!existsSync(src) || existsSync(dest)) return false;
+  if (!existsSync(src)) return false;
   mkdirSync(dirname(dest), { recursive: true });
-  cpSync(src, dest);
-  return true;
+  const temp = `${dest}.migrate-${process.pid}-${crypto.randomUUID()}.tmp`;
+  try {
+    // Copy fully to a private file, then atomically publish it with a hard link.
+    // EEXIST therefore means another complete destination already won; readers
+    // can never observe a partially copied JSON/session file.
+    copyFileSync(src, temp);
+    try {
+      linkSync(temp, dest);
+      return true;
+    } catch (error: unknown) {
+      const code = error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      if (code === "EEXIST") return false;
+      throw error;
+    }
+  } finally {
+    try { unlinkSync(temp); } catch { /* best effort */ }
+  }
+}
+
+/**
+ * Migrate only the scheduler store before the scheduler reads it.
+ * This stays on the startup critical path, but is a single atomic file copy.
+ */
+export function migratePiSchedulerConfig(home: string): boolean {
+  return copyFileIfMissing(
+    join(home, ".pi", "agent", SCHEDULER_CONFIG),
+    join(home, ".deerhux", "agent", SCHEDULER_CONFIG),
+  );
 }
 
 function mergeSessionFiles(srcDir: string, destDir: string): number {
@@ -23,10 +52,7 @@ function mergeSessionFiles(srcDir: string, destDir: string): number {
       if (!file.endsWith(".jsonl")) continue;
       const srcFile = join(srcSub, file);
       const destFile = join(destSub, file);
-      if (!existsSync(destFile)) {
-        cpSync(srcFile, destFile);
-        copied++;
-      }
+      if (copyFileIfMissing(srcFile, destFile)) copied++;
     }
   }
   return copied;
@@ -98,6 +124,8 @@ export function migratePiAgentDir(home: string): void {
   if (firstRun) {
     for (const entry of readdirSync(oldDir, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      // The scheduler store is migrated synchronously before scheduler startup.
+      if (entry.name === SCHEDULER_CONFIG) continue;
       // MCP is now read as a separate compatible source by the extension facade;
       // do not silently copy it into DeerHux and change precedence.
       if (entry.name === "mcp.json") continue;

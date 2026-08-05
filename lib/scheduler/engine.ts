@@ -7,7 +7,6 @@ import path from "path";
 import cron, { type ScheduledTask as CronScheduledTask } from "node-cron";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadTasks, addTask, updateTask, deleteTask } from "./store";
-import { executeTask } from "./runner";
 import type { ScheduledTask, PromptTaskConfig } from "./types";
 
 // Map of task id → cron ScheduledTask instance
@@ -97,6 +96,25 @@ function acquireSchedulerLock(): boolean {
   return false;
 }
 
+function executeTaskLazily(task: ScheduledTask): void {
+  // The runner pulls in the agent runtime and session reader. Keep that large
+  // dependency graph out of scheduler startup and only load it on a trigger.
+  void import("./runner")
+    .then(({ executeTask }) => {
+      // Lazy loading creates a window in which the task can be edited, disabled,
+      // or deleted. Re-read it so stale prompts are never executed.
+      const latestTask = loadTasks().find((candidate) => candidate.id === task.id);
+      if (!latestTask || !latestTask.enabled) return;
+      return executeTask(latestTask);
+    })
+    .catch((error: unknown) => {
+      // Cron callbacks and run-now are fire-and-forget by design. Preserve the
+      // runner's internal error recording while handling import/top-level errors
+      // here so a failed trigger never becomes an unhandled rejection.
+      console.error(`[scheduler] Failed to execute task "${task.name}":`, error);
+    });
+}
+
 function scheduleJob(task: ScheduledTask): void {
   if (!task.enabled) return;
 
@@ -111,7 +129,7 @@ function scheduleJob(task: ScheduledTask): void {
 
   try {
     const job = cron.schedule(task.cron, () => {
-      void executeTask(task);
+      executeTaskLazily(task);
     }, {
       name: task.name,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -243,6 +261,6 @@ export function getJobStatus(taskId: string): { scheduled: boolean; nextRun: Dat
 export function runTaskNow(id: string): boolean {
   const task = getTask(id);
   if (!task) return false;
-  void executeTask(task);
+  executeTaskLazily(task);
   return true;
 }
