@@ -59,6 +59,14 @@ function getProjectName(cwd: string): string {
   return parts.at(-1) ?? cwd;
 }
 
+function parseUserMessageText(message: Extract<AgentMessage, { role: "user" }>): string {
+  if (typeof message.content === "string") return message.content;
+  return message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
 function parseMessageTimestamp(message: AgentMessage | undefined): number | undefined {
   const timestamp = (message as { timestamp?: unknown } | undefined)?.timestamp;
   if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
@@ -448,7 +456,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     handleSubagentToggle,
     messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
-    handleSend, handleAbort, handleFork, handleModelChange,
+    handleSend, handleRetryDelivery, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleAgentModeChange, handleBuildPlan, handleThinkingLevelChange,
     systemPrompt, setSystemPrompt, setLastModelError,
@@ -1646,6 +1654,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                     turnDurationSeconds={turnKey ? completedTurnDurations[turnKey] : undefined}
                     nextUserTimestamp={nextUser}
                     onResend={session && entryIds[idx] ? handleResend : undefined}
+                    onRetryDelivery={msg.role === "user" && msg.deliveryRetryable && (msg.deliveryState === "failed" || msg.deliveryState === "unknown") ? handleRetryDelivery : undefined}
+                    onRestoreToInput={msg.role === "user" && (msg.deliveryState === "failed" || msg.deliveryState === "unknown") ? (failedMessage) => chatInputRef?.current?.insertText(parseUserMessageText(failedMessage)) : undefined}
                     systemPrompt={systemPrompt}
                     collaborationRuns={collaborationRuns}
                     turnEntryIds={turnEntryIds}

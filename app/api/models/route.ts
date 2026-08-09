@@ -20,6 +20,19 @@ interface RecoveryFallbackModel {
 }
 type AutoRecoveryModel = RecoveryFallbackModel | null;
 
+type ModelsPayload = {
+  models: Record<string, string>;
+  modelList: { id: string; name: string; provider: string; input?: ("text" | "image")[] }[];
+  defaultModel: { provider: string; modelId: string } | null;
+  autoRecoveryModels: AutoRecoveryModel[];
+  thinkingLevels: Record<string, string[]>;
+  thinkingLevelMaps: Record<string, Record<string, string | null>>;
+};
+
+declare global {
+  var __deerhuxModelsPayload: ModelsPayload | undefined;
+}
+
 function getConfiguredModels(agentDir: string): Map<string, ConfiguredModel> {
   const modelsPath = join(agentDir, "models.json");
   if (!existsSync(modelsPath)) return new Map();
@@ -133,9 +146,29 @@ export async function GET() {
     if (provider && modelId && registry.find(provider, modelId)) {
       defaultModel = { provider, modelId };
     }
-  } catch { /* return empty */ }
+  } catch (error) {
+    // ModelRegistry initialization can transiently fail while the process is
+    // saturated. Never report that as a successful empty configuration: serve
+    // the last known good payload so the client's model selector stays usable.
+    console.error("[/api/models] failed to refresh model registry:", error);
+    if (globalThis.__deerhuxModelsPayload) {
+      return Response.json(globalThis.__deerhuxModelsPayload, {
+        headers: { "X-DeerHux-Stale": "1" },
+      });
+    }
+    return Response.json({ error: "Model registry temporarily unavailable" }, { status: 503 });
+  }
 
-  return Response.json({ models: Object.fromEntries(nameMap), modelList, defaultModel, autoRecoveryModels, thinkingLevels, thinkingLevelMaps });
+  const payload: ModelsPayload = {
+    models: Object.fromEntries(nameMap),
+    modelList,
+    defaultModel,
+    autoRecoveryModels,
+    thinkingLevels,
+    thinkingLevelMaps,
+  };
+  globalThis.__deerhuxModelsPayload = payload;
+  return Response.json(payload);
 }
 
 // 新增：独立接口返回模型 input 能力（纯 UI 使用，轻量）
@@ -147,7 +180,7 @@ export async function POST(req: Request) {
     const registry = ModelRegistry.create(authStorage);
     const model = registry.find(provider, modelId);
     return Response.json({ input: (model as { input?: ("text" | "image")[] } | undefined)?.input ?? ["text"] });
-  } catch (error) {
+  } catch (_error) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { addAllowedRoot } from "@/lib/file-access";
-import { startRpcSession } from "@/lib/rpc-manager";
-import { forceRefreshSessionList } from "@/lib/session-reader";
+import { getCreatedSessionId, startRpcSession } from "@/lib/rpc-manager";
+import { ensureRpcSession } from "@/lib/agent-runtime/session-service";
+import { forceRefreshSessionList, listAllSessions, readSessionFileCached } from "@/lib/session-reader";
 import { normalizeAgentMode, type AgentMode } from "@/lib/agent-modes";
 
 // POST /api/agent/new  body: { cwd: string; message?: string; ... }
@@ -10,8 +11,11 @@ import { normalizeAgentMode, type AgentMode } from "@/lib/agent-modes";
 // Returns { sessionId, data } where sessionId is DeerHux's real session id.
 export async function POST(req: Request) {
   try {
-    const body = await req.json() as { cwd?: string; [key: string]: unknown };
-    const { cwd, ...command } = body;
+    const body = await req.json() as { cwd?: string; creationRequestId?: unknown; [key: string]: unknown };
+    const { cwd, creationRequestId: rawCreationRequestId, ...command } = body;
+    const creationRequestId = typeof rawCreationRequestId === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(rawCreationRequestId)
+      ? rawCreationRequestId
+      : undefined;
     const commandSignal = command.type === "prompt"
       ? AbortSignal.any([req.signal, AbortSignal.timeout(40_000)])
       : req.signal;
@@ -23,13 +27,41 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
     }
 
-    // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
+    // Stable creationRequestId makes concurrent/retried new-session requests share
+    // startRpcSession's lock and alias. The prompt's clientMessageId then provides
+    // the durable per-session idempotency check after creation completes.
     const { provider, modelId, toolNames, thinkingLevel, roleId, agentMode, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; roleId?: string; agentMode?: AgentMode; [key: string]: unknown };
 
-    const tempKey = `__new__${Date.now()}`;
+    const tempKey = creationRequestId ? `__new__${creationRequestId}` : `__new__${Date.now()}`;
     const mode = agentMode === undefined ? undefined : normalizeAgentMode(agentMode);
-    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, undefined, mode);
+    let previouslyCreatedId = creationRequestId ? getCreatedSessionId(tempKey) : undefined;
+    // Survive a Next.js/process restart: the durable display_user_message entry
+    // is the source of truth when the in-memory creation map is gone.
+    if (!previouslyCreatedId && creationRequestId) {
+      const sessions = await listAllSessions();
+      for (const candidate of sessions) {
+        if (candidate.cwd !== cwd) continue;
+        const { context } = readSessionFileCached(candidate.path);
+        if (context.messages.some((message) => message.role === "user" && message.clientMessageId === creationRequestId)) {
+          previouslyCreatedId = candidate.id;
+          break;
+        }
+      }
+    }
+    const { session, realSessionId } = previouslyCreatedId
+      ? { session: await ensureRpcSession(previouslyCreatedId), realSessionId: previouslyCreatedId }
+      : await startRpcSession(tempKey, "", cwd, toolNames, undefined, mode);
     commandSignal.throwIfAborted();
+
+    const clientMessageId = typeof promptCommand.clientMessageId === "string" ? promptCommand.clientMessageId.trim() : "";
+    const previousAcceptance = clientMessageId ? session.findAcceptedPrompt(clientMessageId) : null;
+    if (previousAcceptance) {
+      return NextResponse.json({
+        success: true,
+        sessionId: realSessionId,
+        data: { accepted: true, duplicate: true, clientMessageId, turnId: previousAcceptance.turnId },
+      });
+    }
 
     addAllowedRoot(cwd);
 

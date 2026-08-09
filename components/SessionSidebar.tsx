@@ -9,6 +9,7 @@ import type { ProjectMeta } from "@/lib/project-meta";
 import { FileExplorer } from "./FileExplorer";
 import { SchedulerRunsBlock } from "./SchedulerRunsBlock";
 import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
+import { readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 
 
 type RunningSessionStatus = {
@@ -315,6 +316,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const searchInputRef = useRef<HTMLInputElement>(null);
   const lastGoodSessionsRef = useRef<SessionInfo[]>([]);
   const hasCompletedInitialLoadRef = useRef(false);
+  const recoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recoveryAttemptRef = useRef(0);
+  const [recoveryTick, setRecoveryTick] = useState(0);
   const loadRequestIdRef = useRef(0);
   const loadAbortControllerRef = useRef<AbortController | null>(null);
   // Load project meta from the server-persisted file, migrating from legacy
@@ -351,6 +355,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   });
 
   useEffect(() => { splitPercentRef.current = splitPercent; }, [splitPercent]);
+
+  useEffect(() => {
+    const cached = readCachedJson<SessionInfo[]>("deerhux.control-plane.sessions.v1");
+    if (!cached?.length) return;
+    lastGoodSessionsRef.current = cached;
+    setAllSessions(cached);
+  }, []);
 
   const loadSessions = useCallback(async (showLoading = false): Promise<{
     ok: boolean;
@@ -389,6 +400,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       }
       if (data.sessions.length > 0 || !data.rebuilding) {
         lastGoodSessionsRef.current = data.sessions;
+        writeCachedJson("deerhux.control-plane.sessions.v1", data.sessions);
+      }
+      recoveryAttemptRef.current = 0;
+      if (recoveryTimerRef.current) {
+        clearTimeout(recoveryTimerRef.current);
+        recoveryTimerRef.current = null;
       }
       hasCompletedInitialLoadRef.current = true;
       // Index control-plane flags are advisory only — never surface as errors.
@@ -410,8 +427,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         : String(e);
       setError(
         lastGoodSessionsRef.current.length > 0
-          ? `${message}（正在显示上次数据）`
-          : message,
+          ? `${message}（正在显示上次数据，将自动重试）`
+          : `${message}（将自动重试）`,
       );
       return { ok: false, rebuilding: false, error: message };
     } finally {
@@ -429,6 +446,27 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     initialLoadDone.current = true;
     void loadSessions(isFirst);
   }, [loadSessions, refreshKey]);
+
+  // Any transient list failure gets an automatic bounded-backoff retry. This
+  // also covers the first page load, where there may be no in-memory data yet.
+  useEffect(() => {
+    if (!error || recoveryTimerRef.current) return;
+    let cancelled = false;
+    const delay = Math.min(1_000 * (2 ** recoveryAttemptRef.current), 10_000);
+    recoveryAttemptRef.current += 1;
+    recoveryTimerRef.current = setTimeout(async () => {
+      recoveryTimerRef.current = null;
+      const result = await loadSessions(false);
+      if (!cancelled && !result.ok) setRecoveryTick((value) => value + 1);
+    }, delay);
+    return () => {
+      cancelled = true;
+      if (recoveryTimerRef.current) {
+        clearTimeout(recoveryTimerRef.current);
+        recoveryTimerRef.current = null;
+      }
+    };
+  }, [error, loadSessions, recoveryTick]);
 
   // Missing/corrupt indexes rebuild in the background. Retry until the server
   // reports convergence so users never need to click refresh to recover.

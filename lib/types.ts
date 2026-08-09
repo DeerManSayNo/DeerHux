@@ -57,6 +57,8 @@ export interface ToolCallContent {
 
 export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent | ToolCallContent;
 
+export type MessageDeliveryState = "submitting" | "accepted" | "unknown" | "failed";
+
 export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
@@ -64,8 +66,14 @@ export interface UserMessage {
   skill?: SkillReference;
   agentMode?: AgentMode;
   timestamp?: number;
-  /** Client-generated id used to reconcile optimistic local user messages with server echoes. */
+  /** Client-generated id used for optimistic reconciliation and idempotent prompt admission. */
   clientMessageId?: string;
+  /** Client-only delivery state. Persisted messages omit it and are implicitly accepted. */
+  deliveryState?: MessageDeliveryState;
+  /** Client-only diagnostic shown when delivery failed or could not be confirmed. */
+  deliveryError?: string;
+  /** Whether retrying with this clientMessageId is guaranteed idempotent. */
+  deliveryRetryable?: boolean;
 }
 
 export interface AssistantMessage {

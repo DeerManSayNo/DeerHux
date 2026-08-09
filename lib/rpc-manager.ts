@@ -502,17 +502,29 @@ export class AgentSessionWrapper {
     if (persist) this.persistAgentMode();
   }
 
-  private appendDisplayUserMessage(content: unknown, references: FileReference[], skill?: SkillReference, clientMessageId?: string): void {
+  private appendDisplayUserMessage(content: unknown, references: FileReference[], skill?: SkillReference, clientMessageId?: string, turnId?: string): void {
     if (!this.inner.sessionManager.isPersisted()) return;
-    try {
-      this.inner.sessionManager.appendCustomEntry("display_user_message", {
-        content,
-        ...(references.length ? { references } : {}),
-        ...(skill ? { skill } : {}),
-        ...(clientMessageId ? { clientMessageId } : {}),
-        agentMode: this.agentMode,
-      });
-    } catch { /* best effort: only affects UI history display */ }
+    // This entry is the durable prompt-admission receipt. Do not silently ignore
+    // persistence failures: without it a timed-out client cannot safely determine
+    // whether retrying the prompt would execute tools twice.
+    this.inner.sessionManager.appendCustomEntry("display_user_message", {
+      content,
+      ...(references.length ? { references } : {}),
+      ...(skill ? { skill } : {}),
+      ...(clientMessageId ? { clientMessageId } : {}),
+      ...(turnId ? { turnId } : {}),
+      agentMode: this.agentMode,
+    });
+  }
+
+  findAcceptedPrompt(clientMessageId: string): { turnId?: string } | null {
+    for (const entry of this.inner.sessionManager.getEntries()) {
+      if (entry.type !== "custom" || entry.customType !== "display_user_message") continue;
+      const data = entry.data as { clientMessageId?: unknown; turnId?: unknown } | undefined;
+      if (data?.clientMessageId !== clientMessageId) continue;
+      return { turnId: typeof data.turnId === "string" ? data.turnId : undefined };
+    }
+    return null;
   }
 
   private appendTurnContextMetadata(references: FileReference[], skill?: SkillReference): void {
@@ -1167,7 +1179,7 @@ export class AgentSessionWrapper {
     }
 
     this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
-    this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId);
+    this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId, turnKey);
     this.trackTurn(turnNum, this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
       this.inner.prompt(prepared.message, toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined)
     )));
@@ -1201,6 +1213,17 @@ export class AgentSessionWrapper {
 
     switch (type) {
       case "prompt": {
+        const promptClientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
+          ? command.clientMessageId.trim()
+          : undefined;
+        // Check idempotency before the busy guard: a retry for the currently
+        // running turn is a successful duplicate, not an AGENT_BUSY conflict.
+        if (promptClientMessageId) {
+          const accepted = this.findAcceptedPrompt(promptClientMessageId);
+          if (accepted) {
+            return { accepted: true, duplicate: true, clientMessageId: promptClientMessageId, turnId: accepted.turnId };
+          }
+        }
         if (this.isTurnBusy() || this._stopRequested) {
           throw new Error("AGENT_BUSY: 当前会话仍有回合运行或正在停止，请等待回合结束后重试");
         }
@@ -1215,11 +1238,8 @@ export class AgentSessionWrapper {
         const promptRoleId = typeof command.roleId === "string" ? command.roleId : undefined;
         const promptText = typeof command.message === "string" ? command.message : "";
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const promptClientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
-          ? command.clientMessageId.trim()
-          : undefined;
         try {
-          return await this.commitAndTrackPromptTurn(
+          const result = await this.commitAndTrackPromptTurn(
             promptText,
             command.references,
             command.skillName,
@@ -1228,6 +1248,7 @@ export class AgentSessionWrapper {
             admissionController.signal,
             promptRoleId,
           );
+          return { accepted: true, duplicate: false, ...(promptClientMessageId ? { clientMessageId: promptClientMessageId } : {}), ...result };
         } catch (error) {
           // 失败发生在 trackTurn 建立前时，不会有 engine 的 agent_end 兜底；
           // 必须在 wrapper 层撤销对外运行态，避免 get_state 残留 true。
@@ -1660,6 +1681,8 @@ export class AgentSessionWrapper {
 declare global {
   var __deerhuxSessions: Map<string, AgentSessionWrapper> | undefined;
   var __deerhuxSessionAliases: Map<string, string> | undefined;
+  /** Stable new-session request id → real session id. Kept after wrapper eviction. */
+  var __deerhuxCreatedSessions: Map<string, string> | undefined;
   var __deerhuxStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
 }
 
@@ -1715,6 +1738,16 @@ function getSessionAliases(): Map<string, string> {
 
 function resolveSessionAlias(sessionKey: string): string {
   return getSessionAliases().get(sessionKey) ?? sessionKey;
+}
+
+function getCreatedSessions(): Map<string, string> {
+  if (!globalThis.__deerhuxCreatedSessions) globalThis.__deerhuxCreatedSessions = new Map();
+  return globalThis.__deerhuxCreatedSessions;
+}
+
+/** Resolve a stable new-session request id after its startup lock has settled. */
+export function getCreatedSessionId(requestKey: string): string | undefined {
+  return getCreatedSessions().get(requestKey);
 }
 
 function getRegistrySession(sessionKey: string): AgentSessionWrapper | undefined {
@@ -1811,6 +1844,9 @@ export async function startRpcSession(
     const { session, realSessionId } = await startDeerLoopSession(
       sessionId, sessionFile, cwd, toolNames, roleId, agentMode, model, options,
     );
+    if (!sessionFile && sessionId.startsWith("__new__")) {
+      getCreatedSessions().set(sessionId, realSessionId);
+    }
     return { session, realSessionId };
   })().finally(() => {
     locks.delete(lockKey);

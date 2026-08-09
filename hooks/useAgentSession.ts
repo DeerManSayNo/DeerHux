@@ -6,15 +6,48 @@ import type { AgentMessage, AssistantMessage, FileReference, ImageContent, Sessi
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { agentEventBus } from "@/lib/agent-event-bus";
-import { sendAgentCommand } from "@/lib/agent-client";
+import { isAmbiguousAgentCommandError, sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "@/lib/agent-modes";
+import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 
 type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
 
 function createClientMessageId(): string {
   return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function verifyPromptAdmission(sessionId: string, clientMessageId: string): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 12_000);
+    try {
+      const res = await fetch(
+        `/api/agent/${encodeURIComponent(sessionId)}?clientMessageId=${encodeURIComponent(clientMessageId)}`,
+        { cache: "no-store", signal: controller.signal },
+      );
+      if (!res.ok) return false;
+      const body = await res.json() as { accepted?: boolean };
+      return body.accepted === true;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  } catch {
+    return false;
+  }
+}
+
+function withDeliveryState(
+  message: UserMessage,
+  deliveryState: UserMessage["deliveryState"],
+  deliveryError?: string,
+): UserMessage {
+  return {
+    ...message,
+    deliveryState,
+    ...(deliveryError ? { deliveryError } : { deliveryError: undefined }),
+  };
 }
 
 /**
@@ -193,16 +226,28 @@ interface ModelsResponse {
   thinkingLevelMaps?: Record<string, Record<string, string | null>>;
 }
 
+const MODELS_CACHE_KEY = "deerhux.control-plane.models.v1";
 let modelsPromise: Promise<ModelsResponse> | null = null;
+
+type UsableModelsResponse = ModelsResponse & { modelList: NonNullable<ModelsResponse["modelList"]> };
+
+function isUsableModelsResponse(value: ModelsResponse | null | undefined): value is UsableModelsResponse {
+  return Boolean(value && value.models && typeof value.models === "object" && Array.isArray(value.modelList));
+}
 
 function fetchModels(): Promise<ModelsResponse> {
   if (modelsPromise) return modelsPromise;
 
-  modelsPromise = fetch("/api/models", { cache: "no-store" })
-    .then((r) => r.json() as Promise<ModelsResponse>)
-    .finally(() => {
-      modelsPromise = null;
-    });
+  modelsPromise = fetchJsonWithRetry<ModelsResponse>("/api/models", { cache: "no-store" }, {
+    attempts: 3,
+    timeoutMs: 10_000,
+  }).then((response) => {
+    if (!isUsableModelsResponse(response)) throw new Error("Invalid models response");
+    writeCachedJson(MODELS_CACHE_KEY, response);
+    return response;
+  }).finally(() => {
+    modelsPromise = null;
+  });
   return modelsPromise;
 }
 
@@ -369,61 +414,28 @@ function userMessageTextKey(content: AgentMessage["content"]): string {
   return "";
 }
 
-/**
- * loadSession 读出的消息来自 SDK 存盘文件，不含 clientMessageId。直接用它
- * 覆盖本地会丢失 handleSend/handleFollowUp 乐观 push 的 id，导致后续
- * message_end/user echo 的 clientMessageId dedupe 失效而出现重复用户消息。
- * 这里按文本签名把本地待确认的 id 迁移到 loaded 对应消息上。
- */
-function mergeOptimisticClientMessageIds(prev: AgentMessage[], loaded: AgentMessage[]): AgentMessage[] {
-  if (!prev.length) return loaded;
-  const pendingIds = new Map<string, string>();
-  for (const m of prev) {
-    if (m.role === "user" && m.clientMessageId) {
-      pendingIds.set(userMessageTextKey(m.content), m.clientMessageId);
-    }
-  }
-  if (!pendingIds.size) return loaded;
-  let touched = false;
-  const merged = loaded.map((m) => {
-    if (m.role === "user" && !m.clientMessageId) {
-      const id = pendingIds.get(userMessageTextKey(m.content));
-      if (id) {
-        touched = true;
-        return { ...m, clientMessageId: id } as AgentMessage;
-      }
-    }
-    return m;
-  });
-  return touched ? merged : loaded;
-}
+function reconcilePendingUserMessages(
+  loaded: AgentMessage[],
+  loadedEntryIds: string[],
+  pending: Map<string, AgentMessage>,
+): { messages: AgentMessage[]; entryIds: string[] } {
+  if (!pending.size) return { messages: loaded, entryIds: loadedEntryIds };
 
-function mergePendingUserMessages(loaded: AgentMessage[], pending: AgentMessage[]): AgentMessage[] {
-  if (!pending.length) return loaded;
-
-  const loadedClientIds = new Set<string>();
-  const loadedTextCounts = new Map<string, number>();
+  // SSE 的 user echo 只表示服务端已受理，不表示消息已经写入 session 文件。
+  // 只有持久化快照带回相同 clientMessageId 时，才能确认并移除本地 pending。
   for (const msg of loaded) {
-    if (msg.role !== "user") continue;
-    if (msg.clientMessageId) loadedClientIds.add(msg.clientMessageId);
-    const key = userMessageTextKey(msg.content);
-    if (key) loadedTextCounts.set(key, (loadedTextCounts.get(key) ?? 0) + 1);
-  }
-
-  const unresolved: AgentMessage[] = [];
-  for (const msg of pending) {
-    if (msg.role !== "user") continue;
-    if (msg.clientMessageId && loadedClientIds.has(msg.clientMessageId)) continue;
-    const key = userMessageTextKey(msg.content);
-    const seenCount = key ? loadedTextCounts.get(key) ?? 0 : 0;
-    if (seenCount > 0) {
-      loadedTextCounts.set(key, seenCount - 1);
-      continue;
+    if (msg.role === "user" && msg.clientMessageId) {
+      pending.delete(msg.clientMessageId);
     }
-    unresolved.push(msg);
   }
 
-  return unresolved.length ? [...loaded, ...unresolved] : loaded;
+  if (!pending.size) return { messages: loaded, entryIds: loadedEntryIds };
+  const unresolved = [...pending.values()];
+  return {
+    messages: [...loaded, ...unresolved],
+    // SessionContext 要求 entryIds 与 messages 平行；pending 尚未落盘，没有 entry id。
+    entryIds: [...loadedEntryIds, ...unresolved.map(() => "")],
+  };
 }
 
 function getStreamingContentLength(msg: Partial<AgentMessage> | null | undefined): number {
@@ -497,6 +509,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
+  // 服务端快照、乐观用户消息和流式 assistant 是三个不同一致性层级。
+  // pending 只在持久化快照带回相同 clientMessageId 后确认，不能被 user SSE echo 提前清除。
+  const pendingUserMessagesRef = useRef<Map<string, AgentMessage>>(new Map());
+  // 快照请求期间只要消息发生本地变化，该请求的 message 部分就已过期，不能覆盖 UI。
+  const messageMutationEpochRef = useRef(0);
+  // 多个 loadSession/loadRecentMessages 并发时，只允许最后启动的快照应用消息。
+  const messageSnapshotRequestSeqRef = useRef(0);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
@@ -685,17 +704,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // request to avoid thundering-herd on a slow backend.
   const loadSessionInflightRef = useRef<{
     sid: string;
+    messageEpoch: number;
     promise: Promise<AgentStatePayload | null>;
   } | null>(null);
 
-  const applySessionSnapshot = useCallback((d: SessionDataWithAgentState) => {
+  const applySessionSnapshot = useCallback((
+    d: SessionDataWithAgentState,
+    applyMessages = true,
+  ) => {
     setData(d);
     const { messages: loadedMessages, entryIds: loadedEntryIds } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
     const prevKey = entryIdsRef.current.join("\0");
     const nextKey = loadedEntryIds.join("\0");
-    const changed = Boolean(nextKey && nextKey !== prevKey);
-    setMessages((prev) => mergeOptimisticClientMessageIds(prev, loadedMessages));
-    setEntryIds(loadedEntryIds);
+    const changed = applyMessages && Boolean(nextKey && nextKey !== prevKey);
+
+    if (applyMessages) {
+      const reconciled = reconcilePendingUserMessages(
+        loadedMessages,
+        loadedEntryIds,
+        pendingUserMessagesRef.current,
+      );
+      setMessages(reconciled.messages);
+      setEntryIds(reconciled.entryIds);
+    }
     setCurrentModelOverride(null);
     setAgentMode(normalizeAgentMode(d.context.agentMode));
     setError(null);
@@ -708,7 +739,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       lastContentLengthRef.current = Math.max(lastContentLengthRef.current, getStreamingContentLength(lastAssistant));
     }
 
-    const hasAssistant = loadedMessages.some((msg) => msg.role === "assistant");
+    const hasAssistant = applyMessages && loadedMessages.some((msg) => msg.role === "assistant");
     if (awaitingAgentStartRef.current && (changed || hasAssistant || d.agentState?.running)) {
       clearAwaitingAgentStartGuard();
       awaitingAgentStartRef.current = false;
@@ -722,11 +753,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Background refreshes piggyback on an existing inflight request for the
     // same sid. showLoading callers always start a fresh request so loading
     // spinner transitions stay tied to user-visible actions.
+    const messageEpochAtStart = messageMutationEpochRef.current;
     const inflight = loadSessionInflightRef.current;
-    if (!showLoading && inflight && inflight.sid === sid) {
+    if (
+      !showLoading
+      && inflight
+      && inflight.sid === sid
+      && inflight.messageEpoch === messageEpochAtStart
+    ) {
       return inflight.promise;
     }
 
+    const snapshotRequestSeq = ++messageSnapshotRequestSeqRef.current;
     const controller = new AbortController();
     // Link to the session-level abort so a tab switch cancels this request
     // cleanly instead of letting it race the new session's requests.
@@ -764,7 +802,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const d = await res.json() as SessionDataWithAgentState;
         if (sid !== sessionIdRef.current) return null;
-        applySessionSnapshot(d);
+        const requestIsLatest = snapshotRequestSeq === messageSnapshotRequestSeqRef.current;
+        if (!requestIsLatest) return d.agentState ?? null;
+        const messagesAreCurrent = (
+          messageEpochAtStart === messageMutationEpochRef.current
+          && !agentRunningRef.current
+        );
+        // 最新快照若跨过了消息变化，只更新模型/模式等元数据，绝不能覆盖消息。
+        applySessionSnapshot(d, messagesAreCurrent);
         // If no live agent state, fall back to thinking level from session file
         if (!d.agentState?.state?.thinkingLevel && d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
           setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
@@ -792,7 +837,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Register the inflight promise so concurrent background callers share
     // this request. Cleared on settle so the next call can fire.
     if (!showLoading) {
-      loadSessionInflightRef.current = { sid, promise };
+      loadSessionInflightRef.current = { sid, messageEpoch: messageEpochAtStart, promise };
       promise.finally(() => {
         if (loadSessionInflightRef.current?.promise === promise) {
           loadSessionInflightRef.current = null;
@@ -810,6 +855,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * the UI can offer "load full history" via {@link loadFullHistory}.
    */
   const loadRecentMessages = useCallback(async (sid: string, showLoading = false) => {
+    const snapshotRequestSeq = ++messageSnapshotRequestSeqRef.current;
+    const messageEpochAtStart = messageMutationEpochRef.current;
     const controller = new AbortController();
     const sessionSignal = sessionAbortRef.current?.signal;
     const timeout = setTimeout(() => controller.abort(), showLoading ? 30_000 : 12_000);
@@ -845,8 +892,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         page: { limit: number; returned: number; hasMoreBefore: boolean };
       };
       if (sid !== sessionIdRef.current) return;
+      const requestIsLatest = snapshotRequestSeq === messageSnapshotRequestSeqRef.current;
+      if (!requestIsLatest) return;
+      const messagesAreCurrent = (
+        messageEpochAtStart === messageMutationEpochRef.current
+        && !agentRunningRef.current
+      );
       // Shape into SessionData so applySessionSnapshot handles normalization
-      // (clientMessageId merge, optimistics, agent-mode restore) identically.
+      // and pending-message reconciliation identically.
       applySessionSnapshot({
         sessionId: d.sessionId,
         // leafId is not used by applySessionSnapshot's message path; reuse null.
@@ -860,7 +913,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           roleId: d.roleId ?? null,
           agentMode: d.agentMode,
         },
-      });
+      }, messagesAreCurrent);
       setHasOlderMessages(Boolean(d.page?.hasMoreBefore));
       setError(null);
     } catch (e) {
@@ -1370,6 +1423,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           break;
         }
         terminalTurnEndedSessionIdRef.current = sessionIdRef.current;
+        // Any user prompt that reached agent_end was accepted, even if its HTTP
+        // acknowledgement was lost and the local bubble was marked unknown.
+        setMessages((prev) => prev.map((message) =>
+          message.role === "user" && message.deliveryState === "unknown"
+            ? withDeliveryState(message, "accepted")
+            : message
+        ));
         // 同步更新 ref，避免 SSE 重连/看门狗在 React 渲染前仍将旧回合当作运行中。
         agentRunningRef.current = false;
         setAgentRunning(false);
@@ -1464,6 +1524,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
           const normalized = normalizeVisibleUserMessage(normalizeCompletedMessage(completed));
+          // 任何完成消息到达都使正在途中的历史快照失去覆盖资格；即使 user echo
+          // 最终被 clientMessageId 去重，它也代表快照请求之后发生了新的回合事件。
+          messageMutationEpochRef.current += 1;
           setMessages((prev) => {
             // We optimistically append the user's prompt in handleSend/handleFollowUp/handleBuildPlan,
             // each carrying a clientMessageId. DeerHux later emits a message_end for
@@ -1475,8 +1538,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (normalized.role === "user") {
               const incomingClientMessageId = normalized.clientMessageId;
               if (incomingClientMessageId) {
-                if (prev.some((m): m is UserMessage => m.role === "user" && m.clientMessageId === incomingClientMessageId)) {
-                  return prev; // locally optimistic-appended, dedupe
+                const existingIndex = prev.findIndex((m): m is UserMessage => m.role === "user" && m.clientMessageId === incomingClientMessageId);
+                if (existingIndex >= 0) {
+                  const existing = prev[existingIndex] as UserMessage;
+                  if (!existing.deliveryState || existing.deliveryState === "accepted") return prev;
+                  const next = [...prev];
+                  next[existingIndex] = withDeliveryState(existing, "accepted");
+                  return next;
                 }
 
                 // loadSession can briefly replace the optimistic user message with
@@ -1717,8 +1785,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ...(sentReferences ? { references: sentReferences } : {}),
       ...(skill ? { skill } : {}),
       clientMessageId,
+      deliveryState: "submitting",
+      deliveryRetryable: true,
       timestamp: Date.now(),
     };
+    pendingUserMessagesRef.current.set(clientMessageId, userMsg);
+    messageMutationEpochRef.current += 1;
     setMessages((prev) => [...prev, userMsg]);
     setAgentRunning(true);
     setAgentPhase({ kind: "waiting_model", reason: "initial" });
@@ -1758,7 +1830,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // writes all events to the event-store, and SSE replays them on
         // first connect (getSince returns full history when no Last-Event-ID),
         // so we no longer need a separate `type=create` round-trip.
-        const res = await fetch("/api/agent/new", {
+        const result = await fetchJsonWithRetry<{ sessionId: string }>("/api/agent/new", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1766,6 +1838,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             type: "prompt",
             message,
             clientMessageId,
+            creationRequestId: clientMessageId,
             agentMode,
             ...(sentReferences ? { references: sentReferences } : {}),
             ...(piImages?.length ? { images: piImages } : {}),
@@ -1774,12 +1847,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(roleId ? { roleId } : {}),
             ...(skill ? { skillName: skill.name } : {}),
           }),
+        }, {
+          // POST retry is safe here because creationRequestId and
+          // clientMessageId make both session creation and prompt admission
+          // idempotent on the server.
+          attempts: 2,
+          timeoutMs: 45_000,
         });
-        if (!res.ok) {
-          const detail = await res.text().catch(() => "");
-          throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
-        }
-        const result = await res.json() as { sessionId: string };
         const realId = result.sessionId;
         sessionIdRef.current = realId;
         adoptingCreatedSessionRef.current = realId;
@@ -1816,6 +1890,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(skill ? { skillName: skill.name } : {}),
         }, { timeoutMs: 45_000 });
       }
+      const acceptedMessage = withDeliveryState(userMsg as UserMessage, "accepted");
+      pendingUserMessagesRef.current.set(clientMessageId, acceptedMessage);
+      messageMutationEpochRef.current += 1;
+      setMessages((prev) => prev.map((item) => item === userMsg ? acceptedMessage : item));
     } catch (e) {
       if (optimisticNewSession && !createdRealSession) onSessionStarted?.(null);
       awaitingAgentStartRef.current = false;
@@ -1834,28 +1912,155 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         lastModelErrorRef.current = errorMessage;
         setLastModelError(errorMessage);
       }
-      // Remove the optimistically-inserted user message so the UI doesn't
-      // show a dangling message with no reply.
-      setMessages((prev) => prev.filter((m) => m !== userMsg));
-      // Reset the ref synchronously so the watchdog and SSE reconnect logic
-      // see the correct state immediately — not after the next React render.
-      agentRunningRef.current = false;
-      pendingAbortOnSessionReadyRef.current = false;
-      setAgentRunning(false);
-      setAgentPhase(null);
-      dispatch({ type: "end" });
-      // If connectEvents was called before sendAgentCommand threw (existing
-      // session path), close the orphaned EventSource so it doesn't keep
-      // retrying in the background for a prompt that was never sent.
-      if (sseReconnectTimerRef.current) {
-        clearTimeout(sseReconnectTimerRef.current);
-        sseReconnectTimerRef.current = null;
+      // Never delete the user's content. A network/timeout failure is ambiguous:
+      // the server may have durably admitted the prompt before the response was
+      // lost. Verify the durable receipt once; unresolved cases remain unknown.
+      const ambiguous = isAmbiguousAgentCommandError(e);
+      const verifySessionId = sessionIdRef.current;
+      const wasAccepted = ambiguous && verifySessionId
+        ? await verifyPromptAdmission(verifySessionId, clientMessageId)
+        : false;
+      const deliveryState = wasAccepted ? "accepted" : ambiguous ? "unknown" : "failed";
+      const failedMessage = withDeliveryState(userMsg as UserMessage, deliveryState, wasAccepted ? undefined : errorMessage);
+      pendingUserMessagesRef.current.set(clientMessageId, failedMessage);
+      messageMutationEpochRef.current += 1;
+      setMessages((prev) => prev.map((item) => item === userMsg ? failedMessage : item));
+      if (wasAccepted && verifySessionId) {
+        // The HTTP response was lost but the durable receipt exists. Keep the
+        // live turn and SSE connection intact; normal events will finish it.
+        ensureEventsConnected(verifySessionId);
+      } else {
+        // Reset the ref synchronously so the watchdog and SSE reconnect logic
+        // see the correct state immediately — not after the next React render.
+        agentRunningRef.current = false;
+        pendingAbortOnSessionReadyRef.current = false;
+        setAgentRunning(false);
+        setAgentPhase(null);
+        dispatch({ type: "end" });
+        if (sseReconnectTimerRef.current) {
+          clearTimeout(sseReconnectTimerRef.current);
+          sseReconnectTimerRef.current = null;
+        }
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
+        cancelPendingMessageUpdate();
       }
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
-      cancelPendingMessageUpdate();
     }
   }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, cancelPendingMessageUpdate, connectEvents, ensureEventsConnected, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
+
+  const handleRetryDelivery = useCallback(async (userMessage: UserMessage) => {
+    let sid = sessionIdRef.current;
+    const clientMessageId = userMessage.clientMessageId;
+    const canRetryNewSession = !sid && isNew && Boolean(newSessionCwd);
+    if ((!sid && !canRetryNewSession) || !clientMessageId || agentRunningRef.current) return;
+
+    const submittingMessage = withDeliveryState(userMessage, "submitting");
+    pendingUserMessagesRef.current.set(clientMessageId, submittingMessage);
+    messageMutationEpochRef.current += 1;
+    setMessages((prev) => prev.map((item) =>
+      item.role === "user" && item.clientMessageId === clientMessageId ? submittingMessage : item
+    ));
+
+    agentRunningRef.current = true;
+    setAgentRunning(true);
+    setAgentPhase({ kind: "waiting_model", reason: "initial" });
+    dispatch({ type: "start" });
+    if (sid) ensureEventsConnected(sid);
+
+    const imageBlocks = Array.isArray(userMessage.content)
+      ? userMessage.content.filter((block): block is ImageContent => block.type === "image")
+      : [];
+    const images = imageBlocks.flatMap((block) =>
+      block.source.type === "base64" && block.source.data
+        ? [{ type: "image", data: block.source.data, mimeType: block.source.media_type ?? "image/png" }]
+        : []
+    );
+
+    try {
+      let receipt: { duplicate?: boolean };
+      if (sid) {
+        receipt = await sendAgentCommand<{ duplicate?: boolean }>(sid, {
+          type: "prompt",
+          message: userTextContent(userMessage),
+          clientMessageId,
+          ...(userMessage.references?.length ? { references: userMessage.references } : {}),
+          ...(images.length ? { images } : {}),
+          ...(userMessage.skill?.name ? { skillName: userMessage.skill.name } : {}),
+        }, { timeoutMs: 45_000 });
+      } else {
+        const selectedModel = newSessionModel;
+        const result = await fetchJsonWithRetry<{ sessionId: string; data?: { duplicate?: boolean } }>("/api/agent/new", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cwd: newSessionCwd,
+            type: "prompt",
+            message: userTextContent(userMessage),
+            clientMessageId,
+            creationRequestId: clientMessageId,
+            agentMode,
+            ...(userMessage.references?.length ? { references: userMessage.references } : {}),
+            ...(images.length ? { images } : {}),
+            ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
+            ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+            ...(userMessage.skill?.name ? { skillName: userMessage.skill.name } : {}),
+          }),
+        }, { attempts: 2, timeoutMs: 45_000 });
+        sid = result.sessionId;
+        sessionIdRef.current = sid;
+        adoptingCreatedSessionRef.current = sid;
+        connectEvents(sid);
+        onSessionCreated?.({
+          id: sid,
+          path: "",
+          cwd: newSessionCwd!,
+          created: new Date().toISOString(),
+          modified: new Date().toISOString(),
+          messageCount: 1,
+          firstMessage: userTextContent(userMessage),
+        });
+        receipt = result.data ?? {};
+      }
+      const acceptedMessage = withDeliveryState(userMessage, "accepted");
+      pendingUserMessagesRef.current.set(clientMessageId, acceptedMessage);
+      messageMutationEpochRef.current += 1;
+      setMessages((prev) => prev.map((item) =>
+        item.role === "user" && item.clientMessageId === clientMessageId ? acceptedMessage : item
+      ));
+      if (receipt.duplicate && sid) {
+        const state = await loadSessionState(sid);
+        const stillRunning = Boolean(state?.running || state?.state?.isRunning || state?.state?.isStreaming);
+        if (!stillRunning) {
+          await loadSession(sid);
+          agentRunningRef.current = false;
+          setAgentRunning(false);
+          setAgentPhase(null);
+          dispatch({ type: "end" });
+          eventSourceRef.current?.close();
+          eventSourceRef.current = null;
+        }
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const ambiguous = isAmbiguousAgentCommandError(error);
+      const wasAccepted = ambiguous && sid ? await verifyPromptAdmission(sid, clientMessageId) : false;
+      const state = wasAccepted ? "accepted" : ambiguous ? "unknown" : "failed";
+      const failedMessage = withDeliveryState(userMessage, state, wasAccepted ? undefined : errorMessage);
+      pendingUserMessagesRef.current.set(clientMessageId, failedMessage);
+      messageMutationEpochRef.current += 1;
+      setMessages((prev) => prev.map((item) =>
+        item.role === "user" && item.clientMessageId === clientMessageId ? failedMessage : item
+      ));
+      if (wasAccepted && sid) {
+        ensureEventsConnected(sid);
+      } else {
+        agentRunningRef.current = false;
+        setAgentRunning(false);
+        setAgentPhase(null);
+        dispatch({ type: "end" });
+      }
+    }
+  }, [agentMode, connectEvents, ensureEventsConnected, isNew, loadSession, loadSessionState, newSessionCwd, newSessionModel, onSessionCreated, thinkingLevel]);
 
   const forceStopLocally = useCallback((opts?: { keepPendingAbort?: boolean }) => {
     clearAwaitingAgentStartGuard();
@@ -2000,9 +2205,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ? { provider: opts.provider, modelId: opts.modelId }
           : {}),
       });
-      // compaction_end 的 SSE handler 会刷新消息；这里不再把重复的 session 读取
-      // 放在用户发送的关键路径上。SSE 断开时仍做一次非阻塞兜底刷新。
-      void loadSession(sid, true);
+      // compaction_end 的 SSE handler 会刷新消息；这里仅做同键后台兜底。
+      // showLoading=false 可与 SSE 刷新共享 inflight，避免压缩后并发读取大型 session。
+      void loadSession(sid, false, false);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setCompactError(message);
@@ -2016,6 +2221,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     const sentReferences = references?.length ? references : undefined;
+    messageMutationEpochRef.current += 1;
     setMessages((prev) => [...prev, {
       role: "user",
       content: buildUserContent(`[steer] ${message}`, images),
@@ -2047,14 +2253,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const sentReferences = references?.length ? references : undefined;
     const clientMessageId = createClientMessageId();
-    setMessages((prev) => [...prev, {
+    const userMsg = {
       role: "user",
       content: buildUserContent(message, images),
       ...(sentReferences ? { references: sentReferences } : {}),
       ...(skill ? { skill } : {}),
       clientMessageId,
+      deliveryState: "submitting",
+      deliveryRetryable: false,
       timestamp: Date.now(),
-    } as AgentMessage]);
+    } as AgentMessage;
+    pendingUserMessagesRef.current.set(clientMessageId, userMsg);
+    messageMutationEpochRef.current += 1;
+    setMessages((prev) => [...prev, userMsg]);
     autoContinueSentRef.current = false;
     autoContinueInProgressRef.current = false;
     retryExhaustedRecoveryUsedRef.current = false;
@@ -2075,7 +2286,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
         ...(skill ? { skillName: skill.name } : {}),
       });
+      const acceptedMessage = withDeliveryState(userMsg as UserMessage, "accepted");
+      pendingUserMessagesRef.current.set(clientMessageId, acceptedMessage);
+      messageMutationEpochRef.current += 1;
+      setMessages((prev) => prev.map((item) => item === userMsg ? acceptedMessage : item));
     } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      // Follow-up queue commands are not prompt-idempotent yet, so keep the
+      // content visible but mark them failed instead of offering unsafe retry.
+      const failedMessage = withDeliveryState(userMsg as UserMessage, "failed", errorMessage);
+      pendingUserMessagesRef.current.set(clientMessageId, failedMessage);
+      messageMutationEpochRef.current += 1;
+      setMessages((prev) => prev.map((item) => item === userMsg ? failedMessage : item));
       console.error("Failed to follow up:", e);
     }
   }, []);
@@ -2527,12 +2749,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentPhase({ kind: "waiting_model", reason: "initial" });
     dispatch({ type: "start" });
     const clientMessageId = createClientMessageId();
-    setMessages((prev) => [...prev, {
+    const userMsg = {
       role: "user",
       content: "请按刚才用户批准的计划开始实施。",
       clientMessageId,
       timestamp: Date.now(),
-    } as AgentMessage]);
+    } as AgentMessage;
+    pendingUserMessagesRef.current.set(clientMessageId, userMsg);
+    messageMutationEpochRef.current += 1;
+    setMessages((prev) => [...prev, userMsg]);
     try {
       connectEvents(sid);
       scheduleAwaitingAgentStartGuard(sid, currentTurnId);
@@ -2540,6 +2765,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       awaitingAgentStartRef.current = false;
       clearAwaitingAgentStartGuard();
+      pendingUserMessagesRef.current.delete(clientMessageId);
+      messageMutationEpochRef.current += 1;
+      setMessages((prev) => prev.filter((msg) => msg !== userMsg));
       console.error("Failed to build plan:", e);
       agentRunningRef.current = false;
       setAgentRunning(false);
@@ -2596,6 +2824,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionAbortRef.current?.abort();
     sessionAbortRef.current = new AbortController();
     loadSessionInflightRef.current = null;
+    pendingUserMessagesRef.current.clear();
+    messageMutationEpochRef.current += 1;
+    messageSnapshotRequestSeqRef.current += 1;
     activeSubagentToolIdsRef.current.clear();
     stopSubagentLiveRefresh();
     agentRunningRef.current = false;
@@ -2770,18 +3001,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
 
-  // Load the configured model list fresh so ChatInput tracks ModelsConfig.
+  // Load cached control-plane data immediately, then revalidate. A saturated
+  // backend must never turn one transient models request failure into a missing
+  // selector for the rest of the page lifetime.
   useEffect(() => {
     let cancelled = false;
-    fetchModels().then((d) => {
-      if (cancelled) return;
+    const applyModels = (d: ModelsResponse) => {
+      if (cancelled || !isUsableModelsResponse(d)) return;
       setModelNames(d.models);
       setAutoRecoveryModels(d.autoRecoveryModels ?? []);
       if (d.thinkingLevels) setModelThinkingLevels(d.thinkingLevels);
       if (d.thinkingLevelMaps) setModelThinkingLevelMaps(d.thinkingLevelMaps);
-      if (d.modelList) {
+      // Never erase a known-good selector with an unexpected transient empty
+      // response. A genuinely empty config has no prior cache to preserve.
+      if (d.modelList.length > 0) {
         setModelList(d.modelList);
-        if (isNew && d.modelList.length > 0) {
+        if (isNew) {
           const def = d.defaultModel;
           const match = def && d.modelList.find((m) => m.id === def.modelId && m.provider === def.provider);
           const selected = match
@@ -2790,7 +3025,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setNewSessionModel(selected);
         }
       }
-    }).catch(() => {});
+    };
+
+    const cached = readCachedJson<ModelsResponse>(MODELS_CACHE_KEY);
+    if (isUsableModelsResponse(cached)) applyModels(cached);
+    fetchModels().then(applyModels).catch(() => {
+      // Stale data remains usable; the next mount/config event revalidates.
+    });
     return () => { cancelled = true; };
   }, [isNew, modelsRefreshKey, modelsConfigVersion, setNewSessionModel]);
 
@@ -2821,7 +3062,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, handleFork, handleModelChange,
+    handleSend, handleRetryDelivery, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleAgentModeChange, handleBuildPlan, handleThinkingLevelChange, loadTools, setData, setMessages,
     setSystemPrompt, setLastModelError, handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange, handleSubagentToggle,

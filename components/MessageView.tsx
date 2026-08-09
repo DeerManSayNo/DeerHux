@@ -53,6 +53,8 @@ interface Props {
   turnDurationSeconds?: number;
   nextUserTimestamp?: number;
   onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
+  onRetryDelivery?: (message: UserMessage) => void;
+  onRestoreToInput?: (message: UserMessage) => void;
   systemPrompt?: string | null;
   /** subagent 协作 run 快照（来自父 session 的 custom entry）。 */
   collaborationRuns?: CollaborationRunSnapshot[];
@@ -94,7 +96,7 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, nextUserTimestamp, onResend, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
+function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
   // 新 run 用 parentEntryId 精确归属到触发它的 user turn；旧数据没有该字段时，
   // 才保留 createdAt 时间窗作为兼容兜底。
   const rawTs = message.role === "user" ? (message as UserMessage).timestamp : undefined;
@@ -120,7 +122,7 @@ function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchd
   if (message.role === "user") {
     return (
       <>
-        <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} systemPrompt={systemPrompt} />
+        <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} onRetryDelivery={onRetryDelivery} onRestoreToInput={onRestoreToInput} systemPrompt={systemPrompt} />
         {linkedRuns.length > 0 && (
           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
             {linkedRuns.map((run) => (
@@ -158,6 +160,8 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.turnDurationSeconds === next.turnDurationSeconds &&
   prev.nextUserTimestamp === next.nextUserTimestamp &&
   prev.onResend === next.onResend &&
+  prev.onRetryDelivery === next.onRetryDelivery &&
+  prev.onRestoreToInput === next.onRestoreToInput &&
   prev.systemPrompt === next.systemPrompt &&
   prev.collaborationRuns === next.collaborationRuns &&
   prev.turnEntryIds === next.turnEntryIds &&
@@ -199,12 +203,14 @@ function parseReferencePrefix(text: string): { references: string[]; rest: strin
   return { references, rest: lines.slice(index).join("\n") };
 }
 
-function UserMessageView({ message, entryId, onResend, systemPrompt }: {
+function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestoreToInput, systemPrompt }: {
   message: UserMessage;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
   onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
+  onRetryDelivery?: (message: UserMessage) => void;
+  onRestoreToInput?: (message: UserMessage) => void;
   systemPrompt?: string | null;
 }) {
   const content =
@@ -652,6 +658,47 @@ function UserMessageView({ message, entryId, onResend, systemPrompt }: {
               </svg>
               发送
             </button>
+        </div>
+      )}
+      {message.deliveryState && message.deliveryState !== "accepted" && (
+        <div
+          role="status"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            marginTop: 7,
+            padding: "7px 10px",
+            borderRadius: 9,
+            border: `1px solid ${message.deliveryState === "failed" ? "color-mix(in srgb, #ef4444 35%, var(--border))" : "var(--border)"}`,
+            background: message.deliveryState === "failed"
+              ? "color-mix(in srgb, #ef4444 7%, var(--bg))"
+              : "color-mix(in srgb, var(--bg-panel) 70%, var(--bg))",
+            color: message.deliveryState === "failed" ? "#ef4444" : "var(--text-muted)",
+            fontSize: 12,
+          }}
+          title={message.deliveryError}
+        >
+          <span>
+            {message.deliveryState === "submitting" && "正在确认服务端接收…"}
+            {message.deliveryState === "unknown" && "暂时无法确认是否已接收，安全重试不会重复执行"}
+            {message.deliveryState === "failed" && `发送失败${message.deliveryError ? `：${message.deliveryError}` : ""}`}
+          </span>
+          {(message.deliveryState === "unknown" || message.deliveryState === "failed") && (
+            <span style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              {onRestoreToInput && (
+                <button type="button" onClick={() => onRestoreToInput(message)} style={{ border: "none", background: "transparent", color: "inherit", cursor: "pointer", padding: "2px 4px", fontWeight: 600 }}>
+                  恢复到输入框
+                </button>
+              )}
+              {onRetryDelivery && (
+                <button type="button" onClick={() => onRetryDelivery(message)} style={{ border: "1px solid currentColor", borderRadius: 6, background: "transparent", color: "inherit", cursor: "pointer", padding: "3px 7px", fontWeight: 600 }}>
+                  安全重试
+                </button>
+              )}
+            </span>
+          )}
         </div>
       )}
       {showSystemPromptModal && systemPrompt && (

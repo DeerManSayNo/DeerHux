@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { ensureRpcSession, SessionNotFoundError } from "@/lib/agent-runtime/session-service";
 import { validateSessionId, SessionIdValidationError } from "@/lib/validate";
+import { readSessionFileCached, resolveSessionPath } from "@/lib/session-reader";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -55,9 +56,9 @@ export async function POST(
   }
 }
 
-// GET /api/agent/[id] - Get current agent state
+// GET /api/agent/[id] - Get current agent state or verify prompt admission
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -65,6 +66,19 @@ export async function GET(
   try {
     validateSessionId(id);
     const session = getRpcSession(id);
+    const clientMessageId = new URL(req.url).searchParams.get("clientMessageId")?.trim();
+    if (clientMessageId) {
+      const accepted: { turnId?: string } | null = session?.isAlive()
+        ? session.findAcceptedPrompt(clientMessageId)
+        : await resolveSessionPath(id).then((filePath): { turnId?: string } | null => {
+            if (!filePath) return null;
+            const { context } = readSessionFileCached(filePath);
+            return context.messages.some((message) => message.role === "user" && message.clientMessageId === clientMessageId)
+              ? {}
+              : null;
+          });
+      return NextResponse.json({ running: session?.getStatus().isRunning ?? false, accepted: Boolean(accepted), turnId: accepted?.turnId });
+    }
     if (!session || !session.isAlive()) {
       return NextResponse.json({ running: false });
     }
@@ -72,7 +86,7 @@ export async function GET(
     const state = await session.send({ type: "get_state" });
     const status = session.getStatus();
     return NextResponse.json({ running: true, state, status });
-  } catch (error) {
+  } catch (_error) {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

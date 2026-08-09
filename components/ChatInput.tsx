@@ -5,6 +5,7 @@ import type { AutoRecoveryMode, RetryInfo, StallLevel } from "@/hooks/useAgentSe
 import type { AgentMode } from "@/lib/agent-modes";
 import type { FileReference, SkillReference } from "@/lib/types";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
+import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (legacy, kept for compatibility)
@@ -49,6 +50,15 @@ interface AgentRole {
   builtIn?: boolean;
   sourceInfo?: { scope?: string; filePath?: string };
 }
+
+const DEFAULT_ROLE_FALLBACK: AgentRole = {
+  id: "default",
+  name: "默认角色",
+  description: "通用任务",
+  basePrompt: "",
+  blocks: {},
+  builtIn: true,
+};
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
@@ -112,7 +122,6 @@ const AGENT_MODES: { id: AgentMode; label: string; desc: string }[] = [
 ];
 
 const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh"] as const;
-const IME_ENTER_SUPPRESS_MS = 10;
 const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], string> = {
   auto: "沿用 DeerHux 默认设置",
   off: "关闭推理",
@@ -170,7 +179,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [roleDropdownRect, setRoleDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
-  const [roles, setRoles] = useState<AgentRole[]>([]);
+  const [roles, setRoles] = useState<AgentRole[]>([DEFAULT_ROLE_FALLBACK]);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(initialInputState?.attachedImages ?? []);
   const [fileReferences, setFileReferences] = useState<FileReference[]>(initialInputState?.fileReferences ?? []);
@@ -196,15 +205,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const moreMenuRef = useRef<HTMLDivElement>(null);
   const roleDropdownRef = useRef<HTMLDivElement>(null);
   const roleDropdownPanelRef = useRef<HTMLDivElement>(null);
+  const rolesRequestIdRef = useRef(0);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Track IME composition state to prevent Enter from firing send during Chinese/Japanese/Korean input.
+  // Track IME composition state to prevent candidate-confirming Enter from sending.
+  // KeyboardEvent.isComposing is the standard signal; this ref covers browser event-order differences.
   const isComposingRef = useRef(false);
-  const suppressNextEnterRef = useRef(false);
-  const suppressNextEnterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingEnterSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastCompositionEndAtRef = useRef(0);
   // Sync isStreaming prop to a ref to avoid stale closure in handleSend / runSendAction.
   const isStreamingRef = useRef(isStreaming);
   isStreamingRef.current = isStreaming;
@@ -366,18 +373,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     };
   }, []);
 
-  const cancelPendingEnterSend = useCallback(() => {
-    if (pendingEnterSendTimerRef.current) {
-      clearTimeout(pendingEnterSendTimerRef.current);
-      pendingEnterSendTimerRef.current = null;
-    }
-  }, []);
-
   const handleSend = useCallback(() => {
-    cancelPendingEnterSend();
-    const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < IME_ENTER_SUPPRESS_MS;
-    if (shouldBlock) return;
-
     const currentValue = textareaRef.current?.value ?? value;
     const msg = currentValue.trim();
     const references = fileReferences.length ? [...fileReferences] : undefined;
@@ -412,7 +408,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [value, selectedSkill, attachedImages, fileReferences, onSend, onBeforeSend, clearImages, cancelPendingEnterSend, saveInputStateRef]);
+  }, [value, selectedSkill, attachedImages, fileReferences, onSend, onBeforeSend, clearImages, saveInputStateRef]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
@@ -481,7 +477,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [value, closeSkillPicker]);
 
   const handleTextChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    cancelPendingEnterSend();
     const newValue = e.target.value;
     setValue(newValue);
     if (selectedSkill && newValue.startsWith("/")) setSelectedSkill(null);
@@ -501,38 +496,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } else {
       if (skillPickerOpen) closeSkillPicker();
     }
-  }, [cancelPendingEnterSend, skillPickerOpen, selectedSkill, cwd, fetchSkills, closeSkillPicker, setActiveSkillPickerIndex]);
+  }, [skillPickerOpen, selectedSkill, cwd, fetchSkills, closeSkillPicker, setActiveSkillPickerIndex]);
 
   const handleCompositionStart = useCallback(() => {
-    cancelPendingEnterSend();
-    if (suppressNextEnterTimerRef.current) {
-      clearTimeout(suppressNextEnterTimerRef.current);
-      suppressNextEnterTimerRef.current = null;
-    }
     isComposingRef.current = true;
-    suppressNextEnterRef.current = true;
-  }, [cancelPendingEnterSend]);
-
-  const handleCompositionUpdate = useCallback(() => {
-    cancelPendingEnterSend();
-    isComposingRef.current = true;
-    suppressNextEnterRef.current = true;
-  }, [cancelPendingEnterSend]);
+  }, []);
 
   const handleCompositionEnd = useCallback(() => {
-    cancelPendingEnterSend();
     isComposingRef.current = false;
-    suppressNextEnterRef.current = true;
-    lastCompositionEndAtRef.current = Date.now();
-
-    if (suppressNextEnterTimerRef.current) {
-      clearTimeout(suppressNextEnterTimerRef.current);
-    }
-    suppressNextEnterTimerRef.current = setTimeout(() => {
-      suppressNextEnterRef.current = false;
-      suppressNextEnterTimerRef.current = null;
-    }, IME_ENTER_SUPPRESS_MS);
-  }, [cancelPendingEnterSend]);
+  }, []);
 
   const runSendAction = useCallback(() => {
     if (isStreamingRef.current && (onSteer || onFollowUp)) {
@@ -541,16 +513,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       handleSend();
     }
   }, [onSteer, onFollowUp, sendQueued, handleSend]);
-
-  const scheduleEnterSend = useCallback(() => {
-    cancelPendingEnterSend();
-    pendingEnterSendTimerRef.current = setTimeout(() => {
-      pendingEnterSendTimerRef.current = null;
-      const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < IME_ENTER_SUPPRESS_MS;
-      if (shouldBlock) return;
-      runSendAction();
-    }, IME_ENTER_SUPPRESS_MS);
-  }, [cancelPendingEnterSend, runSendAction]);
 
   // Filtered skills for the picker
   const skillPickerMode = useMemo(() => skillPickerModeForValue(value), [value]);
@@ -626,7 +588,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      // Handle skill picker keys first
+      const nativeEvent = e.nativeEvent as KeyboardEvent<HTMLTextAreaElement>["nativeEvent"] & {
+        keyCode?: number;
+      };
+
+      // Never interpret an IME-managed key as an app shortcut. Safari may report
+      // isComposing=false for the confirming Enter, but still exposes keyCode 229.
+      if (
+        isComposingRef.current ||
+        nativeEvent.isComposing ||
+        nativeEvent.keyCode === 229 ||
+        e.key === "Process"
+      ) {
+        return;
+      }
+
+      // Handle skill picker keys only after excluding IME events.
       if (skillPickerOpen && visibleSkillPickerSkills.length > 0) {
         handleSkillPickerKeyDown(e);
         return;
@@ -646,68 +623,38 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
 
-      const nativeEvent = e.nativeEvent as KeyboardEvent<HTMLTextAreaElement>["nativeEvent"] & {
-        keyCode?: number;
-        which?: number;
-      };
-      const isImeEvent =
-        isComposingRef.current ||
-        nativeEvent.isComposing ||
-        nativeEvent.keyCode === 229 ||
-        nativeEvent.which === 229 ||
-        e.key === "Process";
-      const isImmediatelyAfterComposition = Date.now() - lastCompositionEndAtRef.current < IME_ENTER_SUPPRESS_MS;
-
-      if (isImeEvent) {
-        suppressNextEnterRef.current = true;
-        return;
-      }
-
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         e.stopPropagation();
-
-        if (suppressNextEnterRef.current || isImmediatelyAfterComposition) {
-          cancelPendingEnterSend();
-          suppressNextEnterRef.current = false;
-          if (suppressNextEnterTimerRef.current) {
-            clearTimeout(suppressNextEnterTimerRef.current);
-            suppressNextEnterTimerRef.current = null;
-          }
-          return;
-        }
-
-        scheduleEnterSend();
-      } else if (e.key !== "Shift") {
-        cancelPendingEnterSend();
-        suppressNextEnterRef.current = false;
-        if (suppressNextEnterTimerRef.current) {
-          clearTimeout(suppressNextEnterTimerRef.current);
-          suppressNextEnterTimerRef.current = null;
-        }
+        runSendAction();
       }
     },
-    [cancelPendingEnterSend, scheduleEnterSend, skillPickerOpen, visibleSkillPickerSkills.length, handleSkillPickerKeyDown, selectedSkill]
+    [runSendAction, skillPickerOpen, visibleSkillPickerSkills.length, handleSkillPickerKeyDown, selectedSkill]
   );
 
   const handleInput = useCallback(() => {
-    cancelPendingEnterSend();
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, [cancelPendingEnterSend]);
+  }, []);
 
   // Build model options: prefer modelList (has provider info), fallback to modelNames
   const modelOptions: ModelOption[] = (() => {
     if (modelList && modelList.length > 0) {
       return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name, input: m.input }));
     }
-    return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
+    const fallback = Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
       provider: model?.provider ?? "unknown",
       modelId,
       name,
     }));
+    // Existing sessions already know their active model. Keep that control
+    // visible even if the independent models metadata request is delayed.
+    if (fallback.length === 0 && model) {
+      return [{ provider: model.provider, modelId: model.modelId, name: model.modelId }];
+    }
+    return fallback;
   })();
 
   // Group options by provider, preserving insertion order
@@ -808,14 +755,32 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const loadRoles = useCallback(async () => {
+    const requestId = ++rolesRequestIdRef.current;
+    const cacheKey = `deerhux.control-plane.roles.v1:${cwd ?? "global"}`;
+    const applyRoles = (nextRoles: AgentRole[]) => {
+      if (requestId !== rolesRequestIdRef.current || !Array.isArray(nextRoles) || nextRoles.length === 0) return;
+      setRoles(nextRoles);
+      onRolesLoaded?.(nextRoles);
+    };
+
+    // Render the last-known-good role selector synchronously before attempting
+    // network I/O. The API is revalidated with retries in the background.
+    const cached = readCachedJson<AgentRole[]>(cacheKey);
+    if (cached) applyRoles(cached);
+
     try {
       const url = cwd ? `/api/roles?cwd=${encodeURIComponent(cwd)}` : "/api/roles";
-      const res = await fetch(url);
-      if (!res.ok) return;
-      const data = await res.json() as { roles: AgentRole[] };
-      setRoles(data.roles ?? []);
-      onRolesLoaded?.(data.roles ?? []);
-    } catch { /* ignore */ }
+      const data = await fetchJsonWithRetry<{ roles: AgentRole[] }>(url, { cache: "no-store" }, {
+        attempts: 3,
+        timeoutMs: 8_000,
+      });
+      if (!Array.isArray(data.roles) || data.roles.length === 0) return;
+      writeCachedJson(cacheKey, data.roles);
+      applyRoles(data.roles);
+    } catch {
+      // Keep cached/current roles. A transient control-plane failure must not
+      // remove the selector while the active Agent SSE stream is healthy.
+    }
   }, [onRolesLoaded, cwd]);
 
   useEffect(() => {
@@ -1349,7 +1314,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               onInput={handleInput}
               onPaste={handlePaste}
               onCompositionStart={handleCompositionStart}
-              onCompositionUpdate={handleCompositionUpdate}
               onCompositionEnd={handleCompositionEnd}
               onBlur={() => {
                 // Delay close so click on skill picker item can fire first
