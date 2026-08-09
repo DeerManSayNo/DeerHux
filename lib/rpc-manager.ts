@@ -377,6 +377,8 @@ export class AgentSessionWrapper {
   private _turnActive = false;
   /** prompt 正在做异步预处理、尚未进入 engine.prompt 的准入锁。 */
   private pendingPromptController: AbortController | null = null;
+  /** 同一 clientMessageId 的并发重试共享同一准入结果，不能落入 AGENT_BUSY。 */
+  private pendingPromptAdmissions = new Map<string, { turnId?: string; promise: Promise<{ turnId: string }> }>();
   /** 用户已请求停止；直到准入任务和 engine turn 都停止前保持为 true。 */
   private _stopRequested = false;
   private activeTurnId = 0;
@@ -518,6 +520,8 @@ export class AgentSessionWrapper {
   }
 
   findAcceptedPrompt(clientMessageId: string): { turnId?: string } | null {
+    const pending = this.pendingPromptAdmissions.get(clientMessageId);
+    if (pending) return { turnId: pending.turnId };
     for (const entry of this.inner.sessionManager.getEntries()) {
       if (entry.type !== "custom" || entry.customType !== "display_user_message") continue;
       const data = entry.data as { clientMessageId?: unknown; turnId?: unknown } | undefined;
@@ -935,8 +939,9 @@ export class AgentSessionWrapper {
 
     promise.catch((err: unknown) => {
       // If a recovery follow_up has already started, this rejection belongs to
-      // the aborted old turn and must not mark the new turn as failed.
-      if (!this._alive || this.activeTurnId !== turnId) return;
+      // the aborted old turn and must not mark the new turn as failed. Likewise,
+      // an engine that already emitted its terminal agent_end needs no duplicate.
+      if (!this._alive || this.activeTurnId !== turnId || (!this._turnActive && !this._isRunning)) return;
       this._turnActive = false;
       this._isRunning = false;
       this._stopRequested = false;
@@ -944,13 +949,15 @@ export class AgentSessionWrapper {
       // 推断标准化错误码，让前端能按 errorCode（如 UPSTREAM_TTFT_TIMEOUT）触发
       // 备用模型 recovery——与 engine 正常 emit 的 agent_end 行为一致。
       const errorCode = classifyLlmError(err).code;
-      for (const l of this.listeners) {
-        const ev: { type: "agent_end"; messages: never[]; willRetry: false; error: string; errorCode?: string } = {
-          type: "agent_end", messages: [], willRetry: false, error: msg,
-        };
-        if (errorCode && errorCode !== "UNKNOWN") ev.errorCode = errorCode;
-        l(ev);
-      }
+      const ev: AgentEvent = { type: "agent_end", messages: [], willRetry: false, error: msg };
+      if (errorCode && errorCode !== "UNKNOWN") ev.errorCode = errorCode;
+      getAgentEventStore().append({
+        sessionId: this.inner.sessionId,
+        runId: this.inner.sessionId,
+        ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
+        event: ev,
+      });
+      for (const l of this.listeners) l(ev);
     }).finally(() => {
       if (this.activeTurnId !== turnId) return;
       this.activeTurnPromise = null;
@@ -964,9 +971,14 @@ export class AgentSessionWrapper {
           `lastEventType=${this.lastEventType || "unknown"}`,
           `eventCount=${this.eventCount}`,
         ].join("；");
-        for (const l of this.listeners) {
-          l({ type: "agent_end", messages: [], willRetry: false, error });
-        }
+        const ev: AgentEvent = { type: "agent_end", messages: [], willRetry: false, error };
+        getAgentEventStore().append({
+          sessionId: this.inner.sessionId,
+          runId: this.inner.sessionId,
+          ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
+          event: ev,
+        });
+        for (const l of this.listeners) l(ev);
       }
     });
   }
@@ -1219,6 +1231,11 @@ export class AgentSessionWrapper {
         // Check idempotency before the busy guard: a retry for the currently
         // running turn is a successful duplicate, not an AGENT_BUSY conflict.
         if (promptClientMessageId) {
+          const pending = this.pendingPromptAdmissions.get(promptClientMessageId);
+          if (pending) {
+            const accepted = await pending.promise;
+            return { accepted: true, duplicate: true, clientMessageId: promptClientMessageId, turnId: accepted.turnId };
+          }
           const accepted = this.findAcceptedPrompt(promptClientMessageId);
           if (accepted) {
             return { accepted: true, duplicate: true, clientMessageId: promptClientMessageId, turnId: accepted.turnId };
@@ -1230,16 +1247,21 @@ export class AgentSessionWrapper {
         const admissionController = new AbortController();
         this._turnActive = true;
         this.pendingPromptController = admissionController;
+        // Once a stable clientMessageId exists, admission belongs to the
+        // wrapper/idempotency key rather than to one fragile HTTP connection.
+        // A timed-out first waiter must not cancel a healthy same-id retry.
         const abortAdmission = () => admissionController.abort(requestSignal?.reason);
-        if (requestSignal) {
-          if (requestSignal.aborted) abortAdmission();
-          else requestSignal.addEventListener("abort", abortAdmission, { once: true });
+        const bindRequestAbort: AbortSignal | undefined = promptClientMessageId ? undefined : requestSignal;
+        if (bindRequestAbort) {
+          if (bindRequestAbort.aborted) abortAdmission();
+          else bindRequestAbort.addEventListener("abort", abortAdmission, { once: true });
         }
         const promptRoleId = typeof command.roleId === "string" ? command.roleId : undefined;
         const promptText = typeof command.message === "string" ? command.message : "";
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+        let admissionPromise: Promise<{ turnId: string }> | null = null;
         try {
-          const result = await this.commitAndTrackPromptTurn(
+          admissionPromise = this.commitAndTrackPromptTurn(
             promptText,
             command.references,
             command.skillName,
@@ -1248,14 +1270,22 @@ export class AgentSessionWrapper {
             admissionController.signal,
             promptRoleId,
           );
+          if (promptClientMessageId) {
+            const pending = { promise: admissionPromise } as { turnId?: string; promise: Promise<{ turnId: string }> };
+            this.pendingPromptAdmissions.set(promptClientMessageId, pending);
+            void admissionPromise.then((value) => { pending.turnId = value.turnId; }, () => {});
+          }
+          const result = await admissionPromise;
+          if (promptClientMessageId) this.pendingPromptAdmissions.delete(promptClientMessageId);
           return { accepted: true, duplicate: false, ...(promptClientMessageId ? { clientMessageId: promptClientMessageId } : {}), ...result };
         } catch (error) {
+          if (promptClientMessageId) this.pendingPromptAdmissions.delete(promptClientMessageId);
           // 失败发生在 trackTurn 建立前时，不会有 engine 的 agent_end 兜底；
           // 必须在 wrapper 层撤销对外运行态，避免 get_state 残留 true。
           this._turnActive = false;
           throw error;
         } finally {
-          requestSignal?.removeEventListener("abort", abortAdmission);
+          bindRequestAbort?.removeEventListener("abort", abortAdmission);
           if (this.pendingPromptController === admissionController) {
             this.pendingPromptController = null;
           }
@@ -1629,6 +1659,13 @@ export class AgentSessionWrapper {
 
   destroy(): void {
     if (!this._alive) return;
+    const hadActiveTurn = Boolean(
+      this._turnActive
+      || this.pendingPromptController
+      || this._isRunning
+      || this.inner.isStreaming
+      || this.inner.isCompacting,
+    );
     this._turnActive = false;
     this._alive = false;
     this.pendingPromptController?.abort(new DOMException("Session destroyed", "AbortError"));
@@ -1636,20 +1673,24 @@ export class AgentSessionWrapper {
     this._stopRequested = true;
     if (this.idlePulseInterval) { clearInterval(this.idlePulseInterval); this.idlePulseInterval = null; }
     this.unsubscribe?.();
-    // 广播合成 agent_end，确保正在连接此 session 的 SSE 客户端收到终止事件，
-    // 不会因为 unsubscribe + clearRun 切断了事件流而永远挂起等待 agent_end。
-    const destroyError = this._isRunning || this.inner.isStreaming
-      ? `Agent 会话在回合尚未结束时被销毁（session=${this.inner.sessionId}，lastEventType=${this.lastEventType || "unknown"}，eventIdleMs=${this.lastEventAt ? Date.now() - this.lastEventAt : "unknown"}）。`
-      : undefined;
-    for (const l of this.listeners) {
-      try {
-        l({
-          type: "agent_end",
-          messages: [],
-          willRetry: false,
-          ...(destroyError ? { error: destroyError } : {}),
-        });
-      } catch { /* best effort */ }
+    // 活跃回合被销毁时必须向 Journal 写入终态；空闲 wrapper 回收不是业务回合结束。
+    if (hadActiveTurn) {
+      const destroyEvent: AgentEvent = {
+        type: "agent_end",
+        messages: [],
+        willRetry: false,
+        error: `Agent 会话在回合尚未结束时被销毁（session=${this.inner.sessionId}，lastEventType=${this.lastEventType || "unknown"}，eventIdleMs=${this.lastEventAt ? Date.now() - this.lastEventAt : "unknown"}）。`,
+      };
+      // SSE consumers subscribe to EventStore rather than wrapper.listeners.
+      getAgentEventStore().append({
+        sessionId: this.inner.sessionId,
+        runId: this.inner.sessionId,
+        ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
+        event: destroyEvent,
+      });
+      for (const l of this.listeners) {
+        try { l(destroyEvent); } catch { /* best effort */ }
+      }
     }
     // Abort any ongoing agent turn (streaming, tools, retries) so underlying
     // WebSocket connections and child processes are released promptly.

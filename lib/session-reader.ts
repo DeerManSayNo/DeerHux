@@ -112,7 +112,9 @@ function scheduleBackgroundRefresh(): void {
  * Only on the very first call (cold cache) do we block and wait for the full
  * scan. After that every call returns in O(1) time.
  */
-export async function listAllSessions(): Promise<SessionInfo[]> {
+export async function listAllSessions(fresh = false): Promise<SessionInfo[]> {
+  if (fresh) return listAllSessionsUncached();
+
   const now = Date.now();
   const cached = globalThis.__deerhuxSessionListCache;
 

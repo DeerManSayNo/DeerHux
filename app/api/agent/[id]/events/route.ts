@@ -61,6 +61,10 @@ export async function GET(
 
       const safeEncode = (data: unknown, seq?: number) => {
         if (closed) return;
+        if (controller.desiredSize !== null && controller.desiredSize <= -256) {
+          cleanup();
+          return;
+        }
         try {
           const eventId = seq === undefined ? "" : `id: ${seq}\n`;
           controller.enqueue(encoder.encode(`${eventId}data: ${JSON.stringify(data)}\n\n`));
@@ -105,6 +109,10 @@ export async function GET(
 
       timers.heartbeat = setInterval(() => {
         if (closed) return;
+        if (controller.desiredSize !== null && controller.desiredSize <= -256) {
+          cleanup();
+          return;
+        }
         try {
           controller.enqueue(encoder.encode(":\n\n"));
           lastActivity = Date.now();

@@ -10,6 +10,7 @@ import { isAmbiguousAgentCommandError, sendAgentCommand } from "@/lib/agent-clie
 import type { ToolEntry } from "@/components/ToolPanel";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "@/lib/agent-modes";
 import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
+import { ensureAgentEventsConnected, prepareAgentEvents, subscribeAgentEvents } from "@/lib/agent-event-client";
 
 type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
@@ -581,14 +582,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const subagentEnabledRef = useRef(subagentEnabled);
   const stallRecoveriesRef = useRef(0);
 
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const eventSubscriptionRef = useRef<(() => void) | null>(null);
+  const eventSubscriptionSessionIdRef = useRef<string | null>(null);
   // 累计完整 message_update 可能按 token 到达。这里只保留最新快照并按动画帧
   // 提交，避免 React/Markdown 渲染频率被上游事件频率直接放大。
   const pendingMessageUpdateRef = useRef<AgentEvent | null>(null);
   const messageUpdateFrameRef = useRef<number | null>(null);
-  const sseReconnectAttemptRef = useRef(0);
-  const lastEventSeqRef = useRef(0);
-  const sseReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const agentRunningRef = useRef(false);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
@@ -1089,121 +1088,56 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, []);
 
-  const connectEvents = useCallback((sid: string, isReconnect = false) => {
-    // Clear any pending reconnect timer from a previous attempt
-    if (sseReconnectTimerRef.current) {
-      clearTimeout(sseReconnectTimerRef.current);
-      sseReconnectTimerRef.current = null;
+  const connectEvents = useCallback((sid: string, _isReconnect = false) => {
+    if (eventSubscriptionSessionIdRef.current === sid && eventSubscriptionRef.current) {
+      ensureAgentEventsConnected();
+      return;
     }
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    if (!isReconnect) sseReconnectAttemptRef.current = 0;
+    eventSubscriptionRef.current?.();
+    eventSubscriptionRef.current = null;
+    eventSubscriptionSessionIdRef.current = sid;
 
-    // Sync the subagent capability toggle to this (possibly freshly
-    // cold-started) session so subagent is in/out of the active tool set.
-    void sendAgentCommand(sid, { type: "set_subagent_enabled", enabled: subagentEnabledRef.current }).catch(() => { /* best effort */ });
-    // 激进/保守/关闭 → 后端 TTFT 首包超时（激进 = 120s）。
-    void sendAgentCommand(sid, { type: "set_auto_recovery_mode", mode: autoRecoveryModeRef.current }).catch(() => { /* best effort */ });
+    // Sync controls to a possibly cold-started session. These remain best-effort
+    // HTTP commands during the multiplexed-SSE migration phase.
+    void sendAgentCommand(sid, { type: "set_subagent_enabled", enabled: subagentEnabledRef.current }).catch(() => {});
+    void sendAgentCommand(sid, { type: "set_auto_recovery_mode", mode: autoRecoveryModeRef.current }).catch(() => {});
 
-    const afterSeq = lastEventSeqRef.current;
-    const eventsUrl = `/api/agent/${encodeURIComponent(sid)}/events${afterSeq > 0 ? `?after=${afterSeq}` : ""}`;
-    const es = new EventSource(eventsUrl);
-    eventSourceRef.current = es;
-    es.onmessage = (e) => {
-      try {
-        const event = JSON.parse(e.data) as AgentEvent;
-        const seq = typeof event.seq === "number" ? event.seq : Number(e.lastEventId);
-        if (Number.isFinite(seq) && seq > lastEventSeqRef.current) {
-          lastEventSeqRef.current = seq;
-        }
+    eventSubscriptionRef.current = subscribeAgentEvents(
+      sid,
+      (event) => {
         agentEventBus.emit(event);
         if (event.type === "message_update") {
           enqueueMessageUpdate(event, sid);
         } else {
-          // 顺序屏障：message_end/工具/生命周期事件必须看到它之前的最新快照。
           flushPendingMessageUpdate();
           handleAgentEventRef.current?.(event);
         }
-      } catch {
-        // ignore
-      }
-    };
-    es.onopen = () => {
-      sseReconnectAttemptRef.current = 0;
-      // On reconnect, verify we didn't miss agent_end during the backoff gap.
-      // If the backend session has already finished, sync state locally so the
-      // UI doesn't stay stuck in "streaming" mode waiting for events that will
-      // never arrive.
-      fetch(`/api/agent/${encodeURIComponent(sid)}`)
-        .then((r) => r.json())
-        .then((d: { running?: boolean; status?: AgentStatus }) => {
-          if (awaitingAgentStartRef.current) {
-            // On reconnect during awaiting-start: refresh messages + state
-            // independently (TODO 2).
-            loadSession(sid, false, false).catch(() => {});
-            void loadSessionState(sid);
-            return;
-          }
-          if (agentRunningRef.current && (!d.running || d.status?.isRunning === false)) {
-            // Session ended while we were disconnected — dispatch a synthetic
-            // agent_end so the client state resets cleanly. This is not a
-            // trustworthy normal completion because its real terminal event
-            // was lost; expose the transport diagnosis instead of stopping silently.
-            handleAgentEventRef.current?.({
-              type: "agent_end",
-              willRetry: false,
-              error: `事件流断开期间回合已经结束，未收到服务端终止详情（lastEventType=${d.status?.lastEventType ?? "unknown"}，eventIdleMs=${d.status?.eventIdleMs ?? "unknown"}）。请检查服务端日志；若回复不完整可发送“继续”。`,
-            });
-          }
-        })
-        .catch(() => {});
-    };
-    es.onerror = () => {
-      // Always close the broken EventSource so it doesn't keep reconnecting
-      // after the session has ended.  Without this, stale EventSources leak.
-      if (eventSourceRef.current !== es) {
-        es.close();
-        return;
-      }
-      es.close();
-      eventSourceRef.current = null;
-
-      if (!agentRunningRef.current) return;
-
-      sseReconnectAttemptRef.current += 1;
-      const attempt = sseReconnectAttemptRef.current;
-      const MAX_ATTEMPTS = 10;
-      if (attempt > MAX_ATTEMPTS) {
-        const message = `实时事件连接连续 ${MAX_ATTEMPTS} 次重连失败，无法继续接收模型输出或终止事件（session=${sid}）。后端可能已退出、网络连接已中断或 SSE 路由不可用。`;
-        lastModelErrorRef.current = message;
-        setLastModelError(message);
-        return;
-      }
-
-      // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s
-      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30_000);
-
-      sseReconnectTimerRef.current = setTimeout(() => {
-        sseReconnectTimerRef.current = null;
-        // Guard: only reconnect if we're still on the same session AND
-        // the agent is still running.  Without this check, a tab switch
-        // during the backoff delay would reconnect to the wrong session.
-        if (agentRunningRef.current && sessionIdRef.current === sid) {
-          connectEvents(sid, true);
+      },
+      async () => {
+        // Journal epoch/cursor loss is explicit. Cursor advancement waits until
+        // both snapshot and runtime state have been applied successfully.
+        if (sessionIdRef.current !== sid) throw new Error("Session changed during snapshot recovery");
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15_000);
+        try {
+          const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}?includeState`, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!response.ok) throw new Error(`Snapshot recovery HTTP ${response.status}`);
+          const snapshot = await response.json() as SessionDataWithAgentState;
+          if (sessionIdRef.current !== sid) throw new Error("Session changed during snapshot recovery");
+          applySessionSnapshot(snapshot, true);
+          applyAgentStatePayload(snapshot.agentState ?? null, sid);
+        } finally {
+          clearTimeout(timeout);
         }
-      }, delay);
-    };
-    return es;
-  }, [enqueueMessageUpdate, flushPendingMessageUpdate, loadSession, loadSessionState]);
+      },
+    );
+  }, [applyAgentStatePayload, applySessionSnapshot, enqueueMessageUpdate, flushPendingMessageUpdate]);
 
   const ensureEventsConnected = useCallback((sid: string) => {
-    const existing = eventSourceRef.current;
-    if (sessionIdRef.current === sid && existing && existing.readyState !== EventSource.CLOSED) {
-      return existing;
-    }
-    return connectEvents(sid);
+    connectEvents(sid);
   }, [connectEvents]);
 
   const stopStuckAwaitingAgentStart = useCallback(async (sid: string, message: string) => {
@@ -1821,9 +1755,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       mimeType: img.mimeType,
     }));
     let createdRealSession = false;
+    let releasePreparedEvents: (() => void) | null = null;
 
     try {
       if (isNew && newSessionCwd) {
+        // Establish the application journal cursor before the real session id
+        // exists. Events emitted during /api/agent/new remain replayable after
+        // the listener for realId is registered.
+        releasePreparedEvents = await prepareAgentEvents();
         const selectedModel = newSessionModel;
         if (selectedModel) setPendingModel(selectedModel);
         // Single round-trip: create + send prompt in one POST. The backend
@@ -1859,6 +1798,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         adoptingCreatedSessionRef.current = realId;
         optimisticSessionIdRef.current = null;
         connectEvents(realId);
+        releasePreparedEvents?.();
+        releasePreparedEvents = null;
         if (pendingAbortOnSessionReadyRef.current) {
           pendingAbortOnSessionReadyRef.current = false;
           void sendAgentCommand(realId, { type: "abort" }, { timeoutMs: 3_000 }).catch((err) => {
@@ -1937,14 +1878,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentRunning(false);
         setAgentPhase(null);
         dispatch({ type: "end" });
-        if (sseReconnectTimerRef.current) {
-          clearTimeout(sseReconnectTimerRef.current);
-          sseReconnectTimerRef.current = null;
-        }
-        eventSourceRef.current?.close();
-        eventSourceRef.current = null;
+        eventSubscriptionRef.current?.();
+        eventSubscriptionRef.current = null;
+        eventSubscriptionSessionIdRef.current = null;
         cancelPendingMessageUpdate();
       }
+    } finally {
+      releasePreparedEvents?.();
     }
   }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, cancelPendingMessageUpdate, connectEvents, ensureEventsConnected, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
 
@@ -2036,8 +1976,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setAgentRunning(false);
           setAgentPhase(null);
           dispatch({ type: "end" });
-          eventSourceRef.current?.close();
-          eventSourceRef.current = null;
+          eventSubscriptionRef.current?.();
+          eventSubscriptionRef.current = null;
+          eventSubscriptionSessionIdRef.current = null;
         }
       }
     } catch (error) {
@@ -2808,15 +2749,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     let cancelled = false;
 
-    // Cancel any pending SSE reconnect timer from the previous session
-    if (sseReconnectTimerRef.current) {
-      clearTimeout(sseReconnectTimerRef.current);
-      sseReconnectTimerRef.current = null;
-    }
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
+    // Move this window's subscription; the application-level EventSource stays
+    // alive while any other ChatWindow remains subscribed.
+    eventSubscriptionRef.current?.();
+    eventSubscriptionRef.current = null;
+    eventSubscriptionSessionIdRef.current = null;
     cancelPendingMessageUpdate();
-    lastEventSeqRef.current = 0;
     // Abort any inflight background loadSession / polling requests from the
     // previous session so they don't keep hitting the backend (and racing
     // this new session's requests). A fresh controller is installed for the
@@ -2887,16 +2825,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(false);
     setError(null);
 
+    // Subscribe before reading the snapshot. Any event emitted while the
+    // snapshot request is in flight is delivered through the journal channel
+    // and protected by messageMutationEpochRef from stale snapshot overwrite.
+    connectEvents(sessionId);
     // Open session: load RECENT messages first (TODO 3 pagination) — this is a
     // cheaper first paint than the full GET /api/sessions/:id. Runtime state
     // is then fetched asynchronously (TODO 2) so neither a busy runtime nor a
     // huge history can block the first paint.
     loadRecentMessages(sessionId, true).then(() => {
       if (cancelled || sessionIdRef.current !== sessionId) return;
-
-      // 远程连接（例如微信 Bot）可能会在当前 session 空闲时从外部发起 prompt。
-      // 这里改为：打开已有 session 时始终保持 SSE 连接，以便接收未来的外部消息事件。
-      connectEvents(sessionId);
 
       // Now fetch runtime state asynchronously — failures here never affect
       // the already-displayed messages.
@@ -2906,8 +2844,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const activeSubagentToolIds = activeSubagentToolIdsRef.current;
     return () => {
       cancelled = true;
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
+      eventSubscriptionRef.current?.();
+      eventSubscriptionRef.current = null;
+      eventSubscriptionSessionIdRef.current = null;
       cancelPendingMessageUpdate();
       activeSubagentToolIds.clear();
       stopSubagentLiveRefresh();
@@ -3059,7 +2998,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // TODO 3 — first-paint pagination affordance
     hasOlderMessages, loadingFullHistory, loadFullHistory,
     // Refs
-    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
     handleSend, handleRetryDelivery, handleAbort, handleFork, handleModelChange,

@@ -59,7 +59,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing cwd" }, { status: 400 });
     }
 
-    const allowedRoots = await getAllowedRoots();
+    // Uploads can be the first request after reopening a historical session.
+    // Refresh roots here rather than trusting the short-lived access cache.
+    const allowedRoots = await getAllowedRoots(true);
     if (!isPathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }

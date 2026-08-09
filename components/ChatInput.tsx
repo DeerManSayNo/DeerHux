@@ -182,6 +182,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [roles, setRoles] = useState<AgentRole[]>([DEFAULT_ROLE_FALLBACK]);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(initialInputState?.attachedImages ?? []);
+  const [imageUploadError, setImageUploadError] = useState<string | null>(null);
   const [fileReferences, setFileReferences] = useState<FileReference[]>(initialInputState?.fileReferences ?? []);
   const inputMaxWidth = compact ? 640 : 820;
   const inputHorizontalPadding = compact ? 12 : 16;
@@ -302,34 +303,40 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const imageFiles = files.filter((f) => f.type.startsWith("image/"));
     if (!imageFiles.length) return;
     if (!cwd) {
-      console.warn("Cannot upload images: no cwd available");
+      setImageUploadError("当前会话尚未设置工作目录，无法添加图片");
       return;
     }
-    const newImages = await Promise.all(
-      imageFiles.map(async (file) => {
-        // Upload image to server, save as file in project assets/chats/
-        const formData = new FormData();
-        formData.append("image", file);
-        formData.append("cwd", cwd);
-        const res = await fetch("/api/chat-image-upload", {
-          method: "POST",
-          body: formData,
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: "Upload failed" }));
-          throw new Error(err.error || "Upload failed");
-        }
-        const result = await res.json() as { path: string; url: string; mimeType: string };
-        return {
-          data: "",
-          mimeType: result.mimeType,
-          previewUrl: URL.createObjectURL(file),
-          filePath: result.path,
-          fileUrl: result.url,
-        };
-      })
-    );
-    setAttachedImages((prev) => [...prev, ...newImages]);
+
+    setImageUploadError(null);
+    try {
+      const newImages = await Promise.all(
+        imageFiles.map(async (file) => {
+          // Upload image to server, save as file in project assets/chats/
+          const formData = new FormData();
+          formData.append("image", file);
+          formData.append("cwd", cwd);
+          const res = await fetch("/api/chat-image-upload", {
+            method: "POST",
+            body: formData,
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "图片上传失败" }));
+            throw new Error(err.error || "图片上传失败");
+          }
+          const result = await res.json() as { path: string; url: string; mimeType: string };
+          return {
+            data: "",
+            mimeType: result.mimeType,
+            previewUrl: URL.createObjectURL(file),
+            filePath: result.path,
+            fileUrl: result.url,
+          };
+        })
+      );
+      setAttachedImages((prev) => [...prev, ...newImages]);
+    } catch (error) {
+      setImageUploadError(error instanceof Error ? error.message : "图片上传失败");
+    }
   }, [cwd]);
 
   const removeImage = useCallback((index: number) => {
@@ -807,6 +814,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const showRetryNotice = useTransientNotice(retryNoticeKey);
   const showModelErrorNotice = useTransientNotice(modelErrorNoticeKey);
   const showRecoveryNotice = useTransientNotice(recoveryNoticeKey);
+  const showImageUploadError = useTransientNotice(imageUploadError);
 
 
 
@@ -894,6 +902,35 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
             </svg>
             正在中断旧连接并续跑…
+          </div>
+        )}
+        {/* Image upload error banner */}
+        {imageUploadError && showImageUploadError && (
+          <div style={{
+            marginBottom: 8, padding: "5px 10px",
+            background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
+            borderRadius: 6, fontSize: 12, color: "rgba(200,60,60,0.9)",
+            display: "flex", alignItems: "center", gap: 6,
+          }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span style={{ flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5 }}>
+              {imageUploadError}
+            </span>
+            <button
+              onClick={() => setImageUploadError(null)}
+              style={{
+                flexShrink: 0,
+                background: "none", border: "none", cursor: "pointer",
+                padding: "1px 4px", color: "inherit", opacity: 0.6,
+                fontSize: 11, lineHeight: 1,
+              }}
+            >
+              ✕
+            </button>
           </div>
         )}
         {/* Image previews */}

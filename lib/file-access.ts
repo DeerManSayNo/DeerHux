@@ -52,7 +52,10 @@ export function addAllowedRoot(root: string | null | undefined): void {
 
 async function buildAllowedRoots(): Promise<Set<string>> {
   const { listAllSessions } = await import("@/lib/session-reader");
-  const sessions = await listAllSessions();
+  // Access control must not rely on the stale-while-revalidate UI cache.
+  // A just-opened historical session can otherwise be rejected before its cwd
+  // reaches the cache.
+  const sessions = await listAllSessions(true);
   const roots = new Set<string>();
   for (const s of sessions) {
     if (s.cwd) roots.add(normalizeRoot(s.cwd));
@@ -83,11 +86,11 @@ async function buildAllowedRoots(): Promise<Set<string>> {
   return roots;
 }
 
-export async function getAllowedRoots(): Promise<Set<string>> {
+export async function getAllowedRoots(fresh = false): Promise<Set<string>> {
   const now = Date.now();
   const cached = globalThis.__deerhuxAllowedRootsCache;
-  if (cached && cached.expiresAt > now) return cached.roots;
-  if (cached?.inflight) return cached.inflight;
+  if (!fresh && cached && cached.expiresAt > now) return cached.roots;
+  if (!fresh && cached?.inflight) return cached.inflight;
 
   const inflight = buildAllowedRoots().then((roots) => {
     globalThis.__deerhuxAllowedRootsCache = {
