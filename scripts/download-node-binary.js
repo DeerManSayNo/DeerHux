@@ -45,13 +45,16 @@ const TARGETS = {
     nodeTriple: "win-x64",
     tauriTriple: "x86_64-pc-windows-msvc",
     ext: ".exe",
+    archiveExt: ".zip",
+    binaryPath: "node.exe",
   },
 };
 
 if (args.list) {
   console.log("Available targets:");
   for (const [key, t] of Object.entries(TARGETS)) {
-    const url = `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${t.nodeTriple}.tar.gz`;
+    const archiveExt = t.archiveExt ?? ".tar.gz";
+    const url = `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${t.nodeTriple}${archiveExt}`;
     console.log(`  ${key.padEnd(16)} → ${url}`);
   }
   process.exit(0);
@@ -81,7 +84,8 @@ if (fs.existsSync(destPath)) {
 }
 
 // ── Download & extract ────────────────────────────────────────────────────────
-const archiveName = `node-v${NODE_VERSION}-${target.nodeTriple}.tar.gz`;
+const archiveExt = target.archiveExt ?? ".tar.gz";
+const archiveName = `node-v${NODE_VERSION}-${target.nodeTriple}${archiveExt}`;
 const url = `https://nodejs.org/dist/v${NODE_VERSION}/${archiveName}`;
 
 console.log(`⬇  Downloading Node.js ${NODE_VERSION} for ${key}...`);
@@ -128,11 +132,22 @@ download(url, tmpArchive)
   .then(() => {
     // Extract
     console.log("📦 Extracting...");
-    execSync(`tar -xzf "${archiveName}"`, { cwd: binariesDir, stdio: "inherit" });
+    const extractedDir = `node-v${NODE_VERSION}-${target.nodeTriple}`;
+    if (archiveExt === ".zip") {
+      execSync(`powershell -NoProfile -Command "Expand-Archive -Force '${archiveName}' '${extractedDir}'"`, {
+        cwd: binariesDir,
+        stdio: "inherit",
+      });
+    } else {
+      execSync(`tar -xzf "${archiveName}"`, { cwd: binariesDir, stdio: "inherit" });
+    }
 
     // Move binary into place
-    const extractedDir = `node-v${NODE_VERSION}-${target.nodeTriple}`;
-    const extractedBin = path.join(binariesDir, extractedDir, "bin", `node${target.ext}`);
+    const extractedBin = path.join(
+      binariesDir,
+      extractedDir,
+      target.binaryPath ?? path.join("bin", `node${target.ext}`)
+    );
     fs.renameSync(extractedBin, destPath);
 
     // Make executable on Unix
