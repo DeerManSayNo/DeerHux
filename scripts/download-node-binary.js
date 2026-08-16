@@ -134,7 +134,7 @@ download(url, tmpArchive)
     console.log("📦 Extracting...");
     const extractedDir = `node-v${NODE_VERSION}-${target.nodeTriple}`;
     if (archiveExt === ".zip") {
-      execSync(`powershell -NoProfile -Command "Expand-Archive -Force '${archiveName}' '${extractedDir}'"`, {
+      execSync(`powershell -NoProfile -Command "Expand-Archive -Force '${archiveName}' '.'"`, {
         cwd: binariesDir,
         stdio: "inherit",
       });
