@@ -29,7 +29,8 @@
     "download:node:mac-x64": "node scripts/download-node-binary.js --platform darwin --arch x64",
     "postinstall": "node scripts/patch-deerhux-core.js",
     "lint": "eslint .",
-    "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
+    "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public",
+    "tauri:build:win": "npm run download:node:win && tauri build --bundles nsis"
   },
   "dependencies": {
     "@colbymchenry/codegraph": "^0.9.5",

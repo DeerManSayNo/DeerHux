@@ -23,7 +23,7 @@ if errorlevel 1 (
 REM 2. 构建 Tauri 应用
 echo.
 echo [2/2] 开始构建 Tauri Windows 应用...
-npm run tauri:build
+npm run tauri:build:win
 if errorlevel 1 (
     echo Tauri 构建失败！
     pause
