@@ -30,7 +30,8 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install dependencies
-        run: npm ci
+        # 现有锁文件包含与 React 19 不兼容的旧 peer dependency 声明；按锁文件安装即可。
+        run: npm ci --legacy-peer-deps
 
       - name: Build Windows installer
         run: npm run tauri:build:win
