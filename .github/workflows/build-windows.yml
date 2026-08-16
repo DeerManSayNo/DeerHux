@@ -30,9 +30,11 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install dependencies
-        # 现有锁文件含有历史 peer dependency 元数据，npm ci 在 Windows 上无法解析。
-        # CI 重新解算后构建，不将生成的 lockfile 写回仓库。
-        run: npm install --legacy-peer-deps
+        # 现有 lockfile 含有 npm 无法解析的历史版本元数据；仅在临时 Runner 中移除后重新解算。
+        # 不会改写仓库中的 lockfile。
+        run: |
+          Remove-Item package-lock.json
+          npm install --legacy-peer-deps
 
       - name: Build Windows installer
         run: npm run tauri:build:win
