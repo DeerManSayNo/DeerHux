@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { getAgentRunStore } from "@/lib/agent-runtime/run-store";
 import { isSessionTraceEnabled } from "@/lib/session/session-trace";
 
 /**
@@ -31,7 +32,12 @@ export async function GET(
     if (isSessionTraceEnabled()) {
       console.log(`[session-trace] sessionState id=${id} total=${Date.now() - start}ms running=false reason=no-rpc`);
     }
-    return NextResponse.json({ running: false });
+    // Wrapper 不在内存（进程重启/被回收）时，用持久化 Run 事实告诉前端上次
+    // 回合的终态——非终态 Run 已在 ensureRpcSession 前收敛为 interrupted。
+    return NextResponse.json({
+      running: false,
+      lastRun: getAgentRunStore().getLatestForSession(id) ?? null,
+    });
   }
 
   try {

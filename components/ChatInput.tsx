@@ -82,6 +82,8 @@ interface Props {
   compactError?: string | null;
   lastModelError?: string | null;
   onClearModelError?: () => void;
+  terminalNotice?: { title: string; detail?: string } | null;
+  onClearTerminalNotice?: () => void;
   agentMode?: AgentMode;
   onAgentModeChange?: (mode: AgentMode) => void;
   planReady?: boolean;
@@ -108,7 +110,6 @@ interface Props {
 
 export interface ChatInputHandle {
   insertText: (text: string) => void;
-  insertIfEmpty: (text: string) => void;
   addImages: (files: File[]) => void;
   addReference: (path: string) => void;
   toggleReference: (path: string) => void;
@@ -154,6 +155,7 @@ function skillPickerModeForValue(value: string): "all" | "project" | null {
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onBeforeSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, lastModelError, onClearModelError,
+  terminalNotice, onClearTerminalNotice,
   agentMode = "agent", onAgentModeChange, planReady, onBuildPlan,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo,
@@ -222,18 +224,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const sendInFlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useImperativeHandle(ref, () => ({
-    insertIfEmpty(text: string) {
-      const ta = textareaRef.current;
-      const current = ta ? ta.value : value;
-      if (current.trim()) return;
-      setValue(text);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        ta.focus();
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
-    },
     insertText(text: string) {
       const ta = textareaRef.current;
       if (!ta) {
@@ -810,9 +800,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       ].join(":")
     : null;
   const modelErrorNoticeKey = lastModelError && !retryInfo ? lastModelError : null;
+  const terminalNoticeKey = terminalNotice && !retryInfo ? `${terminalNotice.title}::${terminalNotice.detail ?? ""}` : null;
   const recoveryNoticeKey = stallLevel === "recovering" ? "recovering" : null;
   const showRetryNotice = useTransientNotice(retryNoticeKey);
   const showModelErrorNotice = useTransientNotice(modelErrorNoticeKey);
+  const showTerminalNotice = useTransientNotice(terminalNoticeKey);
   const showRecoveryNotice = useTransientNotice(recoveryNoticeKey);
   const showImageUploadError = useTransientNotice(imageUploadError);
 
@@ -880,6 +872,37 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 style={{
                   flexShrink: 0,
                   background: "none", border: "none", cursor: "pointer",
+                  padding: "1px 4px", color: "inherit", opacity: 0.6,
+                  fontSize: 11, lineHeight: 1,
+                }}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        )}
+        {/* Terminal run notice — interrupted / session persist failed */}
+        {terminalNotice && !retryInfo && showTerminalNotice && (
+          <div style={{
+            marginBottom: 8, padding: "5px 10px",
+            background: "rgba(148,163,184,0.10)", border: "1px solid rgba(148,163,184,0.30)",
+            borderRadius: 6, fontSize: 12, color: "var(--text-muted, rgba(148,163,184,0.95))",
+            display: "flex", alignItems: "flex-start", gap: 6,
+          }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span style={{ flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5 }}>
+              {terminalNotice.title}
+              {terminalNotice.detail ? `\n${terminalNotice.detail}` : ""}
+            </span>
+            {onClearTerminalNotice && (
+              <button
+                onClick={onClearTerminalNotice}
+                style={{
+                  flexShrink: 0, background: "none", border: "none", cursor: "pointer",
                   padding: "1px 4px", color: "inherit", opacity: 0.6,
                   fontSize: 11, lineHeight: 1,
                 }}

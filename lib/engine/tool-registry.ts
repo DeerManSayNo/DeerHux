@@ -96,6 +96,11 @@ export class ToolRegistry {
     return this.tools.has(name);
   }
 
+  /** 是否已注册且位于当前激活白名单。执行阶段必须再次校验，不能信任模型输出。 */
+  isActive(name: string): boolean {
+    return this.activeNames.has(name) && this.tools.has(name);
+  }
+
   /** 取单个工具定义（未注册返回 undefined）。 */
   get(name: string): AnyToolDefinition | undefined {
     return this.tools.get(name);

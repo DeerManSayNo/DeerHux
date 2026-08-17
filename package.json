@@ -22,15 +22,17 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "npm run download:node && tauri build --bundles app && npm run package:mac-dmg",
+    "tauri:build:win": "npm run download:node:win && tauri build --bundles nsis",
     "package:mac-dmg": "node scripts/package-mac-dmg.js",
     "download:node": "node scripts/download-node-binary.js",
     "download:node:win": "node scripts/download-node-binary.js --platform win32",
     "download:node:mac-arm": "node scripts/download-node-binary.js --platform darwin --arch arm64",
     "download:node:mac-x64": "node scripts/download-node-binary.js --platform darwin --arch x64",
     "postinstall": "node scripts/patch-deerhux-core.js",
+    "test:core": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-event-store.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-run-store.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-tool-executor.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-compaction-planner.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-session-port.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-session-fork-port.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-model-catalog.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-composition-policy.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-architecture-boundaries.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-runtime-event-weight.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-session-paging-policy.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-stream-event-performance.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-mcp-stdio-framing.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-sse-backpressure.ts && node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-recovery-buffer.ts",
     "lint": "eslint .",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public",
-    "tauri:build:win": "npm run download:node:win && tauri build --bundles nsis"
+    "test:mcp-stdio": "node scripts/test-mcp-stdio-integration.mjs"
   },
   "dependencies": {
     "@colbymchenry/codegraph": "^0.9.5",

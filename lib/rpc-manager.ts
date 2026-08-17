@@ -1,31 +1,22 @@
 import path from "path";
-import { existsSync, readFileSync } from "fs";
-import {
-  buildSessionContext,
-  DefaultResourceLoader,
-  defineTool,
-  formatSkillsForPrompt,
-  getAgentDir,
-  SessionManager,
-} from "@earendil-works/pi-coding-agent";
-import type { Message as PiMessage, ThinkingLevel } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
 import { cacheSessionPath, forceRefreshSessionList } from "./session-reader";
-import type { ToolInfo } from "./deerhux-types";
-import type { AgentEnginePort } from "./engine/port";
-import { DeerLoopEngine } from "./engine/deer-loop";
-import type { AnyToolDefinition } from "./engine/tool-registry";
+import type { AgentEnginePort, ToolInfo } from "./engine/port";
+import type { AgentSessionPort } from "./session/port";
+import type { ModelCatalogPort, RuntimeModel } from "./model/port";
+import type { ProjectResourcePort } from "./project-resource/port";
+import { composeDeerLoopEngine } from "./engine/deer-loop-composition";
+import type { TurnContextSnapshot } from "./engine/turn-context";
 import { classifyLlmError } from "./llm-gateway";
 import type { LlmRequestKind } from "./llm-gateway";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
 import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRoleSystemPromptConfig } from "./system-prompt-decomposer";
-import { indexExists } from "./code-index/database";
-import { searchIndex } from "./code-index/search";
-import { createCodeGraphTools } from "./codegraph/tools";
-import { createStandardCodingTools, STANDARD_CODING_TOOL_NAMES } from "./engine/coding-tools";
-import { createSubagentTool, SUBAGENT_TOOL_NAME } from "./parallel-agent/subagent-tool";
+import { SUBAGENT_TOOL_NAME } from "./parallel-agent/subagent-tool";
 import { getAgentEventStore } from "./agent-runtime/event-store";
+import { getAgentRunStore } from "./agent-runtime/run-store";
+import { isTerminalAgentRunStatus, type AgentRunRecord } from "./agent-runtime/run-types";
+import { registerShutdownCleanup } from "./process-shutdown";
+import type { AgentRuntimeEventBase } from "./agent-runtime/types";
 import type { FileReference, ImageContent, SkillReference, TextContent } from "./types";
 import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
 import {
@@ -41,10 +32,8 @@ import {
 // Types
 // ============================================================================
 
-export interface AgentEvent {
-  type: string;
-  [key: string]: unknown;
-}
+/** 兼容导出；服务端运行时事件统一使用 agent-runtime 基础契约。 */
+export type AgentEvent = AgentRuntimeEventBase;
 
 type EventListener = (event: AgentEvent) => void;
 
@@ -59,70 +48,6 @@ interface PreparedTurnContext {
   references: FileReference[];
   skill?: SkillReference;
   systemPromptBlock: string;
-}
-
-interface BaseSystemPromptResources {
-  cwd: string;
-  customPrompt?: string;
-  appendSystemPrompt?: string[];
-  contextFiles?: Array<{ path: string; content: string }>;
-  formattedSkills?: string;
-  now?: Date;
-}
-
-/**
- * Assemble the stable, resource-backed portion of the prompt. Role, mode and
- * live tool sections are intentionally applied later by AgentSessionWrapper;
- * selected skill contents remain a per-turn layer.
- */
-function composeBaseSystemPrompt(resources: BaseSystemPromptResources): string {
-  const basePrompt = resources.customPrompt?.trim() || [
-    "You are an expert coding assistant operating inside DeerHux, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
-    "Available tools:\n(none)",
-    "Guidelines:\n- Be concise in your responses\n- Show file paths clearly when working with files",
-  ].join("\n\n");
-  const parts = [basePrompt];
-
-  const appendPrompt = resources.appendSystemPrompt
-    ?.map((item) => item.trim())
-    .filter(Boolean)
-    .join("\n\n");
-  if (appendPrompt) parts.push(appendPrompt);
-
-  if (resources.contextFiles?.length) {
-    const context = resources.contextFiles
-      .map(({ path: filePath, content }) => (
-        `<project_instructions path="${filePath}">\n${content}\n</project_instructions>`
-      ))
-      .join("\n\n");
-    parts.push(`<project_context>\n\nProject-specific instructions and guidelines:\n\n${context}\n\n</project_context>`);
-  }
-
-  if (resources.formattedSkills?.trim()) {
-    parts.push(resources.formattedSkills.trim());
-  }
-
-  const now = resources.now ?? new Date();
-  const date = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("-");
-  parts.push(`Current date: ${date}\nCurrent working directory: ${resources.cwd.replace(/\\/g, "/")}`);
-  return parts.join("\n\n");
-}
-
-async function loadBaseSystemPrompt(cwd: string, includeSkills: boolean): Promise<string> {
-  const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
-  await loader.reload();
-  const skills = includeSkills ? loader.getSkills().skills : [];
-  return composeBaseSystemPrompt({
-    cwd,
-    customPrompt: loader.getSystemPrompt(),
-    appendSystemPrompt: loader.getAppendSystemPrompt(),
-    contextFiles: loader.getAgentsFiles().agentsFiles,
-    formattedSkills: skills.length ? formatSkillsForPrompt(skills) : undefined,
-  });
 }
 
 type RuntimeImage = {
@@ -269,12 +194,10 @@ const TURN_CONTEXT_BLOCK_RE = /\n*<turn_context>[\s\S]*?<\/turn_context>\s*/g;
 
 /**
  * Remove any `<turn_context>…</turn_context>` blocks left over from a previous
- * turn. The per-turn context block is appended to the system prompt by
- * `withTemporarySystemPrompt` and must never leak into `baseSystemPrompt` —
- * otherwise the first turn's context (references/skill/mode) would be frozen
- * into every subsequent turn. Call this whenever we capture the system prompt
- * back from `agent.state` (where the SDK may still hold a turn-specific value)
- * into our own `baseSystemPrompt`.
+ * turn. Per-turn context now lives in the immutable TurnContextSnapshot and is
+ * no longer written into the engine's persistent system prompt; this strip is a
+ * defensive cleanup for legacy session state and for wrapper-side prompt
+ * reassembly, ensuring stale turn context never leaks into `baseSystemPrompt`.
  */
 function stripTurnContextBlock(prompt: string): string {
   return prompt.replace(TURN_CONTEXT_BLOCK_RE, "").trimEnd();
@@ -387,15 +310,27 @@ export class AgentSessionWrapper {
    * Attached to every stored/broadcast event so clients can filter by turn
    * and reconnect with precise replay boundaries. */
   private currentTurnKey: string | null = null;
+  /** 持久化运行态的当前回合；进程重启后由 RunStore 收敛为 interrupted。 */
+  private currentRunId: string | null = null;
   private sawAssistantEventInTurn = false;
   /** When true, the subagent tool is kept in the active tool set. */
   private _subagentEnabled = false;
 
-  constructor(public readonly inner: AgentEnginePort, roleId?: string | null, private mcpRuntimeLease?: McpRuntimeLease | null, agentMode?: AgentMode | null) {
+  constructor(
+    public readonly inner: AgentEnginePort,
+    private readonly session: AgentSessionPort,
+    private readonly modelCatalog: ModelCatalogPort,
+    private readonly projectResources: ProjectResourcePort,
+    roleId?: string | null,
+    private mcpRuntimeLease?: McpRuntimeLease | null,
+    agentMode?: AgentMode | null,
+    /** Run 记录的请求类别：主回合 main / 子 Agent worker subagent。 */
+    private readonly requestKind: AgentRunRecord["requestKind"] = "main",
+  ) {
     this.roleId = roleId ?? null;
     this.agentMode = normalizeAgentMode(agentMode);
     this.modePromptEnabled = agentMode !== undefined && agentMode !== null;
-    this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(inner.agent.state?.systemPrompt ?? ""));
+    this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(inner.systemPrompt));
     this.applyRolePrompt();
   }
 
@@ -425,7 +360,7 @@ export class AgentSessionWrapper {
     if (currentKey === nextKey) return;
 
     this.inner.setActiveToolsByName(nextActive);
-    if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
+    this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));
   }
 
   /** Keep subagent in (or out of) the active tool set based on the toggle. */
@@ -446,13 +381,11 @@ export class AgentSessionWrapper {
    * ★ R13 加固：外层加 try/catch，失败时至少恢复到 this.baseSystemPrompt
    * （不带 role/mode 修饰），防止 role 配置损坏导致 system prompt 污染所有后续 turn。
    *
-   * 注意：内部恢复 baseSystemPrompt 失败后会重新 throw，让调用方
-   * （如 withTemporarySystemPrompt）的快照安全网有机会介入。
+   * 注意：内部恢复 baseSystemPrompt 失败后会重新 throw，让调用方感知并处理；
+   * 回合级上下文已改由不可变 TurnContextSnapshot 承载，不再依赖此处的临时覆盖。
    */
   private applyRolePrompt(): void {
     try {
-      if (!this.inner.agent.state) return;
-      const savedActiveTools = this.inner.getActiveToolNames(); // ★ R13 发现6：保存旧 active tools，异常时回滚
       try {
         this.syncRoleMcpActiveTools();
       } catch (syncErr) {
@@ -467,7 +400,7 @@ export class AgentSessionWrapper {
       const shouldApplyModePrompt = this.modePromptEnabled && isRoleSystemPromptSectionEnabled(this.roleId, "mode_control");
       const promptWithMode = shouldApplyModePrompt ? applyModePrompt(configuredPrompt, this.agentMode) : configuredPrompt;
       const nextPrompt = isRoleSystemPromptSectionEnabled(this.roleId, "role_profile")
-        ? applyRolePromptToSystemPrompt(promptWithMode, this.roleId, this.temporaryRoleSettings, this.inner.sessionManager.getCwd())
+        ? applyRolePromptToSystemPrompt(promptWithMode, this.roleId, this.temporaryRoleSettings, this.session.cwd)
         : promptWithMode;
       this.inner.setSystemPromptPersistent(nextPrompt);
     } catch (err) {
@@ -477,16 +410,16 @@ export class AgentSessionWrapper {
       } catch (err2) {
         console.error("Failed to restore bare baseSystemPrompt:", err2);
         // ★ R13 发现5（严重修复）：内部恢复也失败 → 重新 throw，
-        // 让 withTemporarySystemPrompt 的快照恢复安全网介入
+        // 让调用方（set_role / set_mode / set_tools 等重建入口）感知失败并中止
         throw err2;
       }
     }
   }
 
   private persistAgentMode(): void {
-    if (!this.inner.sessionManager.isPersisted()) return;
+    if (!this.session.persisted) return;
     try {
-      this.inner.sessionManager.appendCustomEntry("agent_mode", { mode: this.agentMode });
+      this.session.appendCustomEntry("agent_mode", { mode: this.agentMode });
     } catch { /* best effort */ }
   }
 
@@ -499,17 +432,17 @@ export class AgentSessionWrapper {
       this.inner.setActiveToolsByName(getToolNamesForAgentMode(this.agentMode));
     }
     this.applySubagentToActiveTools();
-    if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
+    this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));
     this.applyRolePrompt();
     if (persist) this.persistAgentMode();
   }
 
   private appendDisplayUserMessage(content: unknown, references: FileReference[], skill?: SkillReference, clientMessageId?: string, turnId?: string): void {
-    if (!this.inner.sessionManager.isPersisted()) return;
+    if (!this.session.persisted) return;
     // This entry is the durable prompt-admission receipt. Do not silently ignore
     // persistence failures: without it a timed-out client cannot safely determine
     // whether retrying the prompt would execute tools twice.
-    this.inner.sessionManager.appendCustomEntry("display_user_message", {
+    this.session.appendCustomEntry("display_user_message", {
       content,
       ...(references.length ? { references } : {}),
       ...(skill ? { skill } : {}),
@@ -522,8 +455,7 @@ export class AgentSessionWrapper {
   findAcceptedPrompt(clientMessageId: string): { turnId?: string } | null {
     const pending = this.pendingPromptAdmissions.get(clientMessageId);
     if (pending) return { turnId: pending.turnId };
-    for (const entry of this.inner.sessionManager.getEntries()) {
-      if (entry.type !== "custom" || entry.customType !== "display_user_message") continue;
+    for (const entry of this.session.getCustomEntries("display_user_message")) {
       const data = entry.data as { clientMessageId?: unknown; turnId?: unknown } | undefined;
       if (data?.clientMessageId !== clientMessageId) continue;
       return { turnId: typeof data.turnId === "string" ? data.turnId : undefined };
@@ -532,9 +464,9 @@ export class AgentSessionWrapper {
   }
 
   private appendTurnContextMetadata(references: FileReference[], skill?: SkillReference): void {
-    if (!this.inner.sessionManager.isPersisted()) return;
+    if (!this.session.persisted) return;
     try {
-      this.inner.sessionManager.appendCustomEntry("turn_context", {
+      this.session.appendCustomEntry("turn_context", {
         mode: this.agentMode,
         ...(references.length ? { references } : {}),
         ...(skill ? { skill } : {}),
@@ -545,23 +477,8 @@ export class AgentSessionWrapper {
   private async resolveSkillInvocation(name: string | undefined): Promise<SkillInvocation | undefined> {
     const skillName = name?.trim();
     if (!skillName) return undefined;
-    const cwd = this.inner.sessionManager.getCwd();
-    try {
-      const { DefaultResourceLoader, getAgentDir } = await import("@earendil-works/pi-coding-agent");
-      const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
-      await loader.reload();
-      const skill = loader.getSkills().skills.find((item: { name?: string }) => item.name === skillName);
-      const filePath = (skill as { filePath?: unknown } | undefined)?.filePath;
-      if (typeof filePath === "string" && existsSync(filePath)) {
-        return { name: skillName, content: readFileSync(filePath, "utf8") };
-      }
-    } catch { /* fall through to DeerHux builtins */ }
-
-    const builtinPath = path.join(process.cwd(), "lib", "builtin-skills", skillName, "SKILL.md");
-    if (existsSync(builtinPath)) {
-      return { name: skillName, content: readFileSync(builtinPath, "utf8") };
-    }
-    return { name: skillName };
+    const cwd = this.session.cwd;
+    return await this.projectResources.resolveSkill(cwd, skillName) ?? { name: skillName };
   }
 
   private buildTurnSystemPromptBlock(ctx: { references: FileReference[]; skill?: SkillInvocation }): string {
@@ -606,43 +523,58 @@ export class AgentSessionWrapper {
     };
   }
 
-  private withTemporarySystemPrompt<T>(turnPromptBlock: string, run: () => Promise<T>): Promise<T> {
-    // Strip any stale <turn_context> block that may have been baked into the
-    // state by a previous turn (e.g. after a tool-set change during the turn
-    // re-synced baseSystemPrompt from agent.state). This guarantees each turn
-    // is assembled from the *current* role/mode config plus this turn's block,
-    // so the model always sees the freshly-assembled prompt instead of the
-    // very first turn's frozen context.
-    //
-    // ★ R13 快照恢复：在应用临时 prompt 前保存完整快照，finally 中优先尝试
-    //    applyRolePrompt() 正常恢复；失败则用快照直接覆盖；再失败回退到裸 baseSystemPrompt。
-    //    防止 applyRolePrompt() 内部抛异常（如 role 配置损坏）导致 system prompt
-    //    永远停留在带 <turn_context> 的临时状态。
-    const savedSystemPrompt = this.inner.agent.state?.systemPrompt ?? "";
-    const savedBaseSystemPrompt = this.baseSystemPrompt;
+  private transitionCurrentRun(transition: {
+    status: AgentRunRecord["status"];
+    lastEventType?: string;
+    errorCode?: string;
+    error?: string;
+  }): void {
+    if (!this.currentRunId) return;
+    const store = getAgentRunStore();
+    // 幂等：已达终态的 Run 不再转移（事件重放 / destroy 兜底路径会重复触发）。
+    const current = store.get(this.currentRunId);
+    if (!current || isTerminalAgentRunStatus(current.status)) return;
+    try {
+      store.transition(this.currentRunId, transition);
+    } catch (error) {
+      // Run 状态不能反向破坏已经开始的用户回合；保留可检索日志供运维处理。
+      console.error("Failed to persist agent run transition", error);
+    }
+  }
 
-    const currentPrompt = stripTurnContextBlock(this.inner.agent.state?.systemPrompt ?? "");
-    const nextPrompt = turnPromptBlock.trim() ? `${currentPrompt}\n\n${turnPromptBlock.trim()}` : currentPrompt;
-    if (turnPromptBlock.trim()) this.inner.setSystemPromptPersistent(nextPrompt);
-    return run().finally(() => {
-      try {
-        this.applyRolePrompt();
-      } catch (err) {
-        console.error("Failed to restore system prompt via applyRolePrompt, falling back to snapshot:", err);
-        // 快照恢复
-        this.baseSystemPrompt = savedBaseSystemPrompt;
-        try {
-          this.inner.setSystemPromptPersistent(savedSystemPrompt);
-        } catch (err2) {
-          console.error("Failed to restore system prompt via snapshot fallback, using bare baseSystemPrompt:", err2);
-          // 最终回退：裸 baseSystemPrompt（不带 role/mode 修饰）
-          try {
-            this.inner.setSystemPromptPersistent(this.baseSystemPrompt);
-          } catch (err3) {
-            console.error("Failed to restore even bare system prompt:", err3);
-          }
-        }
-      }
+  getLastRun(): AgentRunRecord | null {
+    return getAgentRunStore().getLatestForSession(this.session.id);
+  }
+
+  private createPromptRun(turnKey: string, clientMessageId?: string): string {
+    const runId = `run_${turnKey}_${Date.now().toString(36)}`;
+    getAgentRunStore().create({
+      runId,
+      sessionId: this.session.id,
+      turnId: turnKey,
+      ...(clientMessageId ? { clientMessageId } : {}),
+      requestKind: this.requestKind,
+      model: { provider: this.inner.model.provider, modelId: this.inner.model.id },
+    });
+    this.currentRunId = runId;
+    return runId;
+  }
+
+  private buildFrozenTurnContext(turnId: string, turnContext: PreparedTurnContext): TurnContextSnapshot {
+    const currentPrompt = stripTurnContextBlock(this.inner.systemPrompt);
+    const effectiveSystemPrompt = turnContext.systemPromptBlock.trim()
+      ? `${currentPrompt}\n\n${turnContext.systemPromptBlock.trim()}`
+      : currentPrompt;
+    return Object.freeze({
+      turnId,
+      effectiveSystemPrompt,
+      ...(turnContext.systemPromptBlock.trim() ? { instructionContext: turnContext.systemPromptBlock.trim() } : {}),
+      activeToolNames: Object.freeze([...this.inner.getActiveToolNames()]),
+      roleId: this.roleId,
+      agentMode: this.agentMode,
+      references: Object.freeze([...turnContext.references]),
+      ...(turnContext.skill ? { skill: Object.freeze({ ...turnContext.skill }) } : {}),
+      createdAt: Date.now(),
     });
   }
 
@@ -651,19 +583,19 @@ export class AgentSessionWrapper {
     const changed = this.roleId !== normalized;
     this.roleId = normalized;
     this.applyRolePrompt();
-    if (persist && changed && this.inner.sessionManager.isPersisted()) {
+    if (persist && changed && this.session.persisted) {
       try {
-        this.inner.sessionManager.appendCustomEntry("role_profile", { roleId: this.roleId });
+        this.session.appendCustomEntry("role_profile", { roleId: this.roleId });
       } catch { /* best effort */ }
     }
   }
 
   get sessionId(): string {
-    return this.inner.sessionId;
+    return this.session.id;
   }
 
   get sessionFile(): string {
-    return this.inner.sessionFile ?? "";
+    return this.session.file ?? "";
   }
 
   isAlive(): boolean {
@@ -672,7 +604,7 @@ export class AgentSessionWrapper {
 
   private appendRuntimeAudit(customType: "auto_retry" | "abort" | "recover", data: Record<string, unknown>): void {
     try {
-      this.inner.appendCustomEntry?.(customType, data);
+      this.session.appendCustomEntry(customType, data);
     } catch (error) {
       // 审计记录不能阻断正常的重试 / 中止 / 恢复控制流。
       console.warn(`Failed to persist ${customType} audit entry`, error);
@@ -683,8 +615,8 @@ export class AgentSessionWrapper {
     if (this.unsubscribe) return;
 
     const liveIsland = getLiveIslandClient();
-    const cwd = this.inner.sessionManager.getCwd();
-    liveIsland.trackSession(this.inner.sessionId, cwd);
+    const cwd = this.session.cwd;
+    liveIsland.trackSession(this.session.id, cwd);
 
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       // ★ R7 审查修复：防止在 destroy() → unsubscribe() 窗口期间，
@@ -692,6 +624,18 @@ export class AgentSessionWrapper {
       if (!this._alive) return;
 
       const turnKey = this.currentTurnKey;
+      if (event.type === "agent_start") {
+        this.transitionCurrentRun({ status: "running", lastEventType: event.type });
+      } else if (event.type === "agent_end" && event.willRetry !== true) {
+        const error = typeof event.error === "string" ? event.error : undefined;
+        const errorCode = typeof event.errorCode === "string" ? event.errorCode : undefined;
+        this.transitionCurrentRun({
+          status: error === "aborted" ? "cancelled" : error ? "failed" : "succeeded",
+          lastEventType: event.type,
+          ...(error ? { error } : {}),
+          ...(errorCode ? { errorCode } : {}),
+        });
+      }
       if (event.type === "auto_retry_start") {
         this.appendRuntimeAudit("auto_retry", {
           phase: "start",
@@ -714,8 +658,8 @@ export class AgentSessionWrapper {
       // match SSE replay semantics (where turnId comes from the store).
       const tagged = turnKey ? { ...event, turnId: turnKey } as AgentEvent : event;
       getAgentEventStore().append({
-        sessionId: this.inner.sessionId,
-        runId: this.inner.sessionId,
+        sessionId: this.session.id,
+        runId: this.session.id,
         ...(turnKey ? { turnId: turnKey } : {}),
         event,
       });
@@ -724,8 +668,8 @@ export class AgentSessionWrapper {
       for (const l of this.listeners) l(tagged);
 
       // Forward to AIControls Live Island
-      const currentCwd = this.inner.sessionManager.getCwd();
-      liveIsland.handleEvent(this.inner.sessionId, currentCwd, event);
+      const currentCwd = this.session.cwd;
+      liveIsland.handleEvent(this.session.id, currentCwd, event);
 
       if (event.type === "tool_execution_start" && typeof event.toolCallId === "string") {
         this.pendingToolEvents.set(event.toolCallId, event);
@@ -746,8 +690,8 @@ export class AgentSessionWrapper {
           seenChangedFiles.add(resolved);
           const fileChangedEvent: AgentEvent = { type: "agent_file_changed", filePath: resolved, toolName: extractToolName(sourceEvent) };
           getAgentEventStore().append({
-            sessionId: this.inner.sessionId,
-            runId: this.inner.sessionId,
+            sessionId: this.session.id,
+            runId: this.session.id,
             ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
             event: fileChangedEvent,
           });
@@ -949,11 +893,17 @@ export class AgentSessionWrapper {
       // 推断标准化错误码，让前端能按 errorCode（如 UPSTREAM_TTFT_TIMEOUT）触发
       // 备用模型 recovery——与 engine 正常 emit 的 agent_end 行为一致。
       const errorCode = classifyLlmError(err).code;
-      const ev: AgentEvent = { type: "agent_end", messages: [], willRetry: false, error: msg };
+      this.transitionCurrentRun({
+        status: "failed",
+        lastEventType: "wrapper_unhandled_error",
+        error: msg,
+        ...(errorCode && errorCode !== "UNKNOWN" ? { errorCode } : {}),
+      });
+      const ev: AgentEvent = { type: "agent_end", willRetry: false, error: msg };
       if (errorCode && errorCode !== "UNKNOWN") ev.errorCode = errorCode;
       getAgentEventStore().append({
-        sessionId: this.inner.sessionId,
-        runId: this.inner.sessionId,
+        sessionId: this.session.id,
+        runId: this.session.id,
         ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
         event: ev,
       });
@@ -967,14 +917,14 @@ export class AgentSessionWrapper {
         this._stopRequested = false;
         const error = [
           "Agent 回合 Promise 已结束，但底层引擎没有发送最终 agent_end",
-          `session=${this.inner.sessionId}`,
+          `session=${this.session.id}`,
           `lastEventType=${this.lastEventType || "unknown"}`,
           `eventCount=${this.eventCount}`,
         ].join("；");
-        const ev: AgentEvent = { type: "agent_end", messages: [], willRetry: false, error };
+        const ev: AgentEvent = { type: "agent_end", willRetry: false, error };
         getAgentEventStore().append({
-          sessionId: this.inner.sessionId,
-          runId: this.inner.sessionId,
+          sessionId: this.session.id,
+          runId: this.session.id,
           ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
           event: ev,
         });
@@ -1030,9 +980,7 @@ export class AgentSessionWrapper {
     });
     this.inner.applyToolExecutionModes();
 
-    if (this.inner.agent.state) {
-      this.baseSystemPrompt = stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? "");
-    }
+    this.baseSystemPrompt = stripTurnContextBlock(this.inner.systemPrompt);
     this.applyRolePrompt();
   }
 
@@ -1042,7 +990,7 @@ export class AgentSessionWrapper {
       return this.mcpRuntime;
     }
 
-    const cwd = this.inner.sessionManager.getCwd();
+    const cwd = this.session.cwd;
     const { acquireMcpRuntime } = await import("./mcp-runtime");
     const lease = await acquireMcpRuntime(cwd);
     try {
@@ -1116,9 +1064,10 @@ export class AgentSessionWrapper {
       return { ok: false, skipped: true };
     }
 
-    const cwd = this.inner.sessionManager.getCwd();
-    const { createMcpRuntime } = await import("./mcp-runtime");
-    const nextRuntime = await createMcpRuntime(cwd);
+    const cwd = this.session.cwd;
+    const { acquireMcpRuntime } = await import("./mcp-runtime");
+    const nextLease = await acquireMcpRuntime(cwd);
+    const nextRuntime = nextLease.runtime;
     const previousRuntime = this.mcpRuntime;
     const previousMcpToolNames = new Set(previousRuntime?.toolNames ?? []);
     const activeBefore = this.inner.getActiveToolNames();
@@ -1128,12 +1077,12 @@ export class AgentSessionWrapper {
     try {
       this.installMcpRuntime(nextRuntime, hadActiveMcp || isFullPreset);
     } catch (error) {
-      nextRuntime.close();
+      nextLease.release();
       throw error;
     }
 
     this.mcpRuntimeLease?.release();
-    this.mcpRuntimeLease = { runtime: nextRuntime, release: () => nextRuntime.close() };
+    this.mcpRuntimeLease = nextLease;
 
     return { ok: true, toolNames: nextRuntime.toolNames, serverStatuses: nextRuntime.serverStatuses };
   }
@@ -1153,49 +1102,66 @@ export class AgentSessionWrapper {
     roleId?: string,
   ): Promise<{ turnId: string }> {
     const turnNum = ++this.activeTurnId;
-    const turnKey = `${this.inner.sessionId}:t${turnNum}`;
+    const turnKey = `${this.session.id}:t${turnNum}`;
     this.currentTurnKey = turnKey;
-    const turnContext = await this.prepareTurnContext(rawMessage, references, skillName);
-    signal?.throwIfAborted();
-    if (turnContext.displayMessage) {
-      getLiveIslandClient().recordPrompt(this.inner.sessionId, turnContext.displayMessage);
-    }
-    const prepared = await this.prepareImageFallback(turnContext.message, images, turnContext.displayMessage);
-    signal?.throwIfAborted();
-    if (roleId) this.setRole(roleId);
+    this.createPromptRun(turnKey, clientMessageId);
+    this.transitionCurrentRun({ status: "preparing", lastEventType: "prompt_preparing" });
 
-    const displayUserContent = prepared.displayContent ?? turnContext.displayMessage;
-    const userEchoEvent = {
-      type: "message_end",
-      message: {
-        role: "user",
-        content: displayUserContent,
-        ...(turnContext.references.length ? { references: turnContext.references } : {}),
-        ...(turnContext.skill ? { skill: turnContext.skill } : {}),
-        ...(clientMessageId ? { clientMessageId } : {}),
-        agentMode: this.agentMode,
-        timestamp: Date.now(),
-      },
-    } as AgentEvent;
-    // Mirror the synthetic user echo into the EventStore so pure-SSE
-    // clients (e.g. WeChat bot) can replay it after reconnect — matches
-    // how agent_file_changed is committed below.
-    getAgentEventStore().append({
-      sessionId: this.inner.sessionId,
-      runId: this.inner.sessionId,
-      ...(turnKey ? { turnId: turnKey } : {}),
-      event: userEchoEvent,
-    });
-    for (const l of this.listeners) {
-      l(turnKey ? { ...userEchoEvent, turnId: turnKey } as AgentEvent : userEchoEvent);
-    }
+    try {
+      const turnContext = await this.prepareTurnContext(rawMessage, references, skillName);
+      signal?.throwIfAborted();
+      if (turnContext.displayMessage) {
+        getLiveIslandClient().recordPrompt(this.session.id, turnContext.displayMessage);
+      }
+      const prepared = await this.prepareImageFallback(turnContext.message, images, turnContext.displayMessage);
+      signal?.throwIfAborted();
+      if (roleId) this.setRole(roleId);
+      const frozenContext = this.buildFrozenTurnContext(turnKey, turnContext);
 
-    this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
-    this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId, turnKey);
-    this.trackTurn(turnNum, this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
-      this.inner.prompt(prepared.message, toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined)
-    )));
-    return { turnId: turnKey };
+      const displayUserContent = prepared.displayContent ?? turnContext.displayMessage;
+      // 先写入 durable receipt，再通知 SSE / 启动引擎。写失败时客户端可安全重试，
+      // 且绝不允许模型先看到一条刷新后不存在的用户消息。
+      this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId, turnKey);
+      this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
+
+      const userEchoEvent = {
+        type: "message_end",
+        message: {
+          role: "user",
+          content: displayUserContent,
+          ...(turnContext.references.length ? { references: turnContext.references } : {}),
+          ...(turnContext.skill ? { skill: turnContext.skill } : {}),
+          ...(clientMessageId ? { clientMessageId } : {}),
+          agentMode: this.agentMode,
+          timestamp: Date.now(),
+        },
+      } as AgentEvent;
+      getAgentEventStore().append({
+        sessionId: this.session.id,
+        runId: this.session.id,
+        ...(turnKey ? { turnId: turnKey } : {}),
+        event: userEchoEvent,
+      });
+      for (const l of this.listeners) {
+        l(turnKey ? { ...userEchoEvent, turnId: turnKey } as AgentEvent : userEchoEvent);
+      }
+
+      this.trackTurn(turnNum, this.inner.prompt({
+        text: prepared.message,
+        ...(toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : {}),
+        context: frozenContext,
+      }));
+      return { turnId: turnKey };
+    } catch (error) {
+      const aborted = error instanceof DOMException && error.name === "AbortError";
+      this.transitionCurrentRun({
+        status: aborted ? "cancelled" : "failed",
+        lastEventType: "prompt_admission_failed",
+        error: error instanceof Error ? error.message : String(error),
+        ...(error instanceof Error && "code" in error && typeof error.code === "string" ? { errorCode: error.code } : {}),
+      });
+      throw error;
+    }
   }
 
   /** 内部准入保护：允许比实际回合状态更保守，防止旧清理与新 prompt 竞争。 */
@@ -1295,18 +1261,16 @@ export class AgentSessionWrapper {
 
       case "set_role": {
         this.setRole(typeof command.roleId === "string" ? command.roleId : null);
-        return { roleId: this.roleId, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
+        return { roleId: this.roleId, systemPrompt: this.inner.systemPrompt };
       }
 
       case "set_system_prompt": {
         const rawPrompt = typeof command.prompt === "string" ? command.prompt : "";
-        if (this.inner.agent.state) {
-          this.baseSystemPrompt = stripModePrompt(rawPrompt);
-          this.inner.setSystemPromptPersistent(rawPrompt);
-        }
+        this.baseSystemPrompt = stripModePrompt(rawPrompt);
+        this.inner.setSystemPromptPersistent(rawPrompt);
         this.applyRolePrompt();
         return {
-          systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
+          systemPrompt: this.inner.systemPrompt,
         };
       }
 
@@ -1314,7 +1278,7 @@ export class AgentSessionWrapper {
         const text = typeof command.text === "string" ? command.text.trim() : "";
         if (text) this.temporaryRoleSettings.push(text);
         this.applyRolePrompt();
-        return { ok: true, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
+        return { ok: true, systemPrompt: this.inner.systemPrompt };
       }
 
       case "abort": {
@@ -1327,6 +1291,9 @@ export class AgentSessionWrapper {
         // await it here, the HTTP request can appear to hang for seconds while
         // cleanup finishes, making the UI stop button feel ineffective.
         this._stopRequested = this.isTurnBusy();
+        if (this._stopRequested) {
+          this.transitionCurrentRun({ status: "stopping", lastEventType: "abort_requested" });
+        }
         this.pendingPromptController?.abort(new DOMException("Stop requested", "AbortError"));
         // 显式打断压缩（inner.abort 也会做）；保证压缩窗口 stop 一定生效。
         this.inner.abortCompaction();
@@ -1359,24 +1326,23 @@ export class AgentSessionWrapper {
           running: this.isTurnBusy(),
         });
         try {
-          // 先切模型：失败时旧 turn 还活着，session 状态完全不变，前端可安全重试
+          // 先只解析模型，找不到时保持旧回合不变；真正切换必须等旧回合 Abort/settle，
+          // 否则 DeerLoopEngine 会拒绝运行中 setModel。
           const provider = typeof command.provider === "string" ? command.provider.trim() : undefined;
           const modelId = typeof command.modelId === "string" ? command.modelId.trim() : undefined;
-          let modelChanged = false;
-          if (provider && modelId) {
-            const registry = this.inner.modelRegistry;
-            let model = registry.find(provider, modelId);
-            if (!model) {
-              const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
-              model = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
-            }
-            if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-            await this.inner.setModel(model);
-            modelChanged = true;
+          const recoveryModel = provider && modelId
+            ? this.modelCatalog.resolve(provider, modelId)
+            : undefined;
+          if (provider && modelId && !recoveryModel) {
+            throw new Error(`Model not found: ${provider}/${modelId}`);
           }
 
-          // 模型就绪后再 abort + settle + 开新 turn
           await this.abortAndSettleCurrentTurn();
+          let modelChanged = false;
+          if (recoveryModel) {
+            await this.inner.setModel(recoveryModel);
+            modelChanged = true;
+          }
 
           const recoverText = typeof command.message === "string" ? command.message : "";
           const recoverImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
@@ -1409,8 +1375,8 @@ export class AgentSessionWrapper {
         const model = this.inner.model;
         const contextUsage = this.inner.getContextUsage();
         return {
-          sessionId: this.inner.sessionId,
-          sessionFile: this.inner.sessionFile ?? "",
+          sessionId: this.session.id,
+          sessionFile: this.session.file ?? "",
           isStreaming: this.inner.isStreaming,
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,
@@ -1422,11 +1388,12 @@ export class AgentSessionWrapper {
           contextUsage: contextUsage
             ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
             : null,
-          systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
-          thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
+          systemPrompt: this.inner.systemPrompt,
+          thinkingLevel: this.inner.thinkingLevel,
           agentMode: this.agentMode,
           isRunning: this.isTurnRunningForUi(),
           stopRequested: this._stopRequested,
+          lastRun: this.getLastRun(),
           mcp: this.mcpRuntime ? {
             toolNames: this.mcpRuntime.toolNames,
             serverStatuses: this.mcpRuntime.serverStatuses,
@@ -1436,19 +1403,7 @@ export class AgentSessionWrapper {
 
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
-        const registry = this.inner.modelRegistry;
-        let model = registry.find(provider, modelId);
-
-        // Existing AgentSession instances keep the ModelRegistry they were
-        // created with. If ~/.deerhux/agent/models.json was edited while this
-        // wrapper is alive, the UI may already show the new model (loaded via
-        // /api/models) but the stale in-memory registry cannot find it. Try a
-        // fresh registry before failing so newly-saved models are selectable
-        // without restarting the app/session.
-        if (!model) {
-          const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
-          model = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
-        }
+        const model = this.modelCatalog.resolve(provider, modelId);
 
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
         await this.inner.setModel(model);
@@ -1456,78 +1411,71 @@ export class AgentSessionWrapper {
       }
 
       case "fork": {
-        const entryId = command.entryId as string;
-        const sessionManager = this.inner.sessionManager;
-        const currentSessionFile = this.inner.sessionFile;
-
-        if (!sessionManager.isPersisted()) return { cancelled: true };
-        if (!currentSessionFile) throw new Error("Persisted session is missing a session file");
-
-        const entry = sessionManager.getEntry(entryId);
-        if (!entry) throw new Error("Invalid entry ID for forking");
-
-        const sessionDir = sessionManager.getSessionDir();
-        let newSessionFile: string;
-
-        if (!entry.parentId) {
-          // Fork before the first message: create an empty session linked to this one
-          const newManager = SessionManager.create(sessionManager.getCwd(), sessionDir);
-          newManager.newSession({ parentSession: currentSessionFile });
-          newSessionFile = newManager.getSessionFile() as string;
-        } else {
-          // Fork after some history: copy path up to (but not including) the fork point
-          const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
-          const forkedPath = sourceManager.createBranchedSession(entry.parentId);
-          if (!forkedPath) throw new Error("Failed to create forked session");
-          newSessionFile = forkedPath;
-        }
-
-        const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
-        cacheSessionPath(newSessionId, newSessionFile);
+        const result = this.session.fork(command.entryId as string);
+        if (!result) return { cancelled: true };
+        cacheSessionPath(result.sessionId, result.sessionFile);
         forceRefreshSessionList();
+        // Fork 后必须立即销毁：底层 Session 实现可能原地移动内部状态。
         this.destroy();
-        return { cancelled: false, newSessionId };
+        return { cancelled: false, newSessionId: result.sessionId };
       }
 
       case "navigate_tree": {
-        const result = await this.inner.navigateTree(command.targetId as string, {});
-        return { cancelled: result.cancelled };
+        const result = await this.inner.navigate(command.targetId as string);
+        return {
+          cancelled: result.cancelled,
+          editorText: result.editorText,
+          aborted: result.aborted,
+        };
       }
 
       case "set_thinking_level": {
         const level = command.level as string;
         this.inner.setThinkingLevel(level);
-        // setThinkingLevel clamps xhigh→high for models where supportsXhigh()===false.
-        // If the model has DeepSeek thinking compat (reasoningEffortMap maps xhigh→max),
-        // force the state back so the compat layer can use it correctly.
-        if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
-          this.inner.agent.state.thinkingLevel = "xhigh";
-        }
         return null;
       }
 
       case "compact": {
         const provider = typeof command.provider === "string" ? command.provider : undefined;
         const modelId = typeof command.modelId === "string" ? command.modelId : undefined;
-        let summaryModel: ReturnType<typeof this.inner.modelRegistry.find> | undefined;
+        let summaryModel: RuntimeModel | undefined;
         if (provider && modelId) {
-          summaryModel = this.inner.modelRegistry.find(provider, modelId);
-          // 与 set_model 一致：热更新过的 models.json 可能尚未进入当前 registry。
-          if (!summaryModel) {
-            const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
-            summaryModel = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
-          }
+          summaryModel = this.modelCatalog.resolve(provider, modelId);
           if (!summaryModel) throw new Error(`压缩模型不存在: ${provider}/${modelId}`);
         }
         const abortOnDisconnect = () => this.inner.abortCompaction();
         requestSignal?.addEventListener("abort", abortOnDisconnect, { once: true });
+        const compactionRunId = `run_${this.session.id}:compact:${Date.now().toString(36)}`;
+        getAgentRunStore().create({
+          runId: compactionRunId,
+          sessionId: this.session.id,
+          turnId: compactionRunId,
+          requestKind: "compaction",
+          model: { provider: this.inner.model.provider, modelId: this.inner.model.id },
+        });
+        const previousRunId = this.currentRunId;
+        this.currentRunId = compactionRunId;
+        this.transitionCurrentRun({ status: "running", lastEventType: "compaction_start" });
         try {
-          return await this.inner.compact(
+          const result = await this.inner.compact(
             command.customInstructions as string | undefined,
             "manual",
             summaryModel ? { model: summaryModel as never, provider, modelId } : undefined,
           );
+          this.transitionCurrentRun({ status: "succeeded", lastEventType: "compaction_end" });
+          return result;
+        } catch (compactError) {
+          this.transitionCurrentRun({
+            status: "failed",
+            lastEventType: "compaction_failed",
+            error: compactError instanceof Error ? compactError.message : String(compactError),
+            ...(compactError instanceof Error && "code" in compactError && typeof (compactError as { code?: unknown }).code === "string"
+              ? { errorCode: (compactError as { code: string }).code }
+              : {}),
+          });
+          throw compactError;
         } finally {
+          this.currentRunId = previousRunId;
           requestSignal?.removeEventListener("abort", abortOnDisconnect);
         }
       }
@@ -1544,9 +1492,11 @@ export class AgentSessionWrapper {
         const prepared = await this.prepareImageFallback(turnContext.message, steerImages, turnContext.displayMessage);
         this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
         this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
-        await this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
-          this.inner.steer(prepared.message, toSdkImages(prepared.images))
-        ));
+        await this.inner.steer({
+          text: prepared.message,
+          ...(toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : {}),
+          context: this.buildFrozenTurnContext(`${this.session.id}:steer:${Date.now().toString(36)}`, turnContext),
+        });
         return null;
       }
 
@@ -1557,25 +1507,25 @@ export class AgentSessionWrapper {
         const prepared = await this.prepareImageFallback(turnContext.message, followImages, turnContext.displayMessage);
         this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
         this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
+        const frozenContext = this.buildFrozenTurnContext(`${this.session.id}:follow:${Date.now().toString(36)}`, turnContext);
         const imageOptions = toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined;
         const message = prepared.message;
 
         if (this._isRunning || this.inner.isStreaming) {
-          // SDK followUp only queues for an already-active turn. It should be
-          // sent while the turn is still active so the agent can drain it.
-          await this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
-            this.inner.followUp(message, toSdkImages(prepared.images))
-          ));
+          // Queued follow-up carries its own immutable instruction context; it cannot
+          // overwrite the currently running turn's system prompt.
+          await this.inner.followUp({ text: message, ...(imageOptions ?? {}), context: frozenContext });
           return null;
         }
 
         // If the previous turn was already aborted/stopped, followUp would only
         // sit in the queue and never trigger a model call. Start a fresh turn.
         const followTurnNum = ++this.activeTurnId;
-        this.currentTurnKey = `${this.inner.sessionId}:t${followTurnNum}`;
-        this.trackTurn(followTurnNum, this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
-          this.inner.prompt(message, imageOptions)
-        )));
+        const followTurnKey = `${this.session.id}:t${followTurnNum}`;
+        this.currentTurnKey = followTurnKey;
+        this.createPromptRun(followTurnKey);
+        this.transitionCurrentRun({ status: "preparing", lastEventType: "follow_up_preparing" });
+        this.trackTurn(followTurnNum, this.inner.prompt({ text: message, ...(imageOptions ?? {}), context: frozenContext }));
         return null;
       }
 
@@ -1597,7 +1547,7 @@ export class AgentSessionWrapper {
         const requested = Array.isArray(command.toolNames) ? command.toolNames.filter((name): name is string => typeof name === "string") : [];
         if (isReadOnlyAgentMode(this.agentMode)) {
           this.inner.setActiveToolsByName(getToolNamesForAgentMode(this.agentMode));
-          if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
+          this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));
           this.applyRolePrompt();
           return null;
         }
@@ -1610,7 +1560,7 @@ export class AgentSessionWrapper {
           : requested;
         this.inner.setActiveToolsByName(toolNames);
         this.applySubagentToActiveTools();
-        if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
+        this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));
         this.applyRolePrompt();
         return null;
       }
@@ -1618,19 +1568,19 @@ export class AgentSessionWrapper {
       case "set_subagent_enabled": {
         this._subagentEnabled = command.enabled === true;
         this.applySubagentToActiveTools();
-        if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
+        this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));
         this.applyRolePrompt();
         return { enabled: this._subagentEnabled };
       }
 
       case "get_mode": {
-        return { mode: this.agentMode, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
+        return { mode: this.agentMode, systemPrompt: this.inner.systemPrompt };
       }
 
       case "set_mode": {
         const nextMode = normalizeAgentMode(command.mode);
         await this.setAgentMode(nextMode);
-        return { mode: this.agentMode, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
+        return { mode: this.agentMode, systemPrompt: this.inner.systemPrompt };
       }
 
       case "abort_compaction": {
@@ -1675,16 +1625,24 @@ export class AgentSessionWrapper {
     this.unsubscribe?.();
     // 活跃回合被销毁时必须向 Journal 写入终态；空闲 wrapper 回收不是业务回合结束。
     if (hadActiveTurn) {
+      // 持久化 Run 同步收敛：wrapper 消失后运行态事实不能再停留在非终态
+      //（否则进程重启后 reconcile 会把它误判为 interrupted——虽然语义接近，
+      // 但 destroy 的直接原因是可记录的）。
+      this.transitionCurrentRun({
+        status: "interrupted",
+        lastEventType: "wrapper_destroyed",
+        errorCode: "RUNTIME_STOPPED",
+        error: "Agent 会话 wrapper 在回合尚未结束时被销毁。",
+      });
       const destroyEvent: AgentEvent = {
         type: "agent_end",
-        messages: [],
         willRetry: false,
-        error: `Agent 会话在回合尚未结束时被销毁（session=${this.inner.sessionId}，lastEventType=${this.lastEventType || "unknown"}，eventIdleMs=${this.lastEventAt ? Date.now() - this.lastEventAt : "unknown"}）。`,
+        error: `Agent 会话在回合尚未结束时被销毁（session=${this.session.id}，lastEventType=${this.lastEventType || "unknown"}，eventIdleMs=${this.lastEventAt ? Date.now() - this.lastEventAt : "unknown"}）。`,
       };
       // SSE consumers subscribe to EventStore rather than wrapper.listeners.
       getAgentEventStore().append({
-        sessionId: this.inner.sessionId,
-        runId: this.inner.sessionId,
+        sessionId: this.session.id,
+        runId: this.session.id,
         ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
         event: destroyEvent,
       });
@@ -1697,20 +1655,21 @@ export class AgentSessionWrapper {
     // Fire-and-forget: destroy() is called synchronously from idle timeout,
     // fork, and DELETE handler; blocking would delay those callers.
     //
-    // 先捕获 MCP lease 引用并置空实例字段，再在 abort 完成后再释放，
-    // 避免 abort 异步等待期间 MCP runtime 被提前关闭导致工具调用抛连接错误。
+    // Active Turn 要等 Abort 后再释放 MCP；Idle Registry 驱逐没有运行中工具，
+    // 可立即释放，避免新 Session 启动时旧/新子进程短时叠加。
     const mcpLease = this.mcpRuntimeLease;
     this.mcpRuntimeLease = null;
+    if (!hadActiveTurn) mcpLease?.release();
     this.inner.abort()
       .catch(() => {})
       .finally(() => {
-        mcpLease?.release();
+        if (hadActiveTurn) mcpLease?.release();
         this.inner.dispose();
       })
       .catch(() => {}); // 防御性 catch：dispose 未来若抛异常，避免 unhandled rejection
     // 清理 EventStore 中该 session 的事件桶，避免长期运行后内存持续增长。
     // fork / idle-timeout / DELETE 都会走到这里，确保 session 销毁时释放事件缓存。
-    getAgentEventStore().clearRun(this.inner.sessionId);
+    getAgentEventStore().clearRun(this.session.id);
     this.onDestroyCallback?.();
   }
 }
@@ -1722,8 +1681,9 @@ export class AgentSessionWrapper {
 declare global {
   var __deerhuxSessions: Map<string, AgentSessionWrapper> | undefined;
   var __deerhuxSessionAliases: Map<string, string> | undefined;
-  /** Stable new-session request id → real session id. Kept after wrapper eviction. */
-  var __deerhuxCreatedSessions: Map<string, string> | undefined;
+  /** Stable new-session request id → real session id，带 TTL 的快速幂等索引。 */
+  var __deerhuxCreatedSessions: Map<string, { sessionId: string; createdAt: number } | string> | undefined;
+  var __deerhuxSessionStartReservations: number | undefined;
   var __deerhuxStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
 }
 
@@ -1731,64 +1691,117 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
   if (!globalThis.__deerhuxSessions) {
     globalThis.__deerhuxSessions = new Map();
     const cleanup = () => globalThis.__deerhuxSessions?.forEach((s) => s.destroy());
-    process.once("exit", cleanup);
-    process.once("SIGINT", cleanup);
-    process.once("SIGTERM", cleanup);
+    registerShutdownCleanup(cleanup);
   }
   return globalThis.__deerhuxSessions;
 }
 
 // ★ Security/reliability: hard cap on concurrent in-process sessions to prevent
 // unbounded memory growth under fork storms or high concurrency.
-const MAX_REGISTRY_SESSIONS = 64;
-
-function evictIdleSessionsIfNeeded(): void {
-  const alive = uniqueRegistrySessions();
-  if (alive.length < MAX_REGISTRY_SESSIONS) return;
-
-  // Find the session with the longest idle time that is NOT actively streaming
-  // or compacting — never evict a session mid-turn.
-  let victim: AgentSessionWrapper | null = null;
-  let victimIdle = -1;
-  for (const session of alive) {
-    const status = session.getStatus();
-    if (status.isStreaming || status.isCompacting || status.isRunning) continue;
-    const idle = Math.max(status.eventIdleMs ?? 0, status.contentIdleMs ?? 0);
-    if (idle > victimIdle) {
-      victimIdle = idle;
-      victim = session;
-    }
+export class SessionCapacityError extends Error {
+  constructor(readonly capacity: number) {
+    super(`Agent session capacity reached (${capacity}); wait for an active session to finish`);
+    this.name = "SessionCapacityError";
   }
+}
 
-  if (victim) {
+const MAX_REGISTRY_SESSIONS = (() => {
+  const configured = Number(process.env.DEERHUX_MAX_LIVE_SESSIONS);
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : 16;
+})();
+
+function evictIdleSessionsIfNeeded(): boolean {
+  while (true) {
+    const alive = uniqueRegistrySessions();
+    const reserved = globalThis.__deerhuxSessionStartReservations ?? 0;
+    if (alive.length + reserved < MAX_REGISTRY_SESSIONS) return true;
+
+    // 永不驱逐运行中会话；选择最久未活动的 Idle Wrapper。
+    let victim: AgentSessionWrapper | null = null;
+    let victimIdle = -1;
+    for (const session of alive) {
+      const status = session.getStatus();
+      if (status.isStreaming || status.isCompacting || status.isRunning) continue;
+      const idle = Math.max(status.eventIdleMs ?? 0, status.contentIdleMs ?? 0);
+      if (idle > victimIdle) {
+        victimIdle = idle;
+        victim = session;
+      }
+    }
+
+    if (!victim) {
+      console.warn(
+        `[rpc-manager] Registry at capacity (${alive.length}+${reserved}/${MAX_REGISTRY_SESSIONS}); all sessions active, rejecting startup`,
+      );
+      return false;
+    }
     console.warn(
-      `[rpc-manager] Registry at capacity (${alive.length}/${MAX_REGISTRY_SESSIONS}), evicting idle session ${victim.sessionId}`,
+      `[rpc-manager] Registry at capacity (${alive.length}+${reserved}/${MAX_REGISTRY_SESSIONS}), evicting idle session ${victim.sessionId}`,
     );
     victim.destroy();
-  } else {
-    console.warn(
-      `[rpc-manager] Registry at capacity (${alive.length}/${MAX_REGISTRY_SESSIONS}); all sessions active, skipping eviction`,
-    );
   }
 }
 
 function getSessionAliases(): Map<string, string> {
   if (!globalThis.__deerhuxSessionAliases) globalThis.__deerhuxSessionAliases = new Map();
-  return globalThis.__deerhuxSessionAliases;
+  const aliases = globalThis.__deerhuxSessionAliases;
+  const registry = getRegistry();
+  for (const [alias, realSessionId] of aliases) {
+    if (!registry.has(realSessionId)) aliases.delete(alias);
+  }
+  while (aliases.size > 4_000) {
+    const oldest = aliases.keys().next().value as string | undefined;
+    if (!oldest) break;
+    aliases.delete(oldest);
+  }
+  return aliases;
 }
 
 function resolveSessionAlias(sessionKey: string): string {
   return getSessionAliases().get(sessionKey) ?? sessionKey;
 }
 
-function getCreatedSessions(): Map<string, string> {
+const CREATED_SESSION_TTL_MS = 24 * 60 * 60_000;
+const CREATED_SESSION_MAX = 2_000;
+
+function getCreatedSessions(): Map<string, { sessionId: string; createdAt: number }> {
   if (!globalThis.__deerhuxCreatedSessions) globalThis.__deerhuxCreatedSessions = new Map();
-  return globalThis.__deerhuxCreatedSessions;
+  const entries = globalThis.__deerhuxCreatedSessions;
+  const now = Date.now();
+  const cutoff = now - CREATED_SESSION_TTL_MS;
+  for (const [key, value] of entries) {
+    // 兼容 Next HMR 前旧模块留下的 Map<string,string>。
+    if (typeof value === "string") entries.set(key, { sessionId: value, createdAt: now });
+    else if (value.createdAt < cutoff) entries.delete(key);
+  }
+  while (entries.size > CREATED_SESSION_MAX) {
+    const oldest = entries.keys().next().value as string | undefined;
+    if (!oldest) break;
+    entries.delete(oldest);
+  }
+  return entries as Map<string, { sessionId: string; createdAt: number }>;
 }
 
 /** Resolve a stable new-session request id after its startup lock has settled. */
 export function getCreatedSessionId(requestKey: string): string | undefined {
-  return getCreatedSessions().get(requestKey);
+  const entries = getCreatedSessions();
+  const found = entries.get(requestKey);
+  if (!found) return undefined;
+  // Map 插入序即 LRU 顺序；访问后移到末尾。
+  entries.delete(requestKey);
+  entries.set(requestKey, found);
+  return found.sessionId;
+}
+
+function rememberCreatedSession(requestKey: string, sessionId: string): void {
+  const entries = getCreatedSessions();
+  entries.delete(requestKey);
+  entries.set(requestKey, { sessionId, createdAt: Date.now() });
+  while (entries.size > CREATED_SESSION_MAX) {
+    const oldest = entries.keys().next().value as string | undefined;
+    if (!oldest) break;
+    entries.delete(oldest);
+  }
 }
 
 function getRegistrySession(sessionKey: string): AgentSessionWrapper | undefined {
@@ -1829,6 +1842,34 @@ function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSes
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
   return getRegistrySession(sessionId);
+}
+
+export function getRpcRuntimeDiagnostics(): {
+  wrappers: number;
+  running: number;
+  streaming: number;
+  compacting: number;
+  registryKeys: number;
+  aliases: number;
+  createdSessionKeys: number;
+  startLocks: number;
+  startReservations: number;
+  maxWrappers: number;
+} {
+  const wrappers = uniqueRegistrySessions();
+  const states = wrappers.map((session) => session.getStatus());
+  return {
+    wrappers: wrappers.length,
+    running: states.filter((state) => state.isRunning).length,
+    streaming: states.filter((state) => state.isStreaming).length,
+    compacting: states.filter((state) => state.isCompacting).length,
+    registryKeys: getRegistry().size,
+    aliases: getSessionAliases().size,
+    createdSessionKeys: getCreatedSessions().size,
+    startLocks: getLocks().size,
+    startReservations: globalThis.__deerhuxSessionStartReservations ?? 0,
+    maxWrappers: MAX_REGISTRY_SESSIONS,
+  };
 }
 
 export function listRpcSessionStates(): Array<{ sessionId: string; isStreaming: boolean; isCompacting: boolean; lastEventType: string; eventCount: number; eventRate: number; eventIdleMs: number | null; contentIdleMs: number | null }> {
@@ -1878,18 +1919,23 @@ export async function startRpcSession(
   const inflight = locks.get(lockKey) ?? locks.get(sessionId);
   if (inflight) return inflight;
 
-  // ★ Security/reliability: enforce registry capacity before spawning a new session
-  evictIdleSessionsIfNeeded();
+  // 容量检查与启动预留必须在第一个 await 前原子完成，防止不同 session 的并发
+  // cold-start 全部看到同一个旧 Registry 大小并穿透上限。
+  if (!evictIdleSessionsIfNeeded()) {
+    throw new SessionCapacityError(MAX_REGISTRY_SESSIONS);
+  }
+  globalThis.__deerhuxSessionStartReservations = (globalThis.__deerhuxSessionStartReservations ?? 0) + 1;
 
   const deerStarting = (async () => {
     const { session, realSessionId } = await startDeerLoopSession(
       sessionId, sessionFile, cwd, toolNames, roleId, agentMode, model, options,
     );
     if (!sessionFile && sessionId.startsWith("__new__")) {
-      getCreatedSessions().set(sessionId, realSessionId);
+      rememberCreatedSession(sessionId, realSessionId);
     }
     return { session, realSessionId };
   })().finally(() => {
+    globalThis.__deerhuxSessionStartReservations = Math.max(0, (globalThis.__deerhuxSessionStartReservations ?? 1) - 1);
     locks.delete(lockKey);
     locks.delete(sessionId);
   });
@@ -1903,8 +1949,8 @@ export async function startRpcSession(
 //
 // 取代 pi 的 createAgentSession：用 DeerLoopEngine + ToolRegistry + ToolExecutor 管理
 // 整个 agent loop，pi-ai 只做 LLM 传输。注册与 pi 路径等价的真实工具集（code_search /
-// codegraph / mcp / subagent），支持角色/模式 prompt 注入，走 SessionManager 做
-// jsonl 持久化。
+// codegraph / mcp / subagent），支持角色/模式 prompt 注入，通过 SessionPort 做
+// JSONL 持久化。
 // ===========================================================================
 
 /**
@@ -1927,198 +1973,36 @@ async function startDeerLoopSession(
   modelOverride?: { provider: string; modelId: string },
   options?: StartRpcSessionOptions,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
-  const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
-  const authStorage = AuthStorage.create();
-  const modelRegistry = ModelRegistry.create(authStorage);
-
-  // 先打开持久化会话并恢复“给模型看的”原始上下文。只打开 jsonl 而不把
-  // buildSessionContext 的结果注入 loop，会让历史续聊从空 transcript 开始。
-  const sessionManager = sessionFile
-    ? SessionManager.open(sessionFile, undefined)
-    : SessionManager.create(cwd, undefined);
-  const restoredContext = sessionFile
-    ? buildSessionContext(sessionManager.getEntries(), sessionManager.getLeafId())
-    : null;
-  const restoredModel = restoredContext?.model
-    ? { provider: restoredContext.model.provider, modelId: restoredContext.model.modelId }
-    : undefined;
-  const restoredThinkingLevel = restoredContext?.thinkingLevel;
-  const initialMessages = (restoredContext?.messages ?? []) as PiMessage[];
-
-  // 选取默认 model。优先级：modelOverride（worker 继承父 session 的 model）
-  // > 历史 session 最近使用的 model > DEERHUX_LOOP_MODEL > 第一个可用 model。worker 若退回默认
-  // getAvailable()[0]，会与父 session 的 model 不一致（实测 deepseek-v4-pro
-  // 不稳定会超时），导致 subagent 全军覆没。
-  let model = modelRegistry.getAvailable()[0];
-  const effectiveModel = modelOverride ?? restoredModel;
-  const override = effectiveModel
-    ? `${effectiveModel.provider}/${effectiveModel.modelId}`
-    : process.env.DEERHUX_LOOP_MODEL;
-  if (override) {
-    const [provider, modelId] = override.split("/");
-    if (provider && modelId) {
-      const found = modelRegistry.find(provider, modelId);
-      if (found) model = found;
-    }
-  }
-  if (!model) {
-    throw new Error(
-      "DeerLoopEngine 启动失败：未找到可用 model。请在 ~/.deerhux/agent 配置 API key，" +
-        "或设 DEERHUX_LOOP_MODEL=provider/modelId 指定模型。",
-    );
-  }
-
-  // ─── 工具准备（与 pi 路径对齐：code_search + codegraph + subagent + mcp）───
-  // 尽早取真实 sessionId：coding tools 需要它做 context archive 白名单与 spill。
-  const realSessionIdEarly = sessionManager.getSessionId();
-  const standardCodingTools = createStandardCodingTools(cwd, { sessionId: realSessionIdEarly });
-  try {
-    const { getContextDir } = await import("./engine/context-archive");
-    const { addAllowedRoot } = await import("./file-access");
-    addAllowedRoot(getContextDir(realSessionIdEarly));
-  } catch {
-    // context archive 白名单失败不阻塞会话启动
-  }
-  const allCodingToolNames = [...STANDARD_CODING_TOOL_NAMES];
-  const hasCodeIndex = indexExists(cwd);
-  const codeSearchTool = hasCodeIndex ? defineTool({
-    name: "code_search",
-    label: "Code Search",
-    description: "Search the codebase using a pre-built index. Returns file paths, line ranges, and concise code snippets.",
-    promptSnippet: "code_search: Search the indexed codebase by keywords and get file paths, line ranges, and snippets.",
-    parameters: Type.Object({
-      query: Type.String({ description: "Search query keywords" }),
-      path: Type.Optional(Type.String({ description: "Restrict to files under this relative path" })),
-      limit: Type.Optional(Type.Number({ description: "Maximum results, default 20" })),
-    }),
-    executionMode: "parallel" as const,
-    execute: async (_toolCallId, params, signal) => {
-      const results = await searchIndex(cwd, params.query, {
-        path: params.path,
-        limit: params.limit ?? 20,
-        signal,
-      });
-      const text = results.length
-        ? results.map(r => `${r.path}:${r.startLine}-${r.endLine} (score ${r.score})\n${r.snippet}`).join("\n\n")
-        : `No indexed results for: ${params.query}`;
-      return { content: [{ type: "text" as const, text }], details: undefined };
-    },
-  }) : null;
-  const codeGraphTools = await createCodeGraphTools(cwd);
-  const allowSubagentTool = options?.allowSubagentTool !== false;
-  // holder 持有 engine 引用而非 model 快照：getParentModel 在 subagent 工具执行时
-  // 实时读取 engine.model，从而跟随主 agent 运行中切换的供应商/模型（set_model →
-  // engine.setModel → engine.model 变）。若存快照，切换后的 subagent 会用旧 model。
-  const sessionContextHolder: { id: string | undefined; engine?: AgentEnginePort } = { id: undefined };
-  const subagentTool = allowSubagentTool ? createSubagentTool(cwd, {
-    getParentSessionId: () => sessionContextHolder.id,
-    // Subagent 工具执行时，当前 leaf 通常是包含该 toolCall 的 assistant
-    // message。把它持久化为稳定锚点，前端可沿当前 user turn 精确归位，
-    // 不再依赖容易受刷新、分支和缺失时间戳影响的 createdAt 猜测。
-    getParentEntryId: () => sessionManager.getLeafId() ?? undefined,
-    getParentModel: () => {
-      const m = sessionContextHolder.engine?.model;
-      return m ? { provider: String(m.provider), modelId: String(m.id ?? "") } : undefined;
-    },
-  }) : null;
-
-  const hasExplicitMode = agentMode !== undefined && agentMode !== null;
-  const effectiveMode = normalizeAgentMode(agentMode);
-  const requestedToolNames = toolNames ?? (hasExplicitMode ? getToolNamesForAgentMode(effectiveMode) : []);
-  const shouldLoadMcpAtStartup = (!hasExplicitMode && isFullToolPreset(requestedToolNames)) || includesMcpTool(requestedToolNames);
-  const mcpRuntimeLease = shouldLoadMcpAtStartup
-    ? await import("./mcp-runtime").then(({ acquireMcpRuntime }) => acquireMcpRuntime(cwd))
-    : null;
-  const mcpRuntime = mcpRuntimeLease?.runtime ?? null;
-
-  const customTools: AnyToolDefinition[] = [
-    ...standardCodingTools,
-    ...(codeSearchTool ? [codeSearchTool] : []),
-    ...codeGraphTools,
-    ...(subagentTool ? [subagentTool] : []),
-    ...(mcpRuntime?.tools ?? []),
-  ];
-  const availableToolNames = [
-    ...allCodingToolNames,
-    ...(codeSearchTool ? ["code_search"] : []),
-    ...codeGraphTools.map(t => t.name),
-    ...(mcpRuntime?.toolNames ?? []),
-  ];
-
-  let activeToolNames: string[];
-  if (toolNames !== undefined || hasExplicitMode) {
-    if (requestedToolNames.length === 0) {
-      activeToolNames = [];
-    } else if (!hasExplicitMode && isFullToolPreset(requestedToolNames)) {
-      activeToolNames = availableToolNames;
-    } else {
-      const available = new Set(availableToolNames);
-      activeToolNames = requestedToolNames.filter(name => available.has(name));
-    }
-  } else {
-    // 未传 toolNames 且无 agentMode：激活全部可用工具（与 pi 路径默认行为对齐）
-    // subagent 按方案 B 只注册、不默认激活；availableToolNames 故意不包含它。
-    // 用户显式调用 set_subagent_enabled 后，AgentSessionWrapper.applySubagentToActiveTools
-    // 才会把已注册的 subagent 加入 active tool set 与 system prompt。
-    activeToolNames = availableToolNames;
-  }
-
-  // ─── system prompt 构造 ───
-  // 基础层必须来自 ResourceLoader，否则自研 loop 会绕过 pi SDK 在 AgentSession
-  // 初始化时完成的 AGENTS.md / skills / append prompt / date / cwd 装配。
-  // 角色、模式和实时工具由 wrapper 在这个稳定基础层之上统一应用。
-  let systemPrompt = await loadBaseSystemPrompt(cwd, activeToolNames.includes("read"));
-  // 全部工具关闭时清空 system prompt（对齐 pi 路径行为）
-  if (toolNames?.length === 0) {
-    systemPrompt = "";
-  }
-
-  // ★ 用 SessionManager 的真实 sessionId（uuid）作为 engine 的 sessionId，而不是
-  //   前端/worker 传入的临时 key（如 `__collab__...`）。否则 registry 与
-  //   subagent-registry 用临时 key 注册，而 SessionManager.listAll() 返回真实 uuid，
-  //   两者对不上 → worker session 的 isSubagent 标记失效 → worker session 泄露到
-  //   侧边栏项目列表（表现为「多出一模一样的 session」）。
-  const realSessionId = realSessionIdEarly;
-
-  // ─── 构造 DeerLoopEngine ───
-  const engine: AgentEnginePort = new DeerLoopEngine({
-    model,
+  const composed = await composeDeerLoopEngine({
+    sessionId,
+    sessionFile,
     cwd,
-    sessionId: realSessionId,
-    systemPrompt,
-    initialMessages,
-    thinkingLevel: restoredThinkingLevel && restoredThinkingLevel !== "off"
-      ? restoredThinkingLevel as ThinkingLevel
-      : undefined,
-    // 用 ModelRegistry 解析 key，而不是直接 AuthStorage.getApiKey(provider)。
-    // 原因：custom providers 的 apiKey/headers 可能来自 models.json，pi 路径也是通过
-    // ModelRegistry.getApiKeyForProvider / getApiKeyAndHeaders 处理。直接读 AuthStorage
-    // 会漏掉 Opencodego 等 models.json provider，导致 No API key。
-    getApiKey: (provider) => modelRegistry.getApiKeyForProvider(provider),
-    sessionManager,
-    modelRegistry,
-    tools: customTools,
-    activeToolNames,
+    toolNames,
+    agentMode,
+    modelOverride,
+    allowSubagentTool: options?.allowSubagentTool,
     maxToolRounds: options?.maxToolRounds,
     requestKind: options?.requestKind,
   });
+  const { engine, sessionPort, modelCatalog, projectResources, realSessionId, realSessionFile, mcpRuntimeLease, explicitMode } = composed;
 
-  // ★ M4：安装默认重试策略
-  engine.installRetryHardening();
+  try {
+    const wrapper = new AgentSessionWrapper(
+      engine, sessionPort, modelCatalog, projectResources, roleId, mcpRuntimeLease, explicitMode,
+      options?.requestKind === "subagent" ? "subagent" : "main",
+    );
+    wrapper.start();
 
-  // 用 AgentSessionWrapper 包装
-  const wrapper = new AgentSessionWrapper(engine, roleId, mcpRuntimeLease, hasExplicitMode ? effectiveMode : undefined);
-  wrapper.start();
+    const sessionAliases = sessionId && sessionId !== realSessionId ? [sessionId] : [];
+    if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile, sessionAliases);
+    if (!sessionFile) forceRefreshSessionList();
 
-  sessionContextHolder.id = realSessionId;
-  sessionContextHolder.engine = engine;
-  const realSessionFile = sessionManager.getSessionFile?.() ?? undefined;
-  const sessionAliases = sessionId && sessionId !== realSessionId ? [sessionId] : [];
-  if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile, sessionAliases);
-  if (!sessionFile) forceRefreshSessionList();
-
-  wrapper.onDestroy(() => unregisterSessionWrapper(wrapper));
-  registerSessionAliases(realSessionId, wrapper, sessionAliases);
-
-  return { session: wrapper, realSessionId };
+    wrapper.onDestroy(() => unregisterSessionWrapper(wrapper));
+    registerSessionAliases(realSessionId, wrapper, sessionAliases);
+    return { session: wrapper, realSessionId };
+  } catch (error) {
+    mcpRuntimeLease?.release();
+    engine.dispose();
+    throw error;
+  }
 }

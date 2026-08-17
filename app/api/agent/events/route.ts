@@ -1,5 +1,7 @@
 import { getAgentEventStore, type SequencedAgentEvent } from "@/lib/agent-runtime/event-store";
 import { MessageUpdateCoalescer } from "@/lib/agent-runtime/event-coalescer";
+import { openSseConnection, recordSlowConsumerDrop } from "@/lib/agent-runtime/transport-diagnostics";
+import { isSseConsumerOverBudget, sseByteStrategy } from "@/lib/agent-runtime/sse-backpressure";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -25,6 +27,7 @@ export async function GET(req: Request) {
       const cursor = parseCursor(req);
       let closed = false;
       let unsubscribe: () => void = () => {};
+      const closeMetric = openSseConnection();
       const resources: {
         heartbeat?: ReturnType<typeof setInterval>;
         coalescer?: MessageUpdateCoalescer<SequencedAgentEvent>;
@@ -36,6 +39,7 @@ export async function GET(req: Request) {
         if (resources.heartbeat) clearInterval(resources.heartbeat);
         resources.coalescer?.cancel();
         unsubscribe();
+        closeMetric();
         req.signal.removeEventListener("abort", cleanup);
         try { controller.close(); } catch { /* already closed */ }
       };
@@ -43,9 +47,10 @@ export async function GET(req: Request) {
       const send = (value: unknown, eventId?: number) => {
         if (closed) return;
         // ReadableStream queues are otherwise unbounded for a frozen/slow tab.
-        // Close lagging consumers after 256 queued chunks; the journal cursor
+        // Close lagging consumers after roughly 8 MB queued bytes; the journal cursor
         // lets them replay without applying backpressure to the Agent loop.
-        if (controller.desiredSize !== null && controller.desiredSize <= -256) {
+        if (isSseConsumerOverBudget(controller.desiredSize)) {
+          recordSlowConsumerDrop();
           cleanup();
           return;
         }
@@ -105,7 +110,8 @@ export async function GET(req: Request) {
 
       resources.heartbeat = setInterval(() => {
         if (closed) return;
-        if (controller.desiredSize !== null && controller.desiredSize <= -256) {
+        if (isSseConsumerOverBudget(controller.desiredSize)) {
+          recordSlowConsumerDrop();
           cleanup();
           return;
         }
@@ -115,7 +121,7 @@ export async function GET(req: Request) {
       if (req.signal.aborted) cleanup();
       else req.signal.addEventListener("abort", cleanup, { once: true });
     },
-  });
+  }, sseByteStrategy());
 
   return new Response(stream, {
     headers: {

@@ -4,10 +4,26 @@ import path from "path";
 import { homedir } from "os";
 import { getAgentDir, defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "typebox";
-import type { McpServerConfig, McpTransport } from "./mcp-config";
+import type { McpServerConfig, McpStdioFraming, McpTransport } from "./mcp-config";
+import { detectMcpResponseFraming, encodeMcpMessage, selectFramingAttempts, type McpWireFraming } from "./mcp/stdio-framing";
+import { registerShutdownCleanup } from "./process-shutdown";
 
 interface JsonRpcRequest { jsonrpc: "2.0"; id?: number; method: string; params?: unknown }
 interface JsonRpcResponse { jsonrpc?: "2.0"; id?: number; result?: unknown; error?: { code?: number; message?: string; data?: unknown } }
+
+class McpProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpProtocolError";
+  }
+}
+
+class McpRpcError extends Error {
+  constructor(message: string, readonly code?: number) {
+    super(message);
+    this.name = "McpRpcError";
+  }
+}
 interface McpTool { name: string; description?: string; inputSchema?: unknown }
 interface RuntimeImage { type: "image"; data: string; mimeType: string }
 interface RuntimeMcpTool { server: LoadedMcpServer; client: StdioMcpClient; tool: McpTool }
@@ -15,6 +31,53 @@ interface RuntimeMcpTool { server: LoadedMcpServer; client: StdioMcpClient; tool
 interface LoadedMcpServer extends McpServerConfig {
   sourcePath: string;
   priority: number;
+}
+
+type WireFraming = McpWireFraming;
+
+export interface McpProcessDiagnostics {
+  activeProcesses: number;
+  startedTotal: number;
+  exitedTotal: number;
+  abnormalExits: number;
+  initializeFallbacks: number;
+  forcedKills: number;
+  requestTimeouts: number;
+  cachedFramingDecisions: number;
+  runtimeCacheEntries: number;
+  runtimeReferences: number;
+}
+
+type MutableMcpProcessDiagnostics = Omit<McpProcessDiagnostics, "cachedFramingDecisions" | "runtimeCacheEntries" | "runtimeReferences">;
+
+declare global {
+  var __deerhuxMcpProcessDiagnostics: MutableMcpProcessDiagnostics | undefined;
+  var __deerhuxMcpFramingCache: Map<string, WireFraming> | undefined;
+}
+
+function processMetrics(): MutableMcpProcessDiagnostics {
+  return globalThis.__deerhuxMcpProcessDiagnostics ??= {
+    activeProcesses: 0,
+    startedTotal: 0,
+    exitedTotal: 0,
+    abnormalExits: 0,
+    initializeFallbacks: 0,
+    forcedKills: 0,
+    requestTimeouts: 0,
+  };
+}
+
+function framingCache(): Map<string, WireFraming> {
+  const cache = globalThis.__deerhuxMcpFramingCache ??= new Map();
+  for (const [key, value] of cache) {
+    if (value !== "line" && value !== "cl") cache.delete(key);
+  }
+  while (cache.size > 256) {
+    const oldest = cache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    cache.delete(oldest);
+  }
+  return cache;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -33,6 +96,16 @@ function normalizeTransport(value: unknown): McpTransport {
   return value === "sse" || value === "http" ? value : "stdio";
 }
 
+function maxMcpInboundBytes(): number {
+  const configured = Number(process.env.DEERHUX_MCP_MAX_INBOUND_BYTES);
+  return Number.isSafeInteger(configured) && configured >= 64 * 1024 ? configured : 16 * 1024 * 1024;
+}
+
+function initializeProbeTimeoutMs(): number {
+  const configured = Number(process.env.DEERHUX_MCP_FRAMING_PROBE_MS);
+  return Number.isSafeInteger(configured) && configured >= 500 ? configured : 8_000;
+}
+
 function sanitizeName(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9_-]/g, "_").replace(/^_+/, "") || "server";
 }
@@ -47,6 +120,9 @@ function normalizeServer(raw: Record<string, unknown>, fallbackId: string, sourc
     transport: normalizeTransport(raw.transport),
     command: asString(raw.command) ?? "",
     args: asStringArray(raw.args),
+    stdioFraming: raw.stdioFraming === "newline" || raw.stdioFraming === "content-length"
+      ? raw.stdioFraming
+      : "auto",
     url: asString(raw.url) ?? "",
     env: isRecord(raw.env) ? Object.fromEntries(Object.entries(raw.env).filter(([, v]) => typeof v === "string")) as Record<string, string> : {},
     description: asString(raw.description) ?? "",
@@ -135,7 +211,7 @@ function buildMcpEnv(serverEnv?: Record<string, string>): NodeJS.ProcessEnv {
 export class StdioMcpClient {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private nextId = 1;
-  private buffer = "";
+  private buffer = Buffer.alloc(0);
   private pending = new Map<number, {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
@@ -144,51 +220,106 @@ export class StdioMcpClient {
     onAbort?: () => void;
   }>();
   private stderr = "";
-  /** Detected transport format: "line" (newline-delimited JSON, MCP 2024-11-05+) or "cl" (Content-Length prefix, legacy). */
-  private transportFormat: "line" | "cl" | null = null;
+  /** Server response framing may differ from request framing, so receive side remains auto-detected. */
+  private transportFormat: WireFraming | null = null;
+  private writeFraming: WireFraming = "line";
+  private readonly expectedExits = new WeakSet<ChildProcessWithoutNullStreams>();
 
   constructor(private readonly server: LoadedMcpServer, private readonly cwd: string) {}
 
   async start(): Promise<void> {
     if (this.proc) return;
     if (!this.server.command?.trim()) throw new Error(`MCP server ${this.server.name} missing command`);
-    this.proc = spawn(this.server.command, this.server.args ?? [], {
+    const framingMode = this.server.stdioFraming ?? "auto";
+    const envKey = Object.entries(this.server.env ?? {}).sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => `${key}=${value}`).join("\0");
+    const cacheKey = `${this.cwd}\0${this.server.command}\0${(this.server.args ?? []).join("\0")}\0${envKey}`;
+    const cached = framingCache().get(cacheKey);
+    const attempts = selectFramingAttempts(framingMode, cached);
+    let lastError: unknown;
+    for (let index = 0; index < attempts.length; index += 1) {
+      this.writeFraming = attempts[index];
+      this.spawnProcess();
+      try {
+        await this.request("initialize", {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "DeerHux", version: "0.6.12" },
+        }, framingMode === "auto" && index + 1 < attempts.length ? initializeProbeTimeoutMs() : 20_000, undefined, false);
+        this.notify("notifications/initialized", {});
+        if (framingMode === "auto") {
+          const cache = framingCache();
+          cache.delete(cacheKey);
+          cache.set(cacheKey, this.writeFraming);
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+        const proc = this.proc;
+        if (proc) await this.stopProcessAndWait(proc);
+        if (error instanceof McpRpcError || error instanceof McpProtocolError || index + 1 >= attempts.length) break;
+        processMetrics().initializeFallbacks += 1;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private spawnProcess(): void {
+    this.buffer = Buffer.alloc(0);
+    this.stderr = "";
+    this.transportFormat = null;
+    const proc = spawn(this.server.command!, this.server.args ?? [], {
       cwd: this.cwd,
       env: buildMcpEnv(this.server.env),
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
     });
-    this.proc.stdout.on("data", (chunk: Buffer) => this.onData(chunk));
-    this.proc.stderr.on("data", (chunk: Buffer) => {
-      this.stderr = `${this.stderr}${chunk.toString("utf8")}`.slice(-4000);
+    this.proc = proc;
+    const metrics = processMetrics();
+    metrics.activeProcesses += 1;
+    metrics.startedTotal += 1;
+    let countedExit = false;
+    const settleProcess = (abnormal: boolean) => {
+      if (countedExit) return;
+      countedExit = true;
+      metrics.activeProcesses = Math.max(0, metrics.activeProcesses - 1);
+      metrics.exitedTotal += 1;
+      if (abnormal && !this.expectedExits.has(proc)) metrics.abnormalExits += 1;
+      if (this.proc === proc) this.proc = null;
+    };
+    proc.stdout.on("data", (chunk: Buffer) => {
+      if (this.proc === proc) this.onData(chunk);
     });
-    this.proc.on("error", (err) => {
-      const error = new Error(`MCP server ${this.server.name} failed to start: ${err.message}${this.stderr ? `: ${this.stderr}` : ""}`);
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
-        pending.reject(error);
+    proc.stderr.on("data", (chunk: Buffer) => {
+      if (this.proc === proc) this.stderr = `${this.stderr}${chunk.toString("utf8")}`.slice(-4000);
+    });
+    proc.on("error", (err) => {
+      if (this.proc === proc) {
+        const error = new Error(`MCP server ${this.server.name} failed to start: ${err.message}${this.stderr ? `: ${this.stderr}` : ""}`);
+        this.rejectPending(error);
       }
-      this.pending.clear();
-      this.proc = null;
+      settleProcess(true);
     });
-    this.proc.on("exit", (code, signal) => {
-      const error = new Error(`MCP server ${this.server.name} exited (${signal ?? code ?? "unknown"})${this.stderr ? `: ${this.stderr}` : ""}`);
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
-        pending.reject(error);
+    proc.on("exit", (code, signal) => {
+      if (this.proc === proc) {
+        const error = new Error(`MCP server ${this.server.name} exited (${signal ?? code ?? "unknown"})${this.stderr ? `: ${this.stderr}` : ""}`);
+        this.rejectPending(error);
       }
-      this.pending.clear();
-      this.proc = null;
+      settleProcess(code !== 0 || signal !== null);
     });
+  }
 
-    await this.request("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: { name: "DeerHux", version: "0.6.12" },
-    });
-    this.notify("notifications/initialized", {});
+  private rejectPending(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  get activeFraming(): McpStdioFraming {
+    return this.writeFraming === "line" ? "newline" : "content-length";
   }
 
   async listTools(): Promise<McpTool[]> {
@@ -208,33 +339,56 @@ export class StdioMcpClient {
   close(): void {
     const proc = this.proc;
     this.proc = null;
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
-      pending.reject(new Error(`MCP server ${this.server.name} closed`));
-    }
-    this.pending.clear();
-    proc?.kill();
+    this.rejectPending(new Error(`MCP server ${this.server.name} closed`));
+    if (proc) this.stopProcess(proc);
+  }
+
+  private async stopProcessAndWait(proc: ChildProcessWithoutNullStreams): Promise<void> {
+    if (proc.exitCode !== null || proc.signalCode !== null) return;
+    const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+    this.stopProcess(proc);
+    await Promise.race([
+      exited,
+      new Promise<void>((resolve) => setTimeout(resolve, 4_000)),
+    ]);
+  }
+
+  private stopProcess(proc: ChildProcessWithoutNullStreams): void {
+    this.expectedExits.add(proc);
+    if (this.proc === proc) this.proc = null;
+    proc.stdin.destroy();
+    proc.stdout.destroy();
+    proc.stderr.destroy();
+    proc.kill("SIGTERM");
+    const forceKill = setTimeout(() => {
+      if (proc.exitCode === null && proc.signalCode === null) {
+        processMetrics().forcedKills += 1;
+        proc.kill("SIGKILL");
+      }
+    }, 3_000);
+    forceKill.unref?.();
+    proc.once("exit", () => clearTimeout(forceKill));
   }
 
   private writeMessage(message: JsonRpcRequest): void {
     const proc = this.proc;
-    if (!proc) return;
-    // Use newline-delimited JSON format (MCP 2024-11-05+ stdio standard).
-    // Also prepend Content-Length frame for backward compat with legacy servers.
-    const json = JSON.stringify(message);
-    // Include the trailing newline in Content-Length so servers that parse
-    // Content-Length headers read exactly what we send.
-    const body = Buffer.from(json + "\n", "utf8");
-    proc.stdin.write(`Content-Length: ${body.length}\r\n\r\n${json}\n`);
+    if (!proc || proc.stdin.destroyed || !proc.stdin.writable) {
+      throw new Error(`MCP server ${this.server.name} is not writable`);
+    }
+    proc.stdin.write(encodeMcpMessage(message, this.writeFraming));
   }
 
-  private request(method: string, params?: unknown, timeoutMs = 20_000, signal?: AbortSignal): Promise<unknown> {
+  private request(
+    method: string,
+    params?: unknown,
+    timeoutMs = 20_000,
+    signal?: AbortSignal,
+    countTimeout = true,
+  ): Promise<unknown> {
     if (!this.proc) throw new Error(`MCP server ${this.server.name} is not running`);
     signal?.throwIfAborted();
     const id = this.nextId++;
     const message: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
-    this.writeMessage(message);
     return new Promise((resolve, reject) => {
       const cancelRequest = (reason: string, error: Error) => {
         const pending = this.pending.get(id);
@@ -242,10 +396,11 @@ export class StdioMcpClient {
         this.pending.delete(id);
         clearTimeout(pending.timer);
         if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
-        this.notify("notifications/cancelled", { requestId: id, reason });
+        try { this.notify("notifications/cancelled", { requestId: id, reason }); } catch { /* process already exited */ }
         reject(error);
       };
       const timer = setTimeout(() => {
+        if (countTimeout) processMetrics().requestTimeouts += 1;
         cancelRequest(
           `Request timed out after ${timeoutMs}ms`,
           new Error(`MCP request timed out: ${this.server.name}/${method}`),
@@ -257,7 +412,21 @@ export class StdioMcpClient {
       );
       this.pending.set(id, { resolve, reject, timer, signal, onAbort });
       signal?.addEventListener("abort", onAbort, { once: true });
-      if (signal?.aborted) onAbort();
+      if (signal?.aborted) {
+        onAbort();
+      } else {
+        try {
+          this.writeMessage(message);
+        } catch (error) {
+          const pending = this.pending.get(id);
+          if (pending) {
+            this.pending.delete(id);
+            clearTimeout(pending.timer);
+            signal?.removeEventListener("abort", onAbort);
+          }
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
     });
   }
 
@@ -266,46 +435,66 @@ export class StdioMcpClient {
   }
 
   private onData(chunk: Buffer): void {
-    this.buffer += chunk.toString("utf8");
-    // Auto-detect transport format from first received data.
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    // Header 可能被 stdout 拆成任意小 Chunk；前缀仍可能成为 Content-Length 时等待。
     if (this.transportFormat === null) {
-      this.transportFormat = this.buffer.startsWith("Content-Length:") || this.buffer.startsWith("content-length:")
-        ? "cl" : "line";
+      this.transportFormat = detectMcpResponseFraming(this.buffer.subarray(0, 32).toString("ascii"));
+      if (this.transportFormat === null) return;
     }
 
-    if (this.transportFormat === "line") {
-      this.parseLineDelimited();
-    } else {
-      this.parseContentLengthDelimited();
+    if (this.transportFormat === "line") this.parseLineDelimited();
+    else this.parseContentLengthDelimited();
+    // 已完整解析的多帧会从 Buffer 移除；这里只限制最后一条未完成帧。
+    if (this.buffer.length > maxMcpInboundBytes() + 8 * 1024) {
+      this.failProtocol(`Incomplete MCP response exceeded ${maxMcpInboundBytes()} bytes`);
     }
+  }
+
+  private failProtocol(message: string): void {
+    const error = new McpProtocolError(`${this.server.name}: ${message}`);
+    this.rejectPending(error);
+    const proc = this.proc;
+    if (proc) this.stopProcess(proc);
   }
 
   private parseLineDelimited(): void {
     while (true) {
-      const newlineIdx = this.buffer.indexOf("\n");
+      const newlineIdx = this.buffer.indexOf(0x0a);
       if (newlineIdx < 0) return;
-      const line = this.buffer.slice(0, newlineIdx).replace(/\r$/, "");
-      this.buffer = this.buffer.slice(newlineIdx + 1);
+      if (newlineIdx > maxMcpInboundBytes()) {
+        this.failProtocol(`MCP newline response exceeded ${maxMcpInboundBytes()} bytes`);
+        return;
+      }
+      const line = this.buffer.subarray(0, newlineIdx).toString("utf8").replace(/\r$/, "");
+      this.buffer = this.buffer.subarray(newlineIdx + 1);
       if (!line.trim()) continue;
       this.onMessage(line);
     }
   }
 
   private parseContentLengthDelimited(): void {
+    const separator = Buffer.from("\r\n\r\n");
     while (true) {
-      const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) return;
-      const header = this.buffer.slice(0, headerEnd);
+      const headerEnd = this.buffer.indexOf(separator);
+      if (headerEnd < 0) {
+        if (this.buffer.length > 8 * 1024) this.failProtocol("MCP Content-Length header exceeded 8192 bytes");
+        return;
+      }
+      const header = this.buffer.subarray(0, headerEnd).toString("ascii");
       const match = /content-length:\s*(\d+)/i.exec(header);
       if (!match) {
-        this.buffer = this.buffer.slice(headerEnd + 4);
+        this.buffer = this.buffer.subarray(headerEnd + separator.length);
         continue;
       }
       const length = Number(match[1]);
-      const messageStart = headerEnd + 4;
+      if (!Number.isSafeInteger(length) || length < 0 || length > maxMcpInboundBytes()) {
+        this.failProtocol(`Invalid MCP Content-Length: ${match[1]}`);
+        return;
+      }
+      const messageStart = headerEnd + separator.length;
       if (this.buffer.length < messageStart + length) return;
-      const body = this.buffer.slice(messageStart, messageStart + length);
-      this.buffer = this.buffer.slice(messageStart + length);
+      const body = this.buffer.subarray(messageStart, messageStart + length).toString("utf8");
+      this.buffer = this.buffer.subarray(messageStart + length);
       this.onMessage(body);
     }
   }
@@ -324,7 +513,7 @@ export class StdioMcpClient {
     clearTimeout(pending.timer);
     if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
     if (message.error) {
-      pending.reject(new Error(message.error.message || `MCP error ${message.error.code ?? "unknown"}`));
+      pending.reject(new McpRpcError(message.error.message || `MCP error ${message.error.code ?? "unknown"}`, message.error.code));
     } else {
       pending.resolve(message.result);
     }
@@ -410,6 +599,7 @@ export interface McpServerStatus {
   toolCount: number;
   errorMessage?: string;
   sourcePath?: string;
+  stdioFraming?: McpStdioFraming;
 }
 
 export interface McpRuntime {
@@ -436,6 +626,16 @@ declare global {
   var __deerhuxMcpRuntimeCache: Map<string, CachedMcpRuntime> | undefined;
 }
 
+export function getMcpProcessDiagnostics(): McpProcessDiagnostics {
+  const cache = globalThis.__deerhuxMcpRuntimeCache ?? new Map<string, CachedMcpRuntime>();
+  return {
+    ...processMetrics(),
+    cachedFramingDecisions: framingCache().size,
+    runtimeCacheEntries: cache.size,
+    runtimeReferences: [...cache.values()].reduce((sum, entry) => sum + entry.refs, 0),
+  };
+}
+
 function getMcpRuntimeCache(): Map<string, CachedMcpRuntime> {
   if (!globalThis.__deerhuxMcpRuntimeCache) {
     globalThis.__deerhuxMcpRuntimeCache = new Map();
@@ -445,9 +645,13 @@ function getMcpRuntimeCache(): Map<string, CachedMcpRuntime> {
       }
       globalThis.__deerhuxMcpRuntimeCache?.clear();
     };
-    process.once("exit", cleanup);
-    process.once("SIGINT", cleanup);
-    process.once("SIGTERM", cleanup);
+    registerShutdownCleanup(async () => {
+      cleanup();
+      // 给忽略 SIGTERM 的 MCP Server 留出 SIGKILL 升级窗口。
+      if (processMetrics().activeProcesses > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 3_250));
+      }
+    });
   }
   return globalThis.__deerhuxMcpRuntimeCache;
 }
@@ -484,6 +688,7 @@ export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpS
         status: "connected",
         toolCount: serverTools.length,
         sourcePath: server.sourcePath,
+        stdioFraming: client.activeFraming,
       });
       for (const mcpTool of serverTools) {
         runtimeTools.push({ server, client, tool: mcpTool });
@@ -503,9 +708,12 @@ export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpS
           execute: async (_toolCallId, params, signal) => {
             const result = await client.callTool(toolName, params, signal);
             const isError = isRecord(result) && result.isError === true;
+            const text = mcpContentToText(result);
             return {
-              content: [{ type: "text" as const, text: mcpContentToText(result) }],
-              details: { server: server.name, tool: toolName, raw: result, isError },
+              content: [{ type: "text" as const, text }],
+              // raw 可能包含多 MB Base64/结构化结果；正文已进入 content，事件和 Session
+              // 只保留轻量诊断元数据，避免长期双份持有。
+              details: { server: server.name, tool: toolName, isError, bytes: Buffer.byteLength(text, "utf8") },
             };
           },
         }) as ToolDefinition);
@@ -557,8 +765,23 @@ export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpS
   };
 }
 
+function mcpRuntimeCacheKey(cwd: string, servers: LoadedMcpServer[]): string {
+  const stableServers = servers.map((server) => ({
+    id: server.id,
+    enabled: server.enabled,
+    transport: server.transport,
+    command: server.command ?? "",
+    args: server.args ?? [],
+    stdioFraming: server.stdioFraming ?? "auto",
+    url: server.url ?? "",
+    env: Object.entries(server.env ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+  }));
+  return `${path.resolve(cwd)}\0${JSON.stringify(stableServers)}`;
+}
+
 export async function acquireMcpRuntime(cwd: string): Promise<McpRuntimeLease> {
-  const key = path.resolve(cwd);
+  const servers = loadEnabledMcpServers(cwd);
+  const key = mcpRuntimeCacheKey(cwd, servers);
   const cache = getMcpRuntimeCache();
   let entry = cache.get(key);
   if (!entry) {
@@ -571,7 +794,7 @@ export async function acquireMcpRuntime(cwd: string): Promise<McpRuntimeLease> {
 
   try {
     if (!entry.runtime) {
-      entry.promise ??= createMcpRuntime(cwd).then((runtime) => {
+      entry.promise ??= createMcpRuntime(cwd, servers).then((runtime) => {
         entry!.runtime = runtime;
         entry!.promise = undefined;
         entry!.lastUsedAt = Date.now();
@@ -586,9 +809,12 @@ export async function acquireMcpRuntime(cwd: string): Promise<McpRuntimeLease> {
     const runtime = entry.runtime;
     if (!runtime) throw new Error("MCP runtime failed to initialize");
 
+    let released = false;
     return {
       runtime,
       release: () => {
+        if (released) return;
+        released = true;
         const current = cache.get(key);
         if (!current) return;
         current.refs = Math.max(0, current.refs - 1);

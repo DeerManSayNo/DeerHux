@@ -1,5 +1,7 @@
 "use client";
 
+import { businessRecoveryDelayMs, eligibleRecoveryEvents } from "@/lib/agent-runtime/recovery-buffer";
+
 export type MultiplexAgentEvent = {
   type: "agent_event";
   epoch: string;
@@ -55,6 +57,9 @@ class AgentEventClient {
   private recovery: Promise<void> | null = null;
   private recoveryEvents: MultiplexAgentEvent[] = [];
   private unmatchedEvents: MultiplexAgentEvent[] = [];
+  private readonly pendingHandoffRecoveries = new Map<string, MultiplexAgentEvent>();
+  private readonly listenerRecoveryAttempts = new Map<string, number>();
+  private snapshotRecoveryAttempt = 0;
   private keepAlive = 0;
 
   subscribe(sessionId: string, listener: SessionListener, onSnapshotRequired?: SnapshotListener): () => void {
@@ -69,11 +74,16 @@ class AgentEventClient {
     this.ensureConnected();
     if (this.unmatchedEvents.length > 0) {
       const remaining: MultiplexAgentEvent[] = [];
+      let failedHandoff: MultiplexAgentEvent | null = null;
       for (const event of this.unmatchedEvents) {
-        if (event.sessionId === sessionId) this.dispatchToListeners(event);
-        else remaining.push(event);
+        if (event.sessionId !== sessionId) {
+          remaining.push(event);
+          continue;
+        }
+        if (!this.dispatchToListeners(event)) failedHandoff = event;
       }
       this.unmatchedEvents = remaining;
+      if (failedHandoff) void this.recoverListenerFailure(failedHandoff, true);
     }
 
     let removed = false;
@@ -131,6 +141,7 @@ class AgentEventClient {
         this.barrierReady = true;
         for (const waiter of this.connectedWaiters) waiter.resolve();
         this.connectedWaiters.clear();
+        this.retryPendingHandoffRecoveries();
         return;
       }
       if (data.type === "snapshot_required") {
@@ -170,34 +181,58 @@ class AgentEventClient {
 
   private async recoverFromSnapshot(data: Extract<ControlEvent, { type: "snapshot_required" }>, source: EventSource): Promise<void> {
     if (this.recovery) return;
+    source.close();
+    if (this.source === source) this.source = null;
+    this.barrierReady = false;
+    if (this.snapshotRecoveryAttempt > 0) {
+      const delay = businessRecoveryDelayMs(this.snapshotRecoveryAttempt, MAX_RECONNECT_DELAY_MS);
+      const delayGate = new Promise<void>((resolve) => setTimeout(resolve, delay));
+      this.recovery = delayGate;
+      await delayGate;
+      if (this.recovery === delayGate) this.recovery = null;
+    }
+    const missingRecovery = [...this.listeners.keys()].filter((sessionId) => !this.snapshotListeners.has(sessionId));
     const listeners = [...this.snapshotListeners.values()].flatMap((set) => [...set]);
-    this.recovery = Promise.all(listeners.map((listener) => Promise.resolve(listener(data.reason)))).then(() => undefined);
+    const recovery = missingRecovery.length > 0
+      ? Promise.reject(new Error(`No snapshot recovery listener for: ${missingRecovery.join(", ")}`))
+      : Promise.all(listeners.map((listener) => Promise.resolve(listener(data.reason)))).then(() => undefined);
+    this.recovery = recovery;
     try {
-      await this.recovery;
+      await recovery;
+      this.snapshotRecoveryAttempt = 0;
       this.commitCursor(data.epoch, data.latestGlobalSeq);
       this.barrierReady = true;
       for (const waiter of this.connectedWaiters) waiter.resolve();
       this.connectedWaiters.clear();
-      const buffered = this.recoveryEvents;
+      const buffered = eligibleRecoveryEvents(this.recoveryEvents, data.epoch, data.latestGlobalSeq);
       this.recoveryEvents = [];
-      for (const event of buffered) {
-        if (event.epoch === data.epoch && event.globalSeq > data.latestGlobalSeq) this.deliver(event);
+      // Snapshot 已成功，先释放旧 Recovery Gate；排空时若 Listener 再失败，
+      // 必须允许启动新的 Session Snapshot Recovery。
+      if (this.recovery === recovery) this.recovery = null;
+      for (let index = 0; index < buffered.length; index += 1) {
+        this.deliver(buffered[index]);
+        // 新 Recovery 接管当前失败事件；剩余事件必须交给它继续缓存，不能丢弃。
+        if (this.recovery !== null) {
+          this.recoveryEvents.push(...buffered.slice(index + 1));
+          break;
+        }
       }
     } catch {
+      this.snapshotRecoveryAttempt += 1;
       // Keep the old cursor. Reconnect will request snapshot_required again.
       this.recoveryEvents = [];
       source.close();
       if (this.source === source) this.source = null;
       this.scheduleReconnect();
     } finally {
-      this.recovery = null;
+      if (this.recovery === recovery) this.recovery = null;
+      this.scheduleReconnect();
     }
   }
 
   private deliver(data: MultiplexAgentEvent): void {
     if (this.cursor?.epoch === data.epoch && data.globalSeq <= this.cursor.globalSeq) return;
     if (this.cursor && this.cursor.epoch !== data.epoch) return;
-    this.commitCursor(data.epoch, data.globalSeq);
     const listeners = this.listeners.get(data.sessionId);
     if (!listeners) {
       // A new session can emit before /api/agent/new returns its real id. Keep a
@@ -214,16 +249,106 @@ class AgentEventClient {
         }
         this.unmatchedEvents.push(data);
       }
+      this.commitCursor(data.epoch, data.globalSeq);
       return;
     }
-    this.dispatchToListeners(data);
+    const delivered = this.dispatchToListeners(data);
+    if (delivered) {
+      this.listenerRecoveryAttempts.delete(data.sessionId);
+      this.commitCursor(data.epoch, data.globalSeq);
+      return;
+    }
+    void this.recoverListenerFailure(data);
   }
 
-  private dispatchToListeners(data: MultiplexAgentEvent): void {
+  private dispatchToListeners(data: MultiplexAgentEvent): boolean {
     const listeners = this.listeners.get(data.sessionId);
-    if (!listeners) return;
+    if (!listeners) return true;
     const event = data.turnId ? { ...data.event, turnId: data.turnId } : data.event;
-    for (const listener of [...listeners]) listener(event);
+    let success = true;
+    for (const listener of [...listeners]) {
+      try {
+        listener(event);
+      } catch (error) {
+        success = false;
+        // 一个 UI 消费者异常不能阻断其他消费者；失败 Session 随后通过 Snapshot 收敛。
+        console.error("[agent-events] listener failed:", error);
+      }
+    }
+    return success;
+  }
+
+  private async recoverListenerFailure(data: MultiplexAgentEvent, committedHandoff = false): Promise<void> {
+    if (this.recovery) return;
+    const source = this.source;
+    source?.close();
+    if (this.source === source) this.source = null;
+    this.barrierReady = false;
+    const recoveryAttempt = this.listenerRecoveryAttempts.get(data.sessionId) ?? 0;
+    if (recoveryAttempt > 0) {
+      const delay = businessRecoveryDelayMs(recoveryAttempt, MAX_RECONNECT_DELAY_MS);
+      const delayGate = new Promise<void>((resolve) => setTimeout(resolve, delay));
+      this.recovery = delayGate;
+      await delayGate;
+      if (this.recovery === delayGate) this.recovery = null;
+      if (!this.listeners.has(data.sessionId)) {
+        this.scheduleReconnect();
+        return;
+      }
+    }
+    const listeners = [...(this.snapshotListeners.get(data.sessionId) ?? [])];
+    let succeeded = false;
+    this.recovery = (async () => {
+      const attempts = committedHandoff ? 5 : 1;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        try {
+          if (!listeners.length) throw new Error(`No snapshot recovery listener for ${data.sessionId}`);
+          await Promise.all(listeners.map((listener) => Promise.resolve(listener("listener_failed"))));
+          succeeded = true;
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt + 1 < attempts) {
+            await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 8_000)));
+          }
+        }
+      }
+      throw lastError;
+    })();
+    try {
+      await this.recovery;
+      this.listenerRecoveryAttempts.delete(data.sessionId);
+      this.pendingHandoffRecoveries.delete(data.sessionId);
+      this.commitCursor(data.epoch, data.globalSeq);
+    } catch (error) {
+      this.listenerRecoveryAttempts.set(data.sessionId, recoveryAttempt + 1);
+      if (committedHandoff) this.pendingHandoffRecoveries.set(data.sessionId, data);
+      console.error("[agent-events] snapshot recovery after listener failure failed:", error);
+    } finally {
+      this.recovery = null;
+      if (succeeded) {
+        const buffered = eligibleRecoveryEvents(this.recoveryEvents, data.epoch, data.globalSeq);
+        this.recoveryEvents = [];
+        for (let index = 0; index < buffered.length; index += 1) {
+          this.deliver(buffered[index]);
+          if (this.recovery) {
+            this.recoveryEvents.push(...buffered.slice(index + 1));
+            break;
+          }
+        }
+      } else {
+        this.recoveryEvents = [];
+      }
+      this.scheduleReconnect();
+    }
+  }
+
+  private retryPendingHandoffRecoveries(): void {
+    if (this.recovery || this.pendingHandoffRecoveries.size === 0) return;
+    const pending = [...this.pendingHandoffRecoveries.values()]
+      .sort((a, b) => a.globalSeq - b.globalSeq)[0];
+    if (pending) void this.recoverListenerFailure(pending, true);
   }
 
   private commitCursor(epoch: string, globalSeq: number): void {
@@ -260,6 +385,10 @@ class AgentEventClient {
     this.source = null;
     this.barrierReady = false;
     this.unmatchedEvents = [];
+    this.pendingHandoffRecoveries.clear();
+    this.recoveryEvents = [];
+    this.listenerRecoveryAttempts.clear();
+    this.snapshotRecoveryAttempt = 0;
     this.reconnectAttempt = 0;
   }
 }

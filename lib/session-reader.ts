@@ -257,6 +257,7 @@ export function getSessionEntries(filePath: string): SessionEntry[] {
 interface CachedSessionFile {
   mtimeMs: number;
   size: number;
+  estimatedBytes: number;
   entries: SessionEntry[];
   leafId: string | null;
   context: SessionContext;
@@ -268,13 +269,32 @@ declare global {
   var __deerhuxSessionFileCache: Map<string, CachedSessionFile> | undefined;
 }
 
-const SESSION_FILE_CACHE_MAX = 64;
+const SESSION_FILE_CACHE_MAX = 16;
+const SESSION_FILE_CACHE_MAX_BYTES = 96 * 1024 * 1024;
+const SESSION_FILE_CACHE_OBJECT_FACTOR = 4;
+
+function estimateCachedSessionBytes(size: number): number {
+  return Math.max(size * SESSION_FILE_CACHE_OBJECT_FACTOR, 1);
+}
 
 function getSessionFileCache(): Map<string, CachedSessionFile> {
   if (!globalThis.__deerhuxSessionFileCache) {
     globalThis.__deerhuxSessionFileCache = new Map();
   }
   return globalThis.__deerhuxSessionFileCache;
+}
+
+export function getSessionFileCacheDiagnostics(): {
+  files: number;
+  sourceBytes: number;
+  estimatedBytes: number;
+} {
+  const values = [...getSessionFileCache().values()];
+  return {
+    files: values.length,
+    sourceBytes: values.reduce((sum, item) => sum + item.size, 0),
+    estimatedBytes: values.reduce((sum, item) => sum + (Math.max(item.estimatedBytes ?? 0, estimateCachedSessionBytes(item.size))), 0),
+  };
 }
 
 export function invalidateSessionFileCache(filePath?: string): void {
@@ -343,13 +363,29 @@ export function readSessionFileCached(filePath: string): {
   const header = sm.getHeader();
   const sessionName = sm.getSessionName();
 
-  const result: CachedSessionFile = { mtimeMs, size, entries, leafId, context, header, sessionName };
+  // 解析后同时保留原始 Entries 和派生 Messages；按 4× 文件大小做保守预算，
+  // 避免为了精确计费再次 stringify 整个 Session 制造新的内存峰值。
+  const estimatedBytes = estimateCachedSessionBytes(size);
+  const result: CachedSessionFile = { mtimeMs, size, estimatedBytes, entries, leafId, context, header, sessionName };
+  cache.delete(filePath);
+  // 单个对象图已经超过总预算时不进入长期 Cache，避免一次超大 Session 打开后
+  // 永久占住主进程。当前请求仍正常返回解析结果。
+  if (estimatedBytes > SESSION_FILE_CACHE_MAX_BYTES) return result;
   cache.set(filePath, result);
 
-  // LRU eviction: drop oldest entry if over capacity.
-  if (cache.size > SESSION_FILE_CACHE_MAX) {
+  // 数量 + 总字节双预算 LRU。
+  let retainedBytes = [...cache.values()].reduce(
+    (sum, item) => sum + (Math.max(item.estimatedBytes ?? 0, estimateCachedSessionBytes(item.size))),
+    0,
+  );
+  while (cache.size > SESSION_FILE_CACHE_MAX || retainedBytes > SESSION_FILE_CACHE_MAX_BYTES) {
     const oldestKey = cache.keys().next().value as string | undefined;
-    if (oldestKey && oldestKey !== filePath) cache.delete(oldestKey);
+    if (!oldestKey) break;
+    const oldest = cache.get(oldestKey);
+    cache.delete(oldestKey);
+    retainedBytes -= oldest
+      ? Math.max(oldest.estimatedBytes ?? 0, estimateCachedSessionBytes(oldest.size))
+      : 0;
   }
   return result;
 }

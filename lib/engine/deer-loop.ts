@@ -25,20 +25,18 @@ import type {
   ToolResultMessage,
   UserMessage,
 } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai";
-import type {
-  AgentSessionEvent,
-  SessionManager,
-  ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+import { clampThinkingLevel, streamSimple } from "@earendil-works/pi-ai";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   buildSessionContext,
   convertToLlm,
   DEFAULT_COMPACTION_SETTINGS,
   findCutPoint,
   generateSummary,
+  SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentEnginePort } from "./port.ts";
+import type { AgentTurnInput, QueuedTurnInput, TurnContextSnapshot } from "./turn-context.ts";
 import type { AgentMessage, CompactionResult, LoopEvent, QueueMode } from "./loop-event.ts";
 import { ToolRegistry, type AnyToolDefinition } from "./tool-registry.ts";
 import { ToolExecutor, toPiAiTool, type ToolExecOutput } from "./tool-executor.ts";
@@ -84,6 +82,10 @@ import {
   MAX_SUBAGENT_TOOL_CALLS_PER_TURN,
   SUBAGENT_TOOL_NAME,
 } from "../parallel-agent/subagent-concurrency";
+import type { AgentSessionPort } from "../session/port";
+import { SessionPersistenceError } from "../session/errors.ts";
+import type { AgentRuntimeEventBase } from "../agent-runtime/types";
+import type { ModelCatalogPort } from "../model/port";
 
 /**
  * 不限定具体 Api 的 Model 类型别名。
@@ -175,7 +177,7 @@ export interface DeerLoopOptions {
   model: AnyModel;
   /** 初始系统提示词。 */
   systemPrompt?: string;
-  /** 工作目录（sessionManager 代理的 getCwd 返回它）。 */
+  /** 工作目录。 */
   cwd: string;
   /** 会话 id（透传给 provider 做 cache-aware；也用作 sessionId 属性）。 */
   sessionId?: string;
@@ -187,10 +189,14 @@ export interface DeerLoopOptions {
   streamFn?: StreamFn;
   /** API key 解析器（OAuth 短 token 用）。每次 LLM 调用前调。 */
   getApiKey?: (provider: string) => Promise<string | undefined>;
-  /** 真实 SessionManager。生产路径注入后，DeerLoopEngine 会把消息写入 jsonl。 */
+  /** 内部持久化和 pi ExtensionContext 使用的 SessionManager。 */
   sessionManager?: SessionManager;
-  /** 真实 ModelRegistry。用于 set_model/recover 和工具 ctx.modelRegistry，避免空代理。 */
+  /** 引擎依赖的稳定 Session 能力边界。 */
+  sessionPort?: AgentSessionPort;
+  /** pi ExtensionContext 内部仍需的 ModelRegistry 形状。 */
   modelRegistry?: DeerLoopModelRegistry;
+  /** 引擎恢复 Session 模型时使用的稳定模型目录边界。 */
+  modelCatalog?: ModelCatalogPort;
 
   // ─── M2：工具注册 ───────────────────────────────────────
   /** ★ 初始工具集（defineTool / createCodeGraphTools 等产物，直接喂给 registry）。 */
@@ -216,13 +222,6 @@ export interface DeerLoopOptions {
   followUpMode?: QueueMode;
   /** ★ M5：单个 prompt 内最多触发的 followUp 新 turn 数（防死循环，默认 10）。 */
   maxFollowUps?: number;
-}
-
-/** 标记当前处于未实现的里程碑路径抛出的错误。 */
-function notImplemented(method: string, milestone: string): Error {
-  return new Error(
-    `DeerLoopEngine.${method}: not implemented (see ${milestone})`,
-  );
 }
 
 /** ★ M2：工具调用循环最大轮数（防 LLM 无限调工具死循环）。
@@ -370,6 +369,7 @@ const QUEUE_UPDATE_TEXT_TRUNCATE = 200;
 interface QueueEntry {
   text: string;
   images?: Array<{ type: "image"; data: string; mimeType: string }>;
+  context?: TurnContextSnapshot;
 }
 
 /** consumeStream 的返回值（一轮 LLM 调用的状态快照）。 */
@@ -490,12 +490,12 @@ class EventGuard {
  * 自研 Agent Loop 引擎（M1 最小骨架）。
  *
  * 一个实例 = 一个会话上下文（transcript + systemPrompt + model）。
- * 不持有 pi 的 AgentSession / SessionManager / SettingsManager——这些在 M1
- * 灰度路径上要么不需要（get_state/prompt），要么由 wrapper 层用最小代理满足类型。
+ * 不持有 pi 的 AgentSession / SettingsManager；SessionManager 仅作为内部 JSONL 与
+ * ExtensionContext 适配资源，不通过 AgentEnginePort 暴露。
  */
 export class DeerLoopEngine implements AgentEnginePort {
   /** 事件订阅者集合。emit 时遍历调用。 */
-  private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
+  private readonly listeners = new Set<(event: AgentRuntimeEventBase) => void>();
 
   /** 当前 in-flight stream 的 AbortController。null 表示空闲。 */
   private abortController: AbortController | null = null;
@@ -537,11 +537,15 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** API key 解析器。 */
   private readonly _getApiKey?: (provider: string) => Promise<string | undefined>;
 
-  /** 真实 SessionManager（生产路径注入）；未注入时回退最小代理，方便单测。 */
+  /** 真实 SessionManager（兼容 Wrapper 旧调用，迁移完成后移除）。 */
   private readonly _sessionManager?: SessionManager;
+
+  /** 引擎持久化与导航使用的稳定 Session Port。 */
+  private readonly _sessionPort?: AgentSessionPort;
 
   /** 真实 ModelRegistry（生产路径注入）；未注入时回退只读空代理，方便单测。 */
   private readonly _modelRegistry?: DeerLoopModelRegistry;
+  private readonly _modelCatalog?: ModelCatalogPort;
 
   /** LLM Gateway 调度用请求类型，影响 limiter 优先级。 */
   private readonly _requestKind: LlmRequestKind;
@@ -602,13 +606,7 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** 单个 prompt 内最多触发的 followUp 新 turn 数（防死循环）。 */
   private readonly _maxFollowUps: number;
 
-  /**
-   * agent.state 的最小代理对象。
-   *
-   * Port 接口要求 `agent: { state?: { systemPrompt?; thinkingLevel? } }`。
-   * wrapper 构造时会读 agent.state.systemPrompt，applyRolePrompt 会写。
-   * get_state 命令也读这两个字段。这里维护一个真实的最小 state 对象。
-   */
+  /** 内部状态快照，用于保持 System Prompt 与 Thinking Level 更新一致。 */
   private readonly _agentState: {
     systemPrompt: string;
     thinkingLevel: string;
@@ -630,7 +628,9 @@ export class DeerLoopEngine implements AgentEnginePort {
     this._streamFn = options.streamFn ?? defaultStreamFn;
     this._getApiKey = options.getApiKey;
     this._sessionManager = options.sessionManager;
+    this._sessionPort = options.sessionPort;
     this._modelRegistry = options.modelRegistry;
+    this._modelCatalog = options.modelCatalog;
     this._requestKind = options.requestKind ?? "main";
     this._agentState = {
       systemPrompt: this._baseSystemPrompt,
@@ -699,11 +699,17 @@ export class DeerLoopEngine implements AgentEnginePort {
    * 防死循环：连续 maxToolRounds 轮仍要工具 → 强制 break + agent_end{error}。
    */
   async prompt(
-    text: string,
-    options?: {
+    input: string | AgentTurnInput,
+    legacyOptions?: {
       images?: Array<{ type: "image"; data: string; mimeType: string }>;
     },
   ): Promise<void> {
+    const turnInput: AgentTurnInput = typeof input === "string"
+      ? { text: input, images: legacyOptions?.images }
+      : input;
+    const text = turnInput.text;
+    const options = { images: turnInput.images };
+    const turnContext = turnInput.context;
     // ★ R8：用 Mutex 替代非原子 boolean 检查（tryAcquire 快速拒绝，不排队）
     const release = this._promptMutex.tryAcquire();
     if (!release) {
@@ -712,12 +718,27 @@ export class DeerLoopEngine implements AgentEnginePort {
       );
     }
 
+    // 回合环境冻结：上下文来自准入时的 TurnContextSnapshot；工具定义与
+    // executionMode 在 mutex 获取后快照，set_tools / MCP reload 只影响后续回合。
+    const activeToolNames = turnContext ? [...turnContext.activeToolNames] : this.registry.getActiveNames();
+    const effectiveSystemPrompt = turnContext?.effectiveSystemPrompt ?? this._baseSystemPrompt;
+    const frozenToolMap = turnContext
+      ? new Map(
+        activeToolNames
+          .map((name) => [name, this.registry.get(name)] as const)
+          .filter((entry): entry is readonly [string, NonNullable<typeof entry[1]>] => entry[1] !== undefined),
+      )
+      : undefined;
+    const frozenExecutionModes = turnContext
+      ? new Map(activeToolNames.map((name) => [name, this.registry.getExecutionMode(name)] as const))
+      : undefined;
+
     // ★ R9：事件守卫——保证 agent_start / agent_end 严格配对，
     //   任何分支遗漏事件都会在 finally 中补发。
     const guard = new EventGuard((e) => this.emit(e));
 
     let agentError: string | undefined; // 记录 agent_end 携带的错误消息
-    let agentErrorCode: NormalizedLlmError["code"] | undefined; // 记录标准化错误码
+    let agentErrorCode: NormalizedLlmError["code"] | typeof SessionPersistenceError.prototype.code | undefined; // 记录标准化错误码
 
     try {
       // 新回合开始时清掉上一轮残留的中止请求；abort() 可能在上一回合结束后才到达。
@@ -746,8 +767,7 @@ export class DeerLoopEngine implements AgentEnginePort {
         content: userContent,
         timestamp: Date.now(),
       };
-      this._messages.push(userMessage);
-      this.persistMessage(userMessage);
+      this.appendPersistedMessage(userMessage);
 
       // 2. 进入 running 态（_isRunning 保留为观察字段，并发保护由 Mutex 负责）。
       this._isRunning = true;
@@ -775,23 +795,21 @@ export class DeerLoopEngine implements AgentEnginePort {
             for (const entry of toInject) {
               const steerMsg: UserMessage = {
                 role: "user",
-                content: this.buildUserContent(entry.text, entry.images),
+                content: this.buildUserContent(this.buildQueuedUserText(entry), entry.images),
                 timestamp: Date.now(),
               };
-              this._messages.push(steerMsg);
-              this.persistMessage(steerMsg);
+              this.appendPersistedMessage(steerMsg);
             }
             this.emitQueueUpdate();
           }
 
-          // ★ M3 持久性关键：Context 在 while 循环【内】每轮重新构造，
-          //   systemPrompt 直接读 this._baseSystemPrompt（不缓存到循环外）。
-          //   因此 setSystemPromptPersistent 的修改从下一轮 consumeStream 立即生效，
-          //   且连发 N 个 prompt 值恒定不变（免疫 H1）。
+          // ★ M3 持久性关键：Context 在 while 循环【内】每轮重新构造。
+          //   systemPrompt / 工具集读回合冻结快照（turnContext 存在时），
+          //   setSystemPromptPersistent / set_tools / MCP reload 只影响下一个回合。
           //   见 scripts/test-system-prompt-persistence.mjs 用例 1/2。
-          const activeTools = this.registry.getActive();
+          const activeTools = frozenToolMap ? [...frozenToolMap.values()] : this.registry.getActive();
           const context: Context = {
-            systemPrompt: this._baseSystemPrompt || undefined,
+            systemPrompt: effectiveSystemPrompt || undefined,
             messages: convertToLlm(
               omitImagesBeforeCurrentTurn(this._messages, currentTurnStartIndex) as never,
             ) as Message[],
@@ -817,8 +835,7 @@ export class DeerLoopEngine implements AgentEnginePort {
             //   error（不可重试/全部重试失败）仍 push（保留错误上下文，下次 prompt LLM 能看到）。
             //   若 abort 发生在工具结果之后，外层 finally 会补一条可展示的失败消息，避免 UI 静默。
             if (!consumed.aborted) {
-              this._messages.push(consumed.endMessage);
-              this.persistMessage(consumed.endMessage);
+              this.appendPersistedMessage(consumed.endMessage);
             }
             if (consumed.aborted) {
               agentError = "aborted";
@@ -831,8 +848,7 @@ export class DeerLoopEngine implements AgentEnginePort {
 
           // 把本轮 assistant 最终消息追加到 transcript。
           const assistantMessage = consumed.endMessage;
-          this._messages.push(assistantMessage);
-          this.persistMessage(assistantMessage);
+          this.appendPersistedMessage(assistantMessage);
 
           // ★ 提取本轮的 ToolCall（源序）。
           const toolCalls = assistantMessage.content.filter(
@@ -872,11 +888,10 @@ export class DeerLoopEngine implements AgentEnginePort {
               for (const entry of toInject) {
                 const followMsg: UserMessage = {
                   role: "user",
-                  content: this.buildUserContent(entry.text, entry.images),
+                  content: this.buildUserContent(this.buildQueuedUserText(entry), entry.images),
                   timestamp: Date.now(),
                 };
-                this._messages.push(followMsg);
-                this.persistMessage(followMsg);
+                this.appendPersistedMessage(followMsg);
               }
               toolRounds = 0; // ★ followUp 是新 turn，重置工具轮数预算
               followUpTurnsConsumed++;
@@ -915,35 +930,37 @@ export class DeerLoopEngine implements AgentEnginePort {
                 maxCallsPerTurn: MAX_SUBAGENT_TOOL_CALLS_PER_TURN,
                 usedCalls: 0,
               }],
+              activeToolNames,
+              ...(frozenToolMap ? { tools: frozenToolMap } : {}),
+              ...(frozenExecutionModes ? { executionModes: frozenExecutionModes } : {}),
             },
           );
 
           // abort 发生在工具执行期间：回填已有结果后跳出。
           if (this.abortController?.signal.aborted) {
             const toolResults = this.buildToolResultMessages(toolCalls, outputs);
-            this._messages.push(...toolResults);
-            for (const msg of toolResults) this.persistMessage(msg);
+            for (const msg of toolResults) this.appendPersistedMessage(msg);
             agentError = "aborted";
             break;
           }
 
           // 构造 ToolResultMessage × N 入 transcript（源序，对齐 toolCalls）。
           const toolResults = this.buildToolResultMessages(toolCalls, outputs);
-          this._messages.push(...toolResults);
-          for (const msg of toolResults) this.persistMessage(msg);
+          for (const msg of toolResults) this.appendPersistedMessage(msg);
 
           // 继续下一轮 LLM 调用（while true 顶部重新构造 context，此时 transcript
           // 已含工具结果，LLM 会看到）。
         }
       } catch (err) {
         // 兜底：循环内不应抛（abort/error 已在 consumeStream/executeBatch 内部隔离），
-        // 这里只防未预期异常。
+        // 这里只防未预期异常（含关键持久化失败——必须终止本回合而非静默继续）。
         if (this.isAbortError(err)) {
           agentError = "aborted";
         } else {
           agentError = err instanceof Error ? err.message : String(err);
-          const classified = classifyLlmError(err);
-          agentErrorCode = classified.code;
+          agentErrorCode = err instanceof SessionPersistenceError
+            ? err.code
+            : classifyLlmError(err).code;
         }
       } finally {
         this._isStreaming = false;
@@ -960,7 +977,9 @@ export class DeerLoopEngine implements AgentEnginePort {
       } else {
         const cause = err instanceof Error ? err.message : String(err);
         agentError = `Agent 回合异常终止（provider=${this._model.provider}，model=${this._model.id}，stage=prompt_setup_or_loop）：${cause}`;
-        agentErrorCode = classifyLlmError(err).code;
+        agentErrorCode = err instanceof SessionPersistenceError
+          ? err.code
+          : classifyLlmError(err).code;
       }
     } finally {
       // ★ R9：守卫兜底——保证 agent_end 一定发射（若内部已发射则幂等跳过）。
@@ -978,7 +997,6 @@ export class DeerLoopEngine implements AgentEnginePort {
 
         const agentEndEvent: LoopEvent = {
           type: "agent_end",
-          messages: [...this._messages],
           willRetry: false,
         };
         const endError =
@@ -988,7 +1006,7 @@ export class DeerLoopEngine implements AgentEnginePort {
           (agentEndEvent as { error?: string }).error = endError;
         }
         if (agentErrorCode) {
-          (agentEndEvent as { errorCode?: NormalizedLlmError["code"] }).errorCode = agentErrorCode;
+          (agentEndEvent as { errorCode?: NormalizedLlmError["code"] | typeof SessionPersistenceError.prototype.code }).errorCode = agentErrorCode;
         }
         // 通过 guard 发射并同时标记已结束，避免先 emit 后 ensureAgentEnd()
         // 再补出一个缺少 messages/willRetry/error 的重复 agent_end。
@@ -1007,13 +1025,22 @@ export class DeerLoopEngine implements AgentEnginePort {
    * 文件。因此在 prompt 开始时先 append user 不会让侧边栏立刻出现半截空 session；
    * assistant 结束后 append assistant 会一次性写出 header + user + assistant。
    */
+  /**
+   * 持久化成功后才推进内存 transcript。写入失败时当前回合会收敛为
+   * SESSION_PERSIST_FAILED，且不会把无法恢复的消息带入下一轮模型上下文。
+   */
+  private appendPersistedMessage(message: AgentMessage): void {
+    this.persistMessage(message);
+    this._messages.push(message);
+  }
+
   private persistMessage(message: AgentMessage): void {
     const manager = this._sessionManager;
     if (!manager?.isPersisted()) return;
     try {
       manager.appendMessage(message as Parameters<SessionManager["appendMessage"]>[0]);
     } catch (error) {
-      console.warn("DeerLoopEngine: 写入 session jsonl 失败", error);
+      throw new SessionPersistenceError("append_message", this._sessionId, error);
     }
   }
 
@@ -1221,7 +1248,6 @@ export class DeerLoopEngine implements AgentEnginePort {
         this.emit({
           type: "message_update",
           message: ev.partial,
-          assistantMessageEvent: ev,
         });
       }
       // 某些中转站会在输出一部分内容后直接关闭连接，不发送 done/error。
@@ -1440,7 +1466,6 @@ export class DeerLoopEngine implements AgentEnginePort {
       // agent_end{willRetry:true}：告诉前端/ wrapper 本轮失败但会重试（保持 _isRunning=true）
       this.emit({
         type: "agent_end",
-        messages: [...this._messages],
         willRetry: true,
       });
 
@@ -1497,7 +1522,6 @@ export class DeerLoopEngine implements AgentEnginePort {
     // ★ R9：防御性保护——若 while 循环因未预期异常退出（非正常 return），
     //   补发 message_end 避免前端永久等待。正常 return 路径不受影响。
     if (lastConsumedForGuard) {
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
       const fc = lastConsumedForGuard as ConsumedStream;
       if (!fc.messageEndEmitted) {
         try {
@@ -1542,7 +1566,7 @@ export class DeerLoopEngine implements AgentEnginePort {
   /**
    * 构造工具 execute 第 5 参用的 MinimalExtensionContext。
    *
-   * 复用 loop 的最小代理（sessionManager / modelRegistry）与状态（cwd / model /
+   * 复用 loop 的内部 sessionManager / modelRegistry 与状态（cwd / model /
    * abortController / _isStreaming）。signal 必非空（工具执行期间在 prompt 调用，
    * abortController 已创建）。
    */
@@ -1566,8 +1590,8 @@ export class DeerLoopEngine implements AgentEnginePort {
       // ★ M5：工具 execute 可通过 ctx.hasPendingMessages 查询队列状态（如 subagent
       //   工具想根据是否有待处理 steer/followUp 改变行为）。返回两个队列任一非空。
       hasPendingMessages: () => this.hasQueuedMessages(),
-      sessionManager: this.sessionManager,
-      modelRegistry: this.modelRegistry,
+      sessionManager: this._sessionManager ?? SessionManager.inMemory(this._cwd),
+      modelRegistry: this._modelRegistry ?? { find: () => undefined },
     });
   }
 
@@ -1641,12 +1665,8 @@ export class DeerLoopEngine implements AgentEnginePort {
   // ★ M1 核心方法：subscribe / dispose
   // -------------------------------------------------------------------------
 
-  /**
-   * 订阅 LoopEvent。返回取消订阅函数。
-   * listener 签名按 Port 契约声明为 AgentSessionEvent（与 pi 兼容），
-   * DeerLoopEngine emit 的 LoopEvent 对象结构兼容，透传安全。
-   */
-  subscribe(listener: (event: AgentSessionEvent) => void): () => void {
+  /** 订阅标准运行时事件。返回取消订阅函数。 */
+  subscribe(listener: (event: AgentRuntimeEventBase) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
@@ -1672,15 +1692,6 @@ export class DeerLoopEngine implements AgentEnginePort {
   // -------------------------------------------------------------------------
   // 只读属性
   // -------------------------------------------------------------------------
-
-  get sessionId(): string {
-    return this._sessionId;
-  }
-
-  /** 真实 SessionManager 注入时返回当前 jsonl 文件路径。 */
-  get sessionFile(): string | undefined {
-    return this._sessionManager?.getSessionFile?.() ?? undefined;
-  }
 
   get isStreaming(): boolean {
     return this._isStreaming;
@@ -1709,50 +1720,12 @@ export class DeerLoopEngine implements AgentEnginePort {
     return { provider: this._model.provider, modelId: this._model.id, baseUrl: this._model.baseUrl };
   }
 
-  get thinkingLevel(): ThinkingLevel | undefined {
-    return this._thinkingLevel;
+  get thinkingLevel(): ThinkingLevel | "off" {
+    return this._thinkingLevel ?? "off";
   }
 
-  /**
-   * agent.state 代理（Port 过渡字段）。
-   *
-   * wrapper 构造时读 agent.state.systemPrompt；get_state 读 systemPrompt + thinkingLevel。
-   * 返回内部维护的最小 state 对象（真实值，非 mock）。
-   */
-  get agent(): { state: { systemPrompt: string; thinkingLevel: string } } {
-    return { state: this._agentState };
-  }
-
-  /**
-   * sessionManager 代理（Port 过渡字段）。
-   *
-   * wrapper 构造时 applyRolePrompt 会调 sessionManager.getCwd()；
-   * 多处读 isPersisted() / appendCustomEntry()。生产路径注入真实 SessionManager，
-   * 未注入时提供最小代理满足这些调用（getCwd 返回 cwd，isPersisted 返回 false，
-   * appendCustomEntry 返回占位 id）。其他方法（getBranch/fork 等）被调时 throw。
-   */
-  get sessionManager(): import("@earendil-works/pi-coding-agent").SessionManager {
-    return this._sessionManager ?? createMinimalSessionManager(this._cwd);
-  }
-
-  /**
-   * settingsManager 代理（Port 过渡字段）。
-   *
-   * M1 灰度路径不读 settingsManager（compact/retry 命令不走）。提供最小代理
-   * 满足 Port 类型；getCompactionSettings 返回默认值。
-   */
-  get settingsManager(): import("@earendil-works/pi-coding-agent").SettingsManager {
-    return createMinimalSettingsManager();
-  }
-
-  /**
-   * modelRegistry 代理（Port 过渡字段）。
-   *
-   * 生产路径由 startDeerLoopSession 注入真实 ModelRegistry；测试未注入时保留
-   * 空代理，避免构造最小 engine 需要读用户模型配置。
-   */
-  get modelRegistry(): DeerLoopModelRegistry {
-    return this._modelRegistry ?? { find: () => undefined };
+  get systemPrompt(): string {
+    return this._baseSystemPrompt;
   }
 
   // -------------------------------------------------------------------------
@@ -1768,8 +1741,8 @@ export class DeerLoopEngine implements AgentEnginePort {
    *      context.systemPrompt 都等于这里写入的值（不被重置）——因为
    *      DeerLoopEngine 自持 _baseSystemPrompt，没有 pi 那种「外部
    *      _rebuildSystemPrompt 把 state.systemPrompt 覆盖回私有字段」的问题。
-   *   2. agent.state 同步：_agentState.systemPrompt 与 _baseSystemPrompt
-   *      双写，wrapper 读 this.inner.agent.state.systemPrompt 永远拿到最新值。
+   *   2. 状态同步：_agentState.systemPrompt 与 _baseSystemPrompt 双写，
+   *      对外 systemPrompt 只读属性永远返回最新值。
    *   3. turn_context 责任分工：本方法是【纯透传】——set 什么，context 就用什么。
    *      它【不】自动 stripTurnContextBlock（DeerLoopEngine 不知道 turn_context
    *      是什么）。strip 是 wrapper 的职责（rpc-manager.ts 的 stripTurnContextBlock
@@ -1861,47 +1834,73 @@ export class DeerLoopEngine implements AgentEnginePort {
     if (this._isRunning) {
       throw new Error("DeerLoopEngine.setModel: 无法切换模型——prompt 正在运行");
     }
+    const changed = this._model.provider !== model.provider || this._model.id !== model.id;
+    if (!changed) return;
+    // 先提交持久化事实，再更新引擎状态；写入失败时本次切换不生效。
+    this._sessionPort?.appendModelChange(model.provider, model.id);
     // rpc-manager 通常传入 ModelRegistry.find() 返回的完整 Model；若只传 {id, provider}，
     // 保留当前 model 的 api/contextWindow 等 provider 元数据，只覆盖选择项。
     this._model = { ...this._model, ...model } as AnyModel;
+    this.applyThinkingLevel(this._agentState.thinkingLevel, true);
   }
 
-  async navigateTree(
-    _targetId: string,
+  async navigate(
+    targetId: string,
     _options?: { summarize?: boolean },
   ): Promise<{
     editorText?: string;
     cancelled: boolean;
     aborted?: boolean;
   }> {
-    throw notImplemented("navigateTree", "M6 (SessionStore)");
-  }
-
-  /**
-   * appendCustomEntry：wrapper 用它写 display_user_message / turn_context /
-   * agent_mode 等 UI 元数据。注入了真实 sessionManager 时透传写 jsonl；否则 no-op。
-   */
-  appendCustomEntry(customType: string, data?: unknown): string {
-    const manager = this._sessionManager;
-    if (manager?.isPersisted()) {
-      try {
-        return manager.appendCustomEntry(customType, data);
-      } catch (error) {
-        console.warn("DeerLoopEngine: 写入 custom entry 失败", error);
-      }
+    if (this._isRunning || this._isCompacting) {
+      throw new Error("DeerLoopEngine.navigate: agent 正在运行，无法切换分支");
     }
-    // 未注入 sessionManager（单测路径）或写入失败：返回稳定占位 id 避免上游炸。
-    return `deer-loop-custom-${Date.now()}-${customType}`;
+    if (!this._sessionPort) {
+      throw new Error("DeerLoopEngine.navigate: 当前引擎未配置 SessionPort");
+    }
+    const previousLeafId = this._sessionPort.leafId ?? null;
+    const snapshot = this._sessionPort.navigate(targetId || null);
+    try {
+      const restoredModel = snapshot.model
+        ? this._modelCatalog?.resolve(snapshot.model.provider, snapshot.model.modelId)
+        : undefined;
+      if (snapshot.model && !restoredModel) {
+        throw new Error(`Model not found: ${snapshot.model.provider}/${snapshot.model.modelId}`);
+      }
+      this._messages.splice(0, this._messages.length, ...snapshot.messages);
+      if (restoredModel) this._model = restoredModel;
+      this._thinkingLevel = snapshot.thinkingLevel && snapshot.thinkingLevel !== "off"
+        ? snapshot.thinkingLevel as ThinkingLevel
+        : undefined;
+      this._agentState.thinkingLevel = this._thinkingLevel ?? "off";
+      return { cancelled: false, editorText: snapshot.editorText };
+    } catch (error) {
+      // Session Leaf 已移动但 Engine 尚未提交状态；恢复原分支后再向上抛出。
+      this._sessionPort.navigate(previousLeafId);
+      throw error;
+    }
   }
 
   setThinkingLevel(level: string): void {
-    if (level === "off" || !level) {
-      this._thinkingLevel = undefined;
-      this._agentState.thinkingLevel = "off";
-      return;
-    }
-    this._thinkingLevel = level as ThinkingLevel;
-    this._agentState.thinkingLevel = level;
+    this.applyThinkingLevel(level, true);
+  }
+
+  private applyThinkingLevel(level: string, persist: boolean): void {
+    const requested = level === "off" || !level ? "off" : level;
+    const valid = ["off", "minimal", "low", "medium", "high", "xhigh"].includes(requested)
+      ? requested
+      : "off";
+    const isDeepSeekThinkingCompat = (
+      this._model as { compat?: { thinkingFormat?: string } }
+    ).compat?.thinkingFormat === "deepseek";
+    const normalized = valid === "xhigh" && isDeepSeekThinkingCompat
+      ? "xhigh"
+      : clampThinkingLevel(this._model, valid as "off" | ThinkingLevel);
+    const changed = this._agentState.thinkingLevel !== normalized;
+    if (!changed) return;
+    if (persist) this._sessionPort?.appendThinkingLevelChange(normalized);
+    this._thinkingLevel = normalized === "off" ? undefined : normalized;
+    this._agentState.thinkingLevel = normalized;
   }
 
   /**
@@ -1972,7 +1971,7 @@ export class DeerLoopEngine implements AgentEnginePort {
       // 摘要可用独立模型；切点/保留区仍按会话主模型窗口计算。
       let summaryModel = options?.model ?? this._model;
       if (!options?.model && options?.provider && options?.modelId) {
-        const found = this.modelRegistry.find(options.provider, options.modelId);
+        const found = this._modelRegistry?.find(options.provider, options.modelId);
         if (!found) {
           throw new Error(`压缩模型不存在: ${options.provider}/${options.modelId}`);
         }
@@ -2107,14 +2106,20 @@ export class DeerLoopEngine implements AgentEnginePort {
       emitProgress("applying", "正在写入压缩结果并更新会话上下文…", {
         model: { provider: summaryModel.provider, modelId: summaryModel.id },
       });
-      manager.appendCompaction(
-        summaryWithArchive,
-        firstKeptEntryId,
-        tokensBefore,
-        historyFile
-          ? { historyFile, compactionId, fromEntryId, toEntryId }
-          : undefined,
-      );
+      // 压缩结果是关键持久化事实：写失败时 transcript 尚未被替换（内存与磁盘一致），
+      // 直接终止本次压缩并携带 SESSION_PERSIST_FAILED，禁止静默降级。
+      try {
+        manager.appendCompaction(
+          summaryWithArchive,
+          firstKeptEntryId,
+          tokensBefore,
+          historyFile
+            ? { historyFile, compactionId, fromEntryId, toEntryId }
+            : undefined,
+        );
+      } catch (error) {
+        throw new SessionPersistenceError("append_compaction", this._sessionId, error);
+      }
       const compactedContext = buildSessionContext(manager.getEntries(), manager.getLeafId());
       this._messages.splice(0, this._messages.length, ...(compactedContext.messages as AgentMessage[]));
 
@@ -2455,24 +2460,24 @@ export class DeerLoopEngine implements AgentEnginePort {
   }
 
   async steer(
-    text: string,
-    images?: Array<{ type: "image"; data: string; mimeType: string }>,
+    input: string | QueuedTurnInput,
+    legacyImages?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<void> {
-    // ★ M5 实现：消息入 steeringQueue，emit queue_update。
-    //   drain 时机在 prompt 主循环顶部（consumeStream 之前），见 prompt 注释。
-    this.enqueueBounded(this.steeringQueue, { text, images }, "steering");
+    const entry: QueueEntry = typeof input === "string"
+      ? { text: input, images: legacyImages }
+      : { text: input.text, images: input.images, context: input.context };
+    this.enqueueBounded(this.steeringQueue, entry, "steering");
     this.emitQueueUpdate();
   }
 
   async followUp(
-    text: string,
-    images?: Array<{ type: "image"; data: string; mimeType: string }>,
+    input: string | QueuedTurnInput,
+    legacyImages?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<void> {
-    // ★ M5 实现：消息入 followUpQueue，emit queue_update。
-    //   drain 时机在 turn 结束点（无工具调用、stopReason=stop），见 prompt 注释。
-    //   ★ 注意：rpc-manager 的 follow_up 命令在 turn 活跃时调本方法入队；
-    //   turn 已结束时直接调 prompt 开新 turn（不走队列）。两条路径互斥。
-    this.enqueueBounded(this.followUpQueue, { text, images }, "followUp");
+    const entry: QueueEntry = typeof input === "string"
+      ? { text: input, images: legacyImages }
+      : { text: input.text, images: input.images, context: input.context };
+    this.enqueueBounded(this.followUpQueue, entry, "followUp");
     this.emitQueueUpdate();
   }
 
@@ -2620,20 +2625,23 @@ export class DeerLoopEngine implements AgentEnginePort {
   // 私有 helper
   // -------------------------------------------------------------------------
 
-  /**
-   * 发射一个 LoopEvent 给所有订阅者。
-   * LoopEvent 结构兼容 Port 要求的 AgentSessionEvent，用类型断言桥接。
-   */
+  /** 发射一个 LoopEvent；其结构满足标准运行时事件基础契约。 */
   private emit(event: LoopEvent): void {
     const listeners = Array.from(this.listeners);
     for (const listener of listeners) {
       try {
-        listener(event as unknown as AgentSessionEvent);
+        listener(event);
       } catch (err) {
         // 订阅者异常不能拖垮 loop。记录后继续。
         console.error("[DeerLoopEngine] subscribe listener threw:", err);
       }
     }
+  }
+
+  private buildQueuedUserText(entry: QueueEntry): string {
+    const instruction = entry.context?.instructionContext?.trim();
+    if (!instruction) return entry.text;
+    return `${entry.text}\n\n${instruction}`;
   }
 
   /** 构造 user message 的 content（文本 + 可选图片）。 */
@@ -2862,8 +2870,17 @@ export class DeerLoopEngine implements AgentEnginePort {
       ),
       content: [{ type: "text" as const, text: message }],
     };
-    this._messages.push(failure);
-    this.persistMessage(failure);
+    try {
+      this.appendPersistedMessage(failure);
+    } catch (persistError) {
+      // finally 兜底路径绝不能再抛：否则 agent_end 不会发射、mutex 不释放。
+      // 这里只把持久化失败并入返回文案，由 agent_end.error 呈现。
+      console.error(
+        "DeerLoopEngine: persisting failure assistant message failed",
+        persistError,
+      );
+      return `${message}\n\n(注意：该失败消息未能写入会话历史：${persistError instanceof Error ? persistError.message : String(persistError)})`;
+    }
     this.emit({ type: "message_start", message: failure });
     this.emit({ type: "message_end", message: failure });
     return message;
@@ -2893,61 +2910,4 @@ function defaultStreamFn(
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   return streamSimple(model, context, options);
-}
-
-// ===========================================================================
-// 最小代理工厂（sessionManager / settingsManager）
-// ===========================================================================
-
-/**
- * 创建最小的 SessionManager 代理，满足 wrapper 构造与 get_state 的调用。
- *
- * DeerLoopEngine 不做 jsonl 持久化（M6 的事），所以 isPersisted 返回 false、
- * appendCustomEntry 返回占位 id。其他方法（getBranch/createBranchedSession 等）
- * 在被调时 throw——M1 灰度路径不会触碰它们。
- */
-function createMinimalSessionManager(
-  cwd: string,
-): import("@earendil-works/pi-coding-agent").SessionManager {
-  const minimal = {
-    getCwd: () => cwd,
-    isPersisted: () => false,
-    appendCustomEntry: (_customType: string, _data?: unknown) =>
-      `deer-loop-custom-${Date.now()}`,
-    getBranch: () => [] as unknown[],
-    getSessionFile: () => undefined,
-  };
-  // 用 Proxy 把未实现的方法统一转成 throw，避免返回一个"看起来完整"的假对象。
-  return new Proxy(minimal, {
-    get(target, prop, receiver) {
-      if (prop in target) {
-        return Reflect.get(target, prop, receiver);
-      }
-      // 访问任何未实现的方法/属性时返回一个 throw 函数（兼容方法调用）或 throw。
-      throw new Error(
-        `DeerLoopEngine.sessionManager.${String(prop)}: not implemented in M1 (see M6 / SessionStore)`,
-      );
-    },
-  }) as unknown as import("@earendil-works/pi-coding-agent").SessionManager;
-}
-
-/**
- * 创建最小的 SettingsManager 代理。
- * M1 灰度不读 settings；提供默认值满足 Port 类型。
- */
-function createMinimalSettingsManager(): import("@earendil-works/pi-coding-agent").SettingsManager {
-  const minimal = {
-    getCompactionSettings: () => ({ threshold: 0.5, autoCompact: false }),
-    getRetrySettings: () => ({ enabled: false, maxRetries: 0, baseDelayMs: 5000 }),
-  };
-  return new Proxy(minimal, {
-    get(target, prop, receiver) {
-      if (prop in target) {
-        return Reflect.get(target, prop, receiver);
-      }
-      throw new Error(
-        `DeerLoopEngine.settingsManager.${String(prop)}: not implemented in M1`,
-      );
-    },
-  }) as unknown as import("@earendil-works/pi-coding-agent").SettingsManager;
 }

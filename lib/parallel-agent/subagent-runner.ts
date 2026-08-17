@@ -5,6 +5,7 @@ import { getAgentDir, resolveSessionPath } from "@/lib/session-reader";
 import { classifyLlmError, isRetryableLlmErrorCode } from "@/lib/llm-gateway";
 import type { CollaborationRunMode } from "./collaboration-types";
 import { registerWorkerSession } from "./subagent-registry";
+import { resolveWorkerOutcome, type AssistantSnapshot } from "./subagent-outcome";
 
 const WORKER_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 const SUBAGENT_MAX_TOOL_ROUNDS = 100;
@@ -96,30 +97,25 @@ export async function createSubagentWorkerSession(
           reject(new Error("Worker session made no progress for 30 minutes"));
         }), WORKER_INACTIVITY_TIMEOUT_MS);
       };
+      let lastAssistant: AssistantSnapshot | null = null;
       resetTimeout();
       unsubscribe = session.onEvent((event: AgentEvent) => {
         resetTimeout();
-        if (event.type === "agent_end" && event.error) {
-          settle(() => {
-            reject(new Error(String(event.error)));
-          });
+        if (event.type === "message_end") {
+          const completed = event.message as typeof lastAssistant;
+          if (completed?.role === "assistant") lastAssistant = completed;
           return;
         }
-        if (event.type === "agent_end" && Array.isArray(event.messages)) {
-          settle(() => {
-            const messages = event.messages as Array<{ role: string; content?: unknown; stopReason?: string; errorMessage?: string }>;
-            const assistantError = getAssistantError(messages);
-            if (assistantError) reject(new Error(assistantError));
-            else {
-              const text = textFromMessages(messages);
-              // 空正文意味着模型出错（如 Request timed out / upstream rejected）
-              // 但 pi 未填 event.error，且 agent_end.messages 可能不含那条 error assistant。
-              // 当作可恢复错误，让上层 runWorkerPromptWithRecovery 切换备用模型重试。
-              if (!text.trim()) reject(new Error("Worker produced no output (likely a model timeout or upstream error)"));
-              else resolve(text);
-            }
-          });
-        }
+        if (event.type !== "agent_end") return;
+        const outcome = resolveWorkerOutcome(lastAssistant, {
+          willRetry: event.willRetry,
+          error: event.error,
+        });
+        if (outcome.kind === "pending") return;
+        settle(() => {
+          if (outcome.kind === "reject") reject(new Error(outcome.error));
+          else resolve(outcome.text);
+        });
       });
       session.send({ type: "prompt", message }).catch((error: unknown) => {
         settle(() => {
@@ -172,13 +168,6 @@ export async function runWorkerPromptWithRecovery(
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-function getAssistantError(messages: Array<{ role: string; content?: unknown; stopReason?: string; errorMessage?: string }>): string | null {
-  const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
-  if (!lastAssistant) return null;
-  if (lastAssistant.errorMessage) return lastAssistant.errorMessage;
-  return lastAssistant.stopReason === "error" ? "Model response failed" : null;
-}
-
 function isRecoverableModelError(error: unknown): boolean {
   const normalized = classifyLlmError(error);
   if (normalized.code === "UNKNOWN") {
@@ -186,18 +175,4 @@ function isRecoverableModelError(error: unknown): boolean {
     return /upstream rejected|model|provider|temporar|no output/i.test(message);
   }
   return isRetryableLlmErrorCode(normalized.code);
-}
-
-function textFromMessages(messages: Array<{ role: string; content?: unknown }>): string {
-  const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
-  const content = lastAssistant?.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.map((block) => {
-    if (typeof block !== "object" || block === null) return "";
-    const record = block as { type?: string; text?: string; thinking?: string };
-    if (record.type === "text") return record.text ?? "";
-    if (record.type === "thinking") return record.thinking ?? "";
-    return "";
-  }).join("");
 }

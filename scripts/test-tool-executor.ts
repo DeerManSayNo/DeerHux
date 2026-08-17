@@ -55,12 +55,14 @@ function createExecutor(starts: string[], gates: Map<string, ReturnType<typeof d
   const registry = new ToolRegistry();
   registry.register(makeTool("read", starts, gates, "parallel"));
   registry.register(makeTool("edit", starts, gates, "sequential"));
+  registry.setActive(["read", "edit"]);
   return new ToolExecutor(registry);
 }
 
 function createSubagentExecutor(starts: string[], gates: Map<string, ReturnType<typeof deferred>>): ToolExecutor {
   const registry = new ToolRegistry();
   registry.register(makeTool(SUBAGENT_TOOL_NAME, starts, gates, "parallel"));
+  registry.setActive([SUBAGENT_TOOL_NAME]);
   return new ToolExecutor(registry);
 }
 
@@ -208,6 +210,114 @@ function createSubagentExecutor(starts: string[], gates: Map<string, ReturnType<
   gates.get("subagent-2")?.resolve();
   const secondOutputs = await secondRun;
   assert.equal(secondOutputs[0].isError, false);
+}
+
+{
+  const phases: string[] = [];
+  const starts: string[] = [];
+  const registry = new ToolRegistry();
+  registry.register(makeTool("read", starts, new Map(), "parallel"));
+  registry.setActive(["read"]);
+  const executor = new ToolExecutor(registry, {
+    pipeline: {
+      preExecute: [({ toolName }) => { phases.push(`pre:${toolName}`); }],
+      guards: [({ toolName }) => { phases.push(`guard:${toolName}`); return { action: "allow" }; }],
+      postExecute: [(_context, output) => {
+        phases.push("post");
+        return {
+          ...output,
+          result: { ...output.result, content: [{ type: "text", text: "post-processed" }] },
+        };
+      }],
+      onResult: [() => { phases.push("result"); }],
+    },
+  });
+
+  const outputs = await executor.executeBatch(
+    [makeCall("read-pipeline", "read")],
+    new AbortController().signal,
+    {} as never,
+    () => {},
+  );
+  assert.deepEqual(phases, ["pre:read", "guard:read", "post", "result"]);
+  assert.deepEqual(starts, ["read-pipeline"]);
+  assert.deepEqual(outputTexts(outputs), ["post-processed"]);
+}
+
+{
+  const starts: string[] = [];
+  const observed: boolean[] = [];
+  const registry = new ToolRegistry();
+  registry.register(makeTool("edit", starts, new Map(), "sequential"));
+  registry.setActive(["edit"]);
+  const executor = new ToolExecutor(registry, {
+    pipeline: {
+      guards: [() => ({ action: "deny", reason: "workspace is read-only" })],
+      postExecute: [() => {
+        throw new Error("denied results must not enter postExecute");
+      }],
+      onResult: [(_context, output) => {
+        observed.push(output.isError);
+        (output.result.content as unknown[]).splice(0);
+        output.changedFiles?.push("/forged-path");
+        throw new Error("observer failure");
+      }],
+    },
+  });
+
+  const outputs = await executor.executeBatch(
+    [makeCall("edit-denied", "edit")],
+    new AbortController().signal,
+    {} as never,
+    () => {},
+  );
+  assert.deepEqual(starts, [], "denied tool must not dispatch");
+  assert.equal(outputs[0].isError, true);
+  assert.match(outputTexts(outputs)[0], /workspace is read-only/);
+  assert.deepEqual(observed, [true]);
+  assert.match(outputTexts(outputs)[0], /workspace is read-only/, "observer mutation must be isolated");
+  assert.equal(outputs[0].changedFiles, undefined);
+}
+
+{
+  const starts: string[] = [];
+  const registry = new ToolRegistry();
+  registry.register(makeTool("write", starts, new Map(), "sequential"));
+  registry.setActive([]);
+  const executor = new ToolExecutor(registry);
+  const outputs = await executor.executeBatch(
+    [makeCall("write-disabled", "write")],
+    new AbortController().signal,
+    {} as never,
+    () => {},
+  );
+  assert.deepEqual(starts, [], "registered but inactive tools must not dispatch");
+  assert.equal(outputs[0].isError, true);
+  assert.match(outputTexts(outputs)[0], /not active/);
+}
+
+{
+  let executed = false;
+  const registry = new ToolRegistry();
+  registry.register({
+    ...makeTool("read", [], new Map(), "parallel"),
+    prepareArguments: () => { throw new Error("invalid arguments"); },
+    execute: async () => {
+      executed = true;
+      return { content: [], details: undefined };
+    },
+  } as unknown as AnyToolDefinition);
+  registry.setActive(["read"]);
+  const executor = new ToolExecutor(registry);
+  const outputs = await executor.executeBatch(
+    [makeCall("read-invalid", "read")],
+    new AbortController().signal,
+    {} as never,
+    () => {},
+  );
+  assert.equal(executed, false, "argument preparation failure must be fail-closed");
+  assert.equal(outputs[0].isError, true);
+  assert.match(outputTexts(outputs)[0], /argument preparation failed/);
 }
 
 console.log("tool-executor tests passed");

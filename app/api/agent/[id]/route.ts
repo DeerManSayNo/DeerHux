@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { getRpcSession, SessionCapacityError } from "@/lib/rpc-manager";
 import { ensureRpcSession, SessionNotFoundError } from "@/lib/agent-runtime/session-service";
 import { validateSessionId, SessionIdValidationError } from "@/lib/validate";
 import { readSessionFileCached, resolveSessionPath } from "@/lib/session-reader";
+import { isSessionPersistenceError } from "@/lib/session/errors";
+import { getAgentRunStore } from "@/lib/agent-runtime/run-store";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -46,6 +48,12 @@ export async function POST(
     if (error instanceof SessionNotFoundError) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
+    if (error instanceof SessionCapacityError) {
+      return NextResponse.json({ error: error.message }, { status: 503, headers: { "Retry-After": "5" } });
+    }
+    if (isSessionPersistenceError(error)) {
+      return NextResponse.json({ error: error.message, errorCode: error.code }, { status: 507 });
+    }
     if (error instanceof Error && error.message.startsWith("AGENT_BUSY:")) {
       return NextResponse.json({ error: error.message.slice("AGENT_BUSY:".length).trim() }, { status: 409 });
     }
@@ -80,7 +88,12 @@ export async function GET(
       return NextResponse.json({ running: session?.getStatus().isRunning ?? false, accepted: Boolean(accepted), turnId: accepted?.turnId });
     }
     if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false });
+      // Wrapper 已被回收/进程重启：用持久化 Run 事实回答「上次回合到底怎么结束的」，
+      // 非终态 Run 会在 ensureRpcSession/reconcile 时收敛为 interrupted。
+      return NextResponse.json({
+        running: false,
+        lastRun: getAgentRunStore().getLatestForSession(id) ?? null,
+      });
     }
 
     const state = await session.send({ type: "get_state" });

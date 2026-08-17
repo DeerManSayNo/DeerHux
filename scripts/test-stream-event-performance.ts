@@ -44,6 +44,31 @@ async function testStoreReplayCompression(): Promise<void> {
   ]);
 }
 
+async function testLargeCumulativeUpdateRetention(): Promise<void> {
+  const store = new EventStore({
+    maxGlobalBytes: 2 * 1024 * 1024,
+    maxSessionBytes: 2 * 1024 * 1024,
+    maxRunBytes: 2 * 1024 * 1024,
+  });
+  let content = "";
+  for (let index = 0; index < 10_000; index += 1) {
+    content += "x";
+    store.append({
+      sessionId: "large-session",
+      runId: "large-run",
+      turnId: "large-turn",
+      event: { type: "message_update", message: { role: "assistant", content } },
+    });
+  }
+  assert.equal(store.getSince("large-run").length, 1);
+  assert.equal(store.getSessionSince("large-session").length, 1);
+  assert.equal(store.getGlobalSince().events.length, 1);
+  const diagnostics = store.diagnostics();
+  assert.ok(diagnostics.globalRetainedBytes < 20_000);
+  assert.ok(diagnostics.sessionRetainedBytes < 20_000);
+  assert.ok(diagnostics.runRetainedBytes < 20_000);
+}
+
 async function testTransportCoalescingAndEndFlush(): Promise<void> {
   const delivered: TestEvent[] = [];
   const coalescer = new MessageUpdateCoalescer<TestEvent>((event) => delivered.push(event), 10);
@@ -64,5 +89,6 @@ async function testTransportCoalescingAndEndFlush(): Promise<void> {
 }
 
 await testStoreReplayCompression();
+await testLargeCumulativeUpdateRetention();
 await testTransportCoalescingAndEndFlush();
 console.log("stream event performance tests passed");

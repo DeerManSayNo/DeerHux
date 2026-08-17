@@ -3,7 +3,10 @@ import { addAllowedRoot } from "@/lib/file-access";
 import { ensureRpcSession, SessionNotFoundError } from "@/lib/agent-runtime/session-service";
 import { getAgentEventStore, type SequencedAgentEvent } from "@/lib/agent-runtime/event-store";
 import { MessageUpdateCoalescer } from "@/lib/agent-runtime/event-coalescer";
+import { openSseConnection, recordSlowConsumerDrop } from "@/lib/agent-runtime/transport-diagnostics";
+import { isSseConsumerOverBudget, sseByteStrategy } from "@/lib/agent-runtime/sse-backpressure";
 import { validateSessionId, SessionIdValidationError } from "@/lib/validate";
+import { SessionCapacityError } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +35,9 @@ export async function GET(
     if (error instanceof SessionNotFoundError) {
       return new Response("Session not found", { status: 404 });
     }
+    if (error instanceof SessionCapacityError) {
+      return new Response(error.message, { status: 503, headers: { "Retry-After": "5" } });
+    }
     console.error("[agent/events] start failed:", error);
     return new Response("Failed to start agent", { status: 500 });
   }
@@ -40,6 +46,7 @@ export async function GET(
     start(controller) {
       let closed = false;
       let lastActivity = Date.now();
+      const closeMetric = openSseConnection();
       let unsubscribe: () => void = () => {};
       const timers: {
         heartbeat?: ReturnType<typeof setInterval>;
@@ -55,13 +62,15 @@ export async function GET(
         if (timers.watchdog) clearInterval(timers.watchdog);
         coalescerRef.current?.cancel();
         unsubscribe();
+        closeMetric();
         req.signal?.removeEventListener("abort", cleanup);
         try { controller.close(); } catch { /* already closed */ }
       };
 
       const safeEncode = (data: unknown, seq?: number) => {
         if (closed) return;
-        if (controller.desiredSize !== null && controller.desiredSize <= -256) {
+        if (isSseConsumerOverBudget(controller.desiredSize)) {
+          recordSlowConsumerDrop();
           cleanup();
           return;
         }
@@ -102,14 +111,27 @@ export async function GET(
       safeEncode({ type: "connected", sessionId: id });
       if (closed) return;
       const afterSeq = resolveAfterSeq(req);
-      for (const stored of store.getSince(id, afterSeq)) {
-        coalescer.push(stored);
-        if (closed) return;
+      if (afterSeq !== undefined) {
+        const replay = store.getRunSince(id, afterSeq);
+        if (replay.snapshotRequired) {
+          safeEncode({ type: "snapshot_required", reason: replay.reason, latestSeq: replay.latestSeq });
+        } else {
+          for (const stored of replay.events) {
+            coalescer.push(stored);
+            if (closed) return;
+          }
+        }
+      } else {
+        for (const stored of store.getSince(id)) {
+          coalescer.push(stored);
+          if (closed) return;
+        }
       }
 
       timers.heartbeat = setInterval(() => {
         if (closed) return;
-        if (controller.desiredSize !== null && controller.desiredSize <= -256) {
+        if (isSseConsumerOverBudget(controller.desiredSize)) {
+          recordSlowConsumerDrop();
           cleanup();
           return;
         }
@@ -128,7 +150,7 @@ export async function GET(
       if (req.signal?.aborted) cleanup();
       else req.signal?.addEventListener("abort", cleanup, { once: true });
     },
-  });
+  }, sseByteStrategy());
 
   return new Response(stream, {
     headers: {

@@ -3,6 +3,7 @@ import path from "path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export type McpTransport = "stdio" | "sse" | "http";
+export type McpStdioFraming = "auto" | "newline" | "content-length";
 
 export interface McpServerConfig {
   id: string;
@@ -11,6 +12,7 @@ export interface McpServerConfig {
   transport: McpTransport;
   command?: string;
   args?: string[];
+  stdioFraming?: McpStdioFraming;
   url?: string;
   env?: Record<string, string>;
   description?: string;
@@ -37,6 +39,9 @@ function normalize(raw: Partial<McpServerConfig>): McpServerConfig | null {
     transport,
     command: raw.command ?? "",
     args: Array.isArray(raw.args) ? raw.args.filter((v): v is string => typeof v === "string") : [],
+    stdioFraming: raw.stdioFraming === "newline" || raw.stdioFraming === "content-length"
+      ? raw.stdioFraming
+      : "auto",
     url: raw.url ?? "",
     env: raw.env && typeof raw.env === "object" ? Object.fromEntries(Object.entries(raw.env).filter(([, v]) => typeof v === "string")) : {},
     description: raw.description ?? "",

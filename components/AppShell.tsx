@@ -146,7 +146,7 @@ export function AppShell() {
   const sidebarOpen = sidebarMode === "open";
   const SIDEBAR_MIN = 180;
   const SIDEBAR_MAX = 500;
-  const [sidebarWidth, setSidebarWidth] = useState<number>(260);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(280);
   const [isResizing, setIsResizing] = useState(false);
   const resizeStartX = useRef(0);
   const resizeStartWidth = useRef(260);

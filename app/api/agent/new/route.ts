@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { addAllowedRoot } from "@/lib/file-access";
-import { getCreatedSessionId, startRpcSession } from "@/lib/rpc-manager";
+import { getCreatedSessionId, startRpcSession, SessionCapacityError } from "@/lib/rpc-manager";
 import { ensureRpcSession } from "@/lib/agent-runtime/session-service";
 import { forceRefreshSessionList, listAllSessions, readSessionFileCached } from "@/lib/session-reader";
 import { normalizeAgentMode, type AgentMode } from "@/lib/agent-modes";
+import { isSessionPersistenceError } from "@/lib/session/errors";
 
 // POST /api/agent/new  body: { cwd: string; message?: string; ... }
 // Spawns a brand-new DeerHux session and sends the first prompt as a single round trip.
@@ -50,7 +51,15 @@ export async function POST(req: Request) {
     }
     const { session, realSessionId } = previouslyCreatedId
       ? { session: await ensureRpcSession(previouslyCreatedId), realSessionId: previouslyCreatedId }
-      : await startRpcSession(tempKey, "", cwd, toolNames, undefined, mode);
+      : await startRpcSession(
+          tempKey,
+          "",
+          cwd,
+          toolNames,
+          undefined,
+          mode,
+          provider && modelId ? { provider, modelId } : undefined,
+        );
     commandSignal.throwIfAborted();
 
     const clientMessageId = typeof promptCommand.clientMessageId === "string" ? promptCommand.clientMessageId.trim() : "";
@@ -65,12 +74,12 @@ export async function POST(req: Request) {
 
     addAllowedRoot(cwd);
 
-    if (mode) {
+    // 新会话的 mode/model 已作为 composition 输入原子应用；恢复已创建会话时才补发，
+    // 避免创建后 set_mode 覆盖用户显式选择的工具集。
+    if (previouslyCreatedId && mode) {
       await session.send({ type: "set_mode", mode });
     }
-
-    // Apply pre-selected model before sending the prompt
-    if (provider && modelId) {
+    if (previouslyCreatedId && provider && modelId) {
       await session.send({ type: "set_model", provider, modelId });
     }
 
@@ -91,6 +100,12 @@ export async function POST(req: Request) {
   } catch (error) {
     if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
       return NextResponse.json({ error: "会话启动超时，本次发送已安全取消" }, { status: 504 });
+    }
+    if (isSessionPersistenceError(error)) {
+      return NextResponse.json({ error: error.message, errorCode: error.code }, { status: 507 });
+    }
+    if (error instanceof SessionCapacityError) {
+      return NextResponse.json({ error: error.message }, { status: 503, headers: { "Retry-After": "5" } });
     }
     if (error instanceof Error) {
       if (error.message.startsWith("Model not found:")) {

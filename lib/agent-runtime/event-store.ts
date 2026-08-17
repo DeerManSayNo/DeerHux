@@ -13,14 +13,26 @@ const DEFAULT_MAX_EVENTS = 20_000;
 const DEFAULT_MAX_EVENTS_PER_SESSION = 2_000;
 const DEFAULT_MAX_EVENTS_PER_RUN = 1_000;
 const DEFAULT_TTL_MS = 30 * 60_000;
+const DEFAULT_MAX_GLOBAL_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_SESSION_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_RUN_BYTES = 8 * 1024 * 1024;
 
 interface EventBucket {
   events: SequencedAgentEvent[];
+  retainedBytes: number;
 }
 
 interface RunEventBucket extends EventBucket {
   nextSeq: number;
+  evictedThrough: number;
   listeners: Set<EventListener>;
+}
+
+export interface RunReplayResult {
+  events: SequencedAgentEvent[];
+  snapshotRequired: boolean;
+  reason: "ok" | "cursor_evicted" | "cursor_ahead" | "run_missing";
+  latestSeq: number;
 }
 
 export interface EventStoreOptions {
@@ -31,6 +43,9 @@ export interface EventStoreOptions {
   maxEvents?: number;
   maxEventsPerSession?: number;
   maxEventsPerRun?: number;
+  maxGlobalBytes?: number;
+  maxSessionBytes?: number;
+  maxRunBytes?: number;
   ttlMs?: number;
   globalTtlMs?: number;
   sessionTtlMs?: number;
@@ -40,6 +55,10 @@ export interface EventStoreOptions {
 
 function positiveOrDefault(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function isRunBucket(bucket: EventBucket): bucket is RunEventBucket {
+  return "listeners" in bucket && "evictedThrough" in bucket;
 }
 
 function createEpoch(now: number): string {
@@ -60,6 +79,9 @@ export class EventStore {
   private readonly maxEvents: number;
   private readonly maxEventsPerSession: number;
   private readonly maxEventsPerRun: number;
+  private readonly maxGlobalBytes: number;
+  private readonly maxSessionBytes: number;
+  private readonly maxRunBytes: number;
   private readonly globalTtlMs: number;
   private readonly sessionTtlMs: number;
   private readonly runTtlMs: number;
@@ -68,10 +90,13 @@ export class EventStore {
   private readonly runs = new Map<string, RunEventBucket>();
   private readonly sessions = new Map<string, EventBucket>();
   private readonly nextSessionSeq = new Map<string, number>();
+  private readonly sessionLastActivity = new Map<string, number>();
   private readonly allListeners = new Set<GlobalEventListener>();
   private globalEvents: SequencedAgentEvent[] = [];
+  private globalRetainedBytes = 0;
   private nextGlobalSeq = 1;
   private globalEvictedThrough = 0;
+  private readonly encodedBytes = new WeakMap<object, number>();
 
   constructor(options: EventStoreOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -85,6 +110,9 @@ export class EventStore {
       DEFAULT_MAX_EVENTS_PER_SESSION,
     );
     this.maxEventsPerRun = positiveOrDefault(options.maxEventsPerRun, DEFAULT_MAX_EVENTS_PER_RUN);
+    this.maxGlobalBytes = positiveOrDefault(options.maxGlobalBytes, DEFAULT_MAX_GLOBAL_BYTES);
+    this.maxSessionBytes = positiveOrDefault(options.maxSessionBytes, DEFAULT_MAX_SESSION_BYTES);
+    this.maxRunBytes = positiveOrDefault(options.maxRunBytes, DEFAULT_MAX_RUN_BYTES);
     const sharedTtl = positiveOrDefault(options.ttlMs, DEFAULT_TTL_MS);
     this.globalTtlMs = positiveOrDefault(options.globalTtlMs, sharedTtl);
     this.sessionTtlMs = positiveOrDefault(options.sessionTtlMs, sharedTtl);
@@ -104,6 +132,7 @@ export class EventStore {
     const globalSeq = this.nextGlobalSeq++;
     const sessionSeq = this.nextSessionSeq.get(input.sessionId) ?? 1;
     this.nextSessionSeq.set(input.sessionId, sessionSeq + 1);
+    this.sessionLastActivity.set(input.sessionId, createdAt);
 
     const next: SequencedAgentEvent = {
       seq: run.nextSeq++,
@@ -130,19 +159,34 @@ export class EventStore {
 
     let session = this.sessions.get(input.sessionId);
     if (!session) {
-      session = { events: [] };
+      session = { events: [], retainedBytes: 0 };
       this.sessions.set(input.sessionId, session);
     }
     this.storeInBucket(session, next, "sessionSeqStart");
     this.storeInGlobal(next);
 
-    this.trimBucket(run, this.maxEventsPerRun);
-    this.trimBucket(session, this.maxEventsPerSession);
+    this.trimBucket(run, this.maxEventsPerRun, this.maxRunBytes);
+    this.trimBucket(session, this.maxEventsPerSession, this.maxSessionBytes);
     this.trimGlobal();
 
     this.notify(run.listeners, next);
     this.notify(this.allListeners, next);
     return next;
+  }
+
+  getRunSince(runId: string, afterSeq: number): RunReplayResult {
+    this.prune(this.now());
+    const bucket = this.runs.get(runId);
+    if (!bucket) return { events: [], snapshotRequired: true, reason: "run_missing", latestSeq: 0 };
+    const latestSeq = bucket.nextSeq - 1;
+    if (afterSeq > latestSeq) return { events: [], snapshotRequired: true, reason: "cursor_ahead", latestSeq };
+    if (afterSeq < bucket.evictedThrough) return { events: [], snapshotRequired: true, reason: "cursor_evicted", latestSeq };
+    return {
+      events: bucket.events.filter((event) => event.seq > afterSeq),
+      snapshotRequired: false,
+      reason: "ok",
+      latestSeq,
+    };
   }
 
   /** Legacy run-scoped replay API. */
@@ -238,6 +282,32 @@ export class EventStore {
     return (this.nextSessionSeq.get(sessionId) ?? 1) - 1;
   }
 
+  diagnostics(): {
+    globalEvents: number;
+    globalRetainedBytes: number;
+    sessionBuckets: number;
+    sessionEvents: number;
+    sessionRetainedBytes: number;
+    runBuckets: number;
+    runEvents: number;
+    runRetainedBytes: number;
+    listeners: number;
+  } {
+    const sessionBuckets = [...this.sessions.values()];
+    const runBuckets = [...this.runs.values()];
+    return {
+      globalEvents: this.globalEvents.length,
+      globalRetainedBytes: this.globalRetainedBytes,
+      sessionBuckets: sessionBuckets.length,
+      sessionEvents: sessionBuckets.reduce((sum, bucket) => sum + bucket.events.length, 0),
+      sessionRetainedBytes: sessionBuckets.reduce((sum, bucket) => sum + bucket.retainedBytes, 0),
+      runBuckets: runBuckets.length,
+      runEvents: runBuckets.reduce((sum, bucket) => sum + bucket.events.length, 0),
+      runRetainedBytes: runBuckets.reduce((sum, bucket) => sum + bucket.retainedBytes, 0),
+      listeners: this.allListeners.size + runBuckets.reduce((sum, bucket) => sum + bucket.listeners.size, 0),
+    };
+  }
+
   clearRun(runId: string): void {
     // The application journal deliberately outlives a run/wrapper bucket.
     this.runs.delete(runId);
@@ -247,9 +317,11 @@ export class EventStore {
     this.runs.clear();
     this.sessions.clear();
     this.nextSessionSeq.clear();
+    this.sessionLastActivity.clear();
     // Global sequence stays monotonic for the lifetime of this epoch, even
     // when retained event payloads are explicitly cleared.
     this.globalEvents = [];
+    this.globalRetainedBytes = 0;
     this.globalEvictedThrough = this.nextGlobalSeq - 1;
     this.allListeners.clear();
   }
@@ -257,7 +329,7 @@ export class EventStore {
   private getOrCreateRun(runId: string): RunEventBucket {
     let bucket = this.runs.get(runId);
     if (!bucket) {
-      bucket = { events: [], nextSeq: 1, listeners: new Set() };
+      bucket = { events: [], retainedBytes: 0, nextSeq: 1, evictedThrough: 0, listeners: new Set() };
       this.runs.set(runId, bucket);
     }
     return bucket;
@@ -280,8 +352,10 @@ export class EventStore {
     if (this.canCoalesce(previous, next)) {
       next[rangeStart] = previous[rangeStart];
       bucket.events[bucket.events.length - 1] = next;
+      bucket.retainedBytes += this.eventBytes(next) - this.eventBytes(previous);
     } else {
       bucket.events.push(next);
+      bucket.retainedBytes += this.eventBytes(next);
     }
   }
 
@@ -290,40 +364,97 @@ export class EventStore {
     if (this.canCoalesce(previous, next)) {
       next.globalSeqStart = previous.globalSeqStart;
       this.globalEvents[this.globalEvents.length - 1] = next;
+      this.globalRetainedBytes += this.eventBytes(next) - this.eventBytes(previous);
     } else {
       this.globalEvents.push(next);
+      this.globalRetainedBytes += this.eventBytes(next);
     }
   }
 
   private prune(now: number): void {
     const globalCutoff = now - this.globalTtlMs;
     while (this.globalEvents[0]?.createdAt < globalCutoff) {
-      this.recordGlobalEviction(this.globalEvents.shift()!);
+      this.evictGlobalOldest();
     }
 
     this.pruneBuckets(this.sessions, now - this.sessionTtlMs);
     this.pruneBuckets(this.runs, now - this.runTtlMs);
+    const sequenceCutoff = now - Math.max(this.globalTtlMs, this.sessionTtlMs, this.runTtlMs);
+    for (const [sessionId, lastActivity] of this.sessionLastActivity) {
+      if (lastActivity < sequenceCutoff) {
+        this.sessionLastActivity.delete(sessionId);
+        this.nextSessionSeq.delete(sessionId);
+      }
+    }
   }
 
-  private pruneBuckets<T extends EventBucket>(buckets: Map<string, T>, cutoff: number): void {
+  private pruneBuckets<T extends EventBucket>(
+    buckets: Map<string, T>,
+    cutoff: number,
+  ): void {
     for (const [id, bucket] of buckets) {
-      while (bucket.events[0]?.createdAt < cutoff) bucket.events.shift();
+      while (bucket.events[0]?.createdAt < cutoff) this.evictBucketOldest(bucket);
       const listeners = "listeners" in bucket ? bucket.listeners : undefined;
       const hasListeners = listeners instanceof Set && listeners.size > 0;
       if (bucket.events.length === 0 && !hasListeners) buckets.delete(id);
     }
   }
 
-  private trimBucket(bucket: EventBucket, maxEvents: number): void {
-    if (bucket.events.length > maxEvents) {
-      bucket.events.splice(0, bucket.events.length - maxEvents);
+  private trimBucket(bucket: EventBucket, maxEvents: number, maxBytes: number): void {
+    while (bucket.events.length > maxEvents || bucket.retainedBytes > maxBytes) {
+      this.evictBucketOldest(bucket);
     }
   }
 
   private trimGlobal(): void {
-    while (this.globalEvents.length > this.maxEvents) {
-      this.recordGlobalEviction(this.globalEvents.shift()!);
+    while (this.globalEvents.length > this.maxEvents || this.globalRetainedBytes > this.maxGlobalBytes) {
+      this.evictGlobalOldest();
     }
+  }
+
+  private eventBytes(event: SequencedAgentEvent): number {
+    const cached = this.encodedBytes.get(event);
+    if (cached !== undefined) return cached;
+    // payload 与 event 指向同一对象，只计算一次；递归估算避免流式累计消息在每个
+    // token 上 JSON.stringify 出一份同体积临时字符串并触发 GC 峰值。
+    const bytes = this.estimateValueBytes(event, new WeakSet<object>(), "payload");
+    this.encodedBytes.set(event, bytes);
+    return bytes;
+  }
+
+  private estimateValueBytes(value: unknown, seen: WeakSet<object>, skippedKey?: string): number {
+    if (value === null || value === undefined) return 4;
+    if (typeof value === "string") return Buffer.byteLength(value, "utf8") + 2;
+    if (typeof value === "number") return 16;
+    if (typeof value === "boolean") return 5;
+    if (typeof value !== "object") return 8;
+    if (seen.has(value)) return 0;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      return 2 + value.reduce((sum, item) => sum + this.estimateValueBytes(item, seen) + 1, 0);
+    }
+    let bytes = 2;
+    for (const [key, item] of Object.entries(value)) {
+      if (key === skippedKey) continue;
+      bytes += Buffer.byteLength(key, "utf8") + 3 + this.estimateValueBytes(item, seen) + 1;
+    }
+    return bytes;
+  }
+
+  private evictBucketOldest(bucket: EventBucket): void {
+    const removed = bucket.events.shift();
+    if (!removed) return;
+    bucket.retainedBytes = Math.max(0, bucket.retainedBytes - this.eventBytes(removed));
+    if (isRunBucket(bucket)) {
+      bucket.evictedThrough = Math.max(bucket.evictedThrough, removed.seq);
+    }
+  }
+
+  private evictGlobalOldest(): void {
+    const removed = this.globalEvents.shift();
+    if (!removed) return;
+    this.globalRetainedBytes = Math.max(0, this.globalRetainedBytes - this.eventBytes(removed));
+    this.recordGlobalEviction(removed);
   }
 
   private recordGlobalEviction(event: SequencedAgentEvent): void {
@@ -355,7 +486,10 @@ declare global {
 }
 
 export function getAgentEventStore(): EventStore {
-  if (!globalThis.__deerhuxAgentEventStore) {
+  // Next HMR 会保留旧 class 实例；缺少新诊断/预算能力时重建 Journal，客户端通过
+  // epoch mismatch 走 snapshot 恢复，避免旧实例绕过字节上限。
+  if (!globalThis.__deerhuxAgentEventStore
+      || typeof globalThis.__deerhuxAgentEventStore.diagnostics !== "function") {
     globalThis.__deerhuxAgentEventStore = new EventStore();
   }
   return globalThis.__deerhuxAgentEventStore;

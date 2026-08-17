@@ -2,8 +2,7 @@
  * LoopEvent 事件模型（discriminated union）。
  *
  * 对应设计文档 §4.2。这是 DeerLoopEngine 对外发射的事件总类型，与 pi 的
- * `AgentSessionEvent` 结构兼容（DeerLoopEngine.subscribe 的 listener 按 Port
- * 契约接受 `AgentSessionEvent`，内部 emit 的 LoopEvent 对象经结构兼容可直接透传）。
+ * `AgentRuntimeEventBase` 结构兼容，DeerLoopEngine 可直接通过稳定事件 Port 透传。
  *
  * ★ M1 的 DeerLoopEngine 只 emit 标注「★M1」的事件：
  *   agent_start / message_start / message_update / message_end / agent_end
@@ -15,10 +14,10 @@
  */
 import type {
   AssistantMessage,
-  AssistantMessageEvent,
   Message,
 } from "@earendil-works/pi-ai";
 import type { LlmErrorCode, LlmSuggestedAction } from "../llm-gateway";
+import { SESSION_PERSISTENCE_ERROR_CODE } from "../session/errors.ts";
 
 /**
  * DeerLoopEngine 内部的消息类型别名。
@@ -60,8 +59,7 @@ export interface AgentToolResult<T = unknown> {
 /**
  * Loop 事件总类型（discriminated union）。
  *
- * 形状与 pi 的 AgentSessionEvent 对齐（agent_end 带 willRetry、message_update 带
- * assistantMessageEvent 等），保证 wrapper 的 handleAgentEvent 逐分支对映。
+ * 运行时 wire 事件只保留 DeerHux 消费者需要的字段，避免透传 Provider 累计快照。
  */
 export type LoopEvent =
   // ─── loop 级 ─────────────────────────────────────────────
@@ -70,11 +68,10 @@ export type LoopEvent =
   /** ★M1：一轮 prompt 结束。正常时 error 不带；失败时 error 为错误消息。 */
   | {
       type: "agent_end";
-      messages: AgentMessage[];
       willRetry: boolean;
       error?: string;
-      /** 标准化错误码（如 UPSTREAM_TTFT_TIMEOUT）。前端可据此触发模型切换恢复。 */
-      errorCode?: LlmErrorCode;
+      /** 标准化错误码（如 UPSTREAM_TTFT_TIMEOUT、SESSION_PERSIST_FAILED）。前端可据此触发恢复或展示确定错误。 */
+      errorCode?: LlmErrorCode | typeof SESSION_PERSISTENCE_ERROR_CODE;
     }
   | { type: "turn_start" }
   | {
@@ -89,7 +86,6 @@ export type LoopEvent =
   | {
       type: "message_update";
       message: AgentMessage;
-      assistantMessageEvent: AssistantMessageEvent;
     }
   /** ★M1：assistant 消息流结束，message 是最终 AssistantMessage（含 stopReason）。 */
   | { type: "message_end"; message: AgentMessage }
@@ -174,7 +170,6 @@ export function isAssistantMessageEvent(
   | {
       type: "message_update";
       message: AgentMessage;
-      assistantMessageEvent: AssistantMessageEvent;
     }
   | { type: "message_end"; message: AgentMessage } {
   return (

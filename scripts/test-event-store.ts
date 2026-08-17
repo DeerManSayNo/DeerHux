@@ -78,6 +78,73 @@ function testGlobalOrderingSessionSequencesAndSubscribeAll(): void {
   ]);
 }
 
+function testByteBudgetsAndCoalescingAccounting(): void {
+  const store = new EventStore({
+    epoch: "epoch-test",
+    maxGlobalEvents: 100,
+    maxEventsPerSession: 100,
+    maxEventsPerRun: 100,
+    maxGlobalBytes: 1_500,
+    maxSessionBytes: 900,
+    maxRunBytes: 700,
+  });
+  const payload = "x".repeat(350);
+  for (let index = 0; index < 8; index += 1) {
+    store.append({
+      sessionId: "session-a",
+      runId: "run-a",
+      turnId: "turn-a",
+      event: { type: index % 2 === 0 ? "message_start" : "message_end", payload, index },
+    });
+  }
+  assert.ok(store.getSince("run-a").length < 8);
+  assert.ok(store.getSessionSince("session-a").length < 8);
+  assert.ok(store.getGlobalSince().events.length < 8);
+
+  const coalesced = new EventStore({
+    epoch: "epoch-coalesce",
+    maxGlobalBytes: 1_200,
+    maxSessionBytes: 1_200,
+    maxRunBytes: 1_200,
+  });
+  for (let index = 0; index < 20; index += 1) {
+    coalesced.append({
+      sessionId: "session-a",
+      runId: "run-a",
+      turnId: "turn-a",
+      event: { type: "message_update", payload: "y".repeat(100 + index) },
+    });
+  }
+  assert.equal(coalesced.getSince("run-a").length, 1);
+  assert.equal(coalesced.getSessionSince("session-a").length, 1);
+  assert.equal(coalesced.getGlobalSince().events.length, 1);
+}
+
+function testOversizedEventStillDeliversLive(): void {
+  const store = new EventStore({
+    epoch: "epoch-oversized",
+    maxGlobalBytes: 500,
+    maxSessionBytes: 500,
+    maxRunBytes: 500,
+  });
+  const delivered: SequencedAgentEvent[] = [];
+  const unsubscribe = store.subscribeAll((event) => delivered.push(event));
+  const event = store.append({
+    sessionId: "session-large",
+    runId: "run-large",
+    event: { type: "message_end", payload: "z".repeat(5_000) },
+  });
+  unsubscribe();
+  assert.equal(delivered[0], event);
+  assert.deepEqual(store.getSince("run-large"), []);
+  assert.deepEqual(store.getSessionSince("session-large"), []);
+  assert.equal(store.getGlobalSince().events.length, 0);
+  const diagnostics = store.diagnostics();
+  assert.equal(diagnostics.globalRetainedBytes, 0);
+  assert.equal(diagnostics.sessionRetainedBytes, 0);
+  assert.equal(diagnostics.runRetainedBytes, 0);
+}
+
 function testResumeDecisionsAndIndependentRetention(): void {
   let now = 0;
   const store = new EventStore({
@@ -100,6 +167,10 @@ function testResumeDecisionsAndIndependentRetention(): void {
   append(store, "session-b", "message_end", "turn-1", "run-b");
 
   assert.deepEqual(store.getSince("run-a").map((event) => event.globalSeq), [3]);
+  assert.equal(store.getRunSince("run-a", 0).reason, "cursor_evicted");
+  assert.equal(store.getRunSince("run-a", 1).snapshotRequired, false);
+  assert.equal(store.getRunSince("run-a", 2).snapshotRequired, false);
+  assert.equal(store.getRunSince("run-a", 3).reason, "cursor_ahead");
   assert.deepEqual(store.getSessionSince("session-a").map((event) => event.globalSeq), [1, 3]);
   assert.deepEqual(store.getGlobalSince({ epoch: "epoch-test", globalSeq: 1 }).events
     .map((event) => event.globalSeq), [2, 3, 4]);
@@ -117,16 +188,20 @@ function testResumeDecisionsAndIndependentRetention(): void {
   // Run/session TTL expiry is independent: global history remains available.
   assert.deepEqual(store.getSince("run-a"), []);
   assert.deepEqual(store.getSessionSince("session-a"), []);
+  assert.equal(store.getLastSessionSeq("session-a"), 2, "global replay still references this session sequence");
   assert.deepEqual(store.getGlobalSince({ epoch: "epoch-test", globalSeq: 1 }).events
     .map((event) => event.globalSeq), [2, 3, 4]);
 
   now = 200;
   assert.equal(store.getGlobalSince({ epoch: "epoch-test", globalSeq: 4 }).snapshotRequired, false);
   assert.equal(store.getGlobalSince({ epoch: "epoch-test", globalSeq: 3 }).reason, "cursor_evicted");
+  assert.equal(store.getLastSessionSeq("session-a"), 0);
 }
 
 testLegacyApiAndJournalFields();
 testCoalescingPreservesHonestCursorRanges();
 testGlobalOrderingSessionSequencesAndSubscribeAll();
+testByteBudgetsAndCoalescingAccounting();
+testOversizedEventStillDeliversLive();
 testResumeDecisionsAndIndependentRetention();
 console.log("event store tests passed");

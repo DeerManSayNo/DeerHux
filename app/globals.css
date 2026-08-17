@@ -260,6 +260,127 @@ span.linenumber {
   to   { stroke-dashoffset: 0;  opacity: 1; }
 }
 
+/* Sidebar navigation — compact, quiet hierarchy inspired by desktop chat clients. */
+.sidebar-navigation {
+  --sidebar-gutter: 8px;
+}
+
+.sidebar-navigation-scroll {
+  scrollbar-gutter: stable;
+}
+
+.sidebar-section-heading {
+  min-height: 30px;
+  padding: 7px 18px 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+.sidebar-section-heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: nowrap;
+  min-width: 0;
+  padding-right: 10px;
+}
+
+.sidebar-section-heading-actions > :last-child {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.sidebar-section-title-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sidebar-section-title-button:hover {
+  color: var(--text);
+}
+
+.sidebar-heading-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.sidebar-heading-action:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.sidebar-heading-action:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.sidebar-empty-action {
+  height: 30px;
+  padding: 0 11px;
+  color: var(--text);
+  background: var(--bg-hover);
+  border: 0;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sidebar-empty-action:hover {
+  background: var(--bg-selected);
+}
+
+.sidebar-more-button {
+  display: flex;
+  align-items: center;
+  width: calc(100% - 16px);
+  height: 30px;
+  margin: 1px 8px 0;
+  padding: 0 10px 0 40px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-more-button:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.sidebar-section-title-button:focus-visible,
+.sidebar-heading-action:focus-visible,
+.sidebar-more-button:focus-visible,
+.sidebar-session-item:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  outline-offset: -2px;
+}
+
 /* Desktop sidebar: animate width */
 @media (min-width: 641px) {
   .sidebar-overlay-backdrop {
@@ -289,8 +410,8 @@ span.linenumber {
   }
   /* keep inner content at fixed width so it doesn't reflow during animation */
   .sidebar-container:not(.sidebar-compact) > * {
-    width: 260px;
-    min-width: 260px;
+    width: 100%;
+    min-width: 0;
   }
 }
 

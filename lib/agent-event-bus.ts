@@ -2,11 +2,10 @@
  * Simple typed event emitter for agent events.
  * Used to decouple the SSE event source from the log panel.
  */
+import type { AgentRuntimeEventBase } from "./agent-runtime/types";
 
-export interface AgentEvent {
-  type: string;
-  [key: string]: unknown;
-}
+/** 兼容名称；事件基础契约统一由 agent-runtime/types 提供。 */
+export type AgentEvent = AgentRuntimeEventBase;
 
 type Listener = (event: AgentEvent) => void;
 

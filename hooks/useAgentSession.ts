@@ -183,7 +183,54 @@ export interface AgentStatePayload {
     systemPrompt?: string;
     thinkingLevel?: string;
     agentMode?: AgentMode;
+    lastRun?: LastRunInfo | null;
   };
+  /** Wrapper 不在内存时（进程重启/回收）由 /state 端点直接返回。 */
+  lastRun?: LastRunInfo | null;
+}
+
+/** 持久化 Agent Run 的对外摘要（agent-runtime/run-types.ts 的 JSON 投影）。 */
+export interface LastRunInfo {
+  runId: string;
+  sessionId: string;
+  turnId: string;
+  status: string;
+  startedAt?: string;
+  endedAt?: string;
+  updatedAt: string;
+  errorCode?: string;
+  error?: string;
+  requestKind?: string;
+}
+
+/**
+ * 将 agent_end 的 errorCode / lastRun.status 翻译为用户可读文案。
+ * 返回 null 表示无需专门提示（沿用通用错误文案）。
+ */
+export function describeTerminalRunStatus(source: {
+  errorCode?: string;
+  lastRun?: LastRunInfo | null;
+}): { title: string; detail?: string } | null {
+  if (source.errorCode === "SESSION_PERSIST_FAILED"
+    || source.lastRun?.errorCode === "SESSION_PERSIST_FAILED") {
+    return {
+      title: "会话写入失败，本次回复可能未完整保存",
+      detail: "磁盘写入异常（如空间不足或权限问题），Agent 已安全停止以避免产生无法恢复的历史。请检查磁盘后重试；已保存的早期对话不受影响。",
+    };
+  }
+  if (source.lastRun?.status === "interrupted") {
+    return {
+      title: "上次任务因服务重启而中断",
+      detail: "Agent 运行时在任务执行中重启，该回合已标记为中断。已保存的对话历史完整，可基于当前上下文发送「继续」恢复任务。",
+    };
+  }
+  if (source.lastRun?.status === "failed" && source.lastRun.errorCode) {
+    return {
+      title: "上次任务执行失败",
+      detail: source.lastRun.error ?? undefined,
+    };
+  }
+  return null;
 }
 
 type SessionDataWithAgentState = SessionData & { agentState?: AgentStatePayload };
@@ -277,7 +324,6 @@ export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" 
 
 export interface ChatInputHandle {
   insertText: (text: string) => void;
-  insertIfEmpty: (content: string) => void;
   addImages: (files: File[]) => void;
   addReference: (path: string) => void;
   clearInput?: () => void;
@@ -553,11 +599,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // reported older messages were truncated, this lets the UI offer a
   // "load full history" affordance.
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const fullHistoryLoadedRef = useRef(false);
+  const polledSessionVersionRef = useRef<{ sessionId: string; mtimeMs: number; size: number } | null>(null);
   const [loadingFullHistory, setLoadingFullHistory] = useState(false);
+  const loadingFullHistoryRef = useRef(false);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [watchdogInfo, setWatchdogInfo] = useState<WatchdogInfo | null>(null);
   const [lastModelError, setLastModelError] = useState<string | null>(null);
   const lastModelErrorRef = useRef<string | null>(null);
+  // 终态说明（SESSION_PERSIST_FAILED / interrupted）：与通用模型错误分开，
+  // 用专门横幅展示并可手动关闭。
+  const [terminalNotice, setTerminalNotice] = useState<{ title: string; detail?: string } | null>(null);
+  const terminalNoticeRef = useRef<{ title: string; detail?: string } | null>(null);
+  const setTerminalNoticeState = useCallback((notice: { title: string; detail?: string } | null) => {
+    terminalNoticeRef.current = notice;
+    setTerminalNotice(notice);
+  }, []);
+  const clearTerminalNotice = useCallback(() => {
+    terminalNoticeRef.current = null;
+    setTerminalNotice(null);
+  }, []);
   const [modelsConfigVersion, bumpModelsConfigVersion] = useReducer((v: number) => v + 1, 0);
 
   // Auto-recovery mode persisted in localStorage
@@ -597,6 +658,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const pendingScrollToUserRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const messagesRef = useRef<AgentMessage[]>([]);
   const entryIdsRef = useRef<string[]>([]);
   const lastAgentEventAtRef = useRef(Date.now());
   const lastContentChangedAtRef = useRef(Date.now());
@@ -661,6 +723,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setStallLevel(null);
     lastModelErrorRef.current = null;
     setLastModelError(null);
+    if (terminalNoticeRef.current) clearTerminalNotice();
     receivedAssistantMessageRef.current = false;
     awaitingFinalReplyAfterToolsRef.current = false;
     awaitingAgentStartRef.current = false;
@@ -704,7 +767,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const loadSessionInflightRef = useRef<{
     sid: string;
     messageEpoch: number;
-    promise: Promise<AgentStatePayload | null>;
+    promise: Promise<{ agentState: AgentStatePayload | null; messagesApplied: boolean } | null>;
   } | null>(null);
 
   const applySessionSnapshot = useCallback((
@@ -802,7 +865,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const d = await res.json() as SessionDataWithAgentState;
         if (sid !== sessionIdRef.current) return null;
         const requestIsLatest = snapshotRequestSeq === messageSnapshotRequestSeqRef.current;
-        if (!requestIsLatest) return d.agentState ?? null;
+        if (!requestIsLatest) return { agentState: d.agentState ?? null, messagesApplied: false };
         const messagesAreCurrent = (
           messageEpochAtStart === messageMutationEpochRef.current
           && !agentRunningRef.current
@@ -813,7 +876,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!d.agentState?.state?.thinkingLevel && d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
           setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
         }
-        return d.agentState ?? null;
+        return { agentState: d.agentState ?? null, messagesApplied: messagesAreCurrent };
       } catch (e) {
         // Swallow aborts caused by a session switch — they're expected cleanup,
         // not real failures worth warning about.
@@ -854,6 +917,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * the UI can offer "load full history" via {@link loadFullHistory}.
    */
   const loadRecentMessages = useCallback(async (sid: string, showLoading = false) => {
+    if (!showLoading && loadingFullHistoryRef.current) return;
     const snapshotRequestSeq = ++messageSnapshotRequestSeqRef.current;
     const messageEpochAtStart = messageMutationEpochRef.current;
     const controller = new AbortController();
@@ -897,6 +961,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         messageEpochAtStart === messageMutationEpochRef.current
         && !agentRunningRef.current
       );
+      // 已加载完整历史时，以 recent 窗口首个 entryId 为锚点替换尾部，
+      // 保留旧消息又同步最终 Assistant/ToolResult；锚点缺失时仅更新元数据。
+      const recentAnchor = d.entryIds[0];
+      const anchorIndex = fullHistoryLoadedRef.current && recentAnchor
+        ? entryIdsRef.current.indexOf(recentAnchor)
+        : -1;
+      const mergedMessages = fullHistoryLoadedRef.current && anchorIndex >= 0
+        ? [...messagesRef.current.slice(0, anchorIndex), ...d.messages]
+        : d.messages;
+      const mergedEntryIds = fullHistoryLoadedRef.current && anchorIndex >= 0
+        ? [...entryIdsRef.current.slice(0, anchorIndex), ...d.entryIds]
+        : d.entryIds;
+      const historyWasRebased = fullHistoryLoadedRef.current && anchorIndex < 0;
+      const applyRecentMessages = messagesAreCurrent;
+      if (applyRecentMessages && historyWasRebased) fullHistoryLoadedRef.current = false;
       // Shape into SessionData so applySessionSnapshot handles normalization
       // and pending-message reconciliation identically.
       applySessionSnapshot({
@@ -905,15 +984,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         filePath: "",
         leafId: null,
         context: {
-          messages: d.messages,
-          entryIds: d.entryIds,
+          messages: mergedMessages,
+          entryIds: mergedEntryIds,
           thinkingLevel: d.thinkingLevel,
           model: d.model,
           roleId: d.roleId ?? null,
           agentMode: d.agentMode,
         },
-      }, messagesAreCurrent);
-      setHasOlderMessages(Boolean(d.page?.hasMoreBefore));
+      }, applyRecentMessages);
+      if (applyRecentMessages && (!fullHistoryLoadedRef.current || historyWasRebased)) {
+        setHasOlderMessages(Boolean(d.page?.hasMoreBefore));
+      }
       setError(null);
     } catch (e) {
       if (sid === sessionIdRef.current) {
@@ -935,11 +1016,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * success.
    */
   const loadFullHistory = useCallback(async (sid: string) => {
+    loadingFullHistoryRef.current = true;
     setLoadingFullHistory(true);
     try {
-      await loadSession(sid, false, false);
-      setHasOlderMessages(false);
+      const result = await loadSession(sid, false, false);
+      if (result?.messagesApplied) {
+        fullHistoryLoadedRef.current = true;
+        setHasOlderMessages(false);
+      }
     } finally {
+      loadingFullHistoryRef.current = false;
       setLoadingFullHistory(false);
     }
   }, [loadSession]);
@@ -997,7 +1083,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (agentState.state.agentMode !== undefined) setAgentMode(normalizeAgentMode(agentState.state.agentMode));
     }
-  }, [loadTools]);
+    // 会话非运行态时，检查持久化 Run 事实：interrupted / SESSION_PERSIST_FAILED
+    // 需要向用户解释「上次回合到底怎么结束的」，而不是静默当作空闲。
+    if (!runtimeRunning || terminalEndAlreadySeen) {
+      const lastRun = agentState?.lastRun ?? agentState?.state?.lastRun ?? null;
+      const notice = lastRun
+        ? describeTerminalRunStatus({ lastRun })
+        : null;
+      if (notice) {
+        setTerminalNoticeState(notice);
+      }
+    }
+  }, [loadTools, setTerminalNoticeState]);
 
   /**
    * Fetch ONLY the live runtime state for a session via the dedicated state
@@ -1118,6 +1215,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // both snapshot and runtime state have been applied successfully.
         if (sessionIdRef.current !== sid) throw new Error("Session changed during snapshot recovery");
         const controller = new AbortController();
+        const messageEpochAtStart = messageMutationEpochRef.current;
         const timeout = setTimeout(() => controller.abort(), 15_000);
         try {
           const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}?includeState`, {
@@ -1127,7 +1225,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!response.ok) throw new Error(`Snapshot recovery HTTP ${response.status}`);
           const snapshot = await response.json() as SessionDataWithAgentState;
           if (sessionIdRef.current !== sid) throw new Error("Session changed during snapshot recovery");
-          applySessionSnapshot(snapshot, true);
+          const messagesAreCurrent = (
+            messageEpochAtStart === messageMutationEpochRef.current
+            && !agentRunningRef.current
+          );
+          applySessionSnapshot(snapshot, messagesAreCurrent);
           applyAgentStatePayload(snapshot.agentState ?? null, sid);
         } finally {
           clearTimeout(timeout);
@@ -1314,8 +1416,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         stallRecoveriesRef.current = 0;
         setStallLevel(null);
         watchdogStaleRecoveriesRef.current = 0;
-        const eventData = event as { willRetry?: boolean; error?: string };
+        const eventData = event as { willRetry?: boolean; error?: string; errorCode?: string };
         const willRetry = eventData.willRetry ?? false;
+        // 持久化失败：用专门文案替代通用「模型调用失败」——这不是模型问题，
+        // 重试前需要用户检查磁盘/权限。
+        const persistNotice = describeTerminalRunStatus({ errorCode: eventData.errorCode });
+        if (persistNotice) {
+          setTerminalNoticeState(persistNotice);
+        }
         // agent_end carries the backend's most complete terminal diagnosis.
         // Always prefer it over an earlier generic message_end error shell.
         if (eventData.error) {
@@ -1350,9 +1458,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (willRetry) {
           // Keep running — auto_retry_end or the next agent_start will update state.
           // Don't clear retryInfo either; auto_retry_start will set it shortly.
-          // Still reload session to capture partial output so far.
+          // 只刷新最近消息，避免长会话在每次重试时传输完整历史。
           if (sessionIdRef.current) {
-            loadSession(sessionIdRef.current);
+            void loadRecentMessages(sessionIdRef.current, false);
           }
           break;
         }
@@ -1378,12 +1486,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // Refresh messages (history) and live agent state independently.
           // History via the lightweight path; runtime state via the dedicated
           // /state endpoint so neither blocks the other (TODO 2).
-          loadSession(sessionIdRef.current, false, false).catch(() => {});
+          void loadRecentMessages(sessionIdRef.current, false);
           void loadSessionState(sessionIdRef.current);
         }
-        // Reload session even on error to capture any partial output
+        // 错误回合也只刷新最近窗口；完整历史由用户显式加载。
         if (sessionIdRef.current && endedWithError) {
-          loadSession(sessionIdRef.current);
+          void loadRecentMessages(sessionIdRef.current, false);
         }
         const changedFiles = [...changedFilesRef.current];
         changedFilesRef.current.clear();
@@ -1581,6 +1689,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "auto_retry_end": {
         const retryEndEvent = event as { success?: boolean; finalError?: string };
         if (retryEndEvent.success === false) {
+          const retryWasAborted = retryEndEvent.finalError === "aborted" || stopRequestedRef.current;
           const currentRetryInfo = retryInfoRef.current;
           const retrySummary = currentRetryInfo
             ? `${currentRetryInfo.attempt}/${currentRetryInfo.maxAttempts}`
@@ -1603,6 +1712,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const sid = sessionIdRef.current;
           if (
             sid
+            && !retryWasAborted
             && autoRecoveryMode !== "off"
             && !retryExhaustedRecoveryUsedRef.current
             && !autoContinueSentRef.current
@@ -1675,7 +1785,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setCompactionProgress((prev) => (prev?.message === "压缩已中止" ? null : prev));
           }, 1500);
         } else {
-          if (sessionIdRef.current) loadSession(sessionIdRef.current);
+          if (sessionIdRef.current) {
+            void loadRecentMessages(sessionIdRef.current, false);
+            void loadSessionState(sessionIdRef.current);
+          }
           // done 文案通常已由 compaction_progress 推送；若没有则补一条。
           setCompactionProgress((prev) => prev?.phase === "done"
             ? prev
@@ -1690,7 +1803,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
     }
-  }, [loadSession, onAgentEnd, autoRecoveryMode, startSubagentLiveRefresh, finishSubagentLiveRefresh, stopSubagentLiveRefresh, loadSessionState]);
+  }, [loadSession, loadRecentMessages, onAgentEnd, autoRecoveryMode, startSubagentLiveRefresh, finishSubagentLiveRefresh, stopSubagentLiveRefresh, loadSessionState, setTerminalNoticeState]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[], skill?: SkillReference) => {
@@ -2791,6 +2904,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfoRef.current = null;
     setRetryInfo(null);
     setContextUsage(null);
+    fullHistoryLoadedRef.current = false;
+    polledSessionVersionRef.current = null;
+    setHasOlderMessages(false);
     setSystemPrompt(null);
     setForkingEntryId(null);
     setIsCompacting(false);
@@ -2854,8 +2970,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [cancelPendingMessageUpdate, connectEvents, loadRecentMessages, loadSession, loadSessionState, loadTools, activeTabId, newSessionCwd, activeSessionId, stopSubagentLiveRefresh]);
 
   useEffect(() => {
+    messagesRef.current = messages;
     entryIdsRef.current = entryIds;
-  }, [entryIds]);
+  }, [messages, entryIds]);
 
   // 兜底同步：远程连接（微信 Bot 等）可能从服务端直接写入当前 session，
   // 在某些 dev/runtime 场景下 SSE 事件不会可靠到达浏览器。这里对当前打开的
@@ -2864,7 +2981,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!activeSessionId || newSessionCwd) return;
     let stopped = false;
     let inFlight = false;
-    let tickController: AbortController | null = null;
 
     const tick = async () => {
       if (stopped || inFlight || sessionIdRef.current !== activeSessionId) return;
@@ -2878,34 +2994,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
 
       inFlight = true;
-      tickController = new AbortController();
-      // Honour session-level abort too — covers tab switches that happen
-      // while the fetch is in flight.
-      const sessionSignal = sessionAbortRef.current?.signal;
-      const onSessionAbort = () => tickController?.abort();
-      if (sessionSignal) {
-        if (sessionSignal.aborted) tickController.abort();
-        else sessionSignal.addEventListener("abort", onSessionAbort, { once: true });
-      }
-      // Bound the request: an unbounded polling fetch on a slow backend is
-      // exactly what produces the "loadSession background refresh failed"
-      // cascade of warnings.
-      const timeout = setTimeout(() => tickController?.abort(), 10_000);
       try {
-        const url = `/api/sessions/${encodeURIComponent(activeSessionId)}${isRunning ? "?includeState" : ""}`;
-        const res = await fetch(url, {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/version`, {
           cache: "no-store",
-          signal: tickController.signal,
+          signal: AbortSignal.any([sessionAbortRef.current?.signal ?? new AbortController().signal, AbortSignal.timeout(10_000)]),
         });
-        if (!res.ok) return;
-        const d = await res.json() as SessionDataWithAgentState;
-        if (stopped || sessionIdRef.current !== activeSessionId) return;
-        applySessionSnapshot(d);
+        if (!response.ok) return;
+        const version = await response.json() as { mtimeMs: number; size: number };
+        const previous = polledSessionVersionRef.current;
+        const changed = !previous || previous.sessionId !== activeSessionId
+          || previous.mtimeMs !== version.mtimeMs || previous.size !== version.size;
+        polledSessionVersionRef.current = { sessionId: activeSessionId, ...version };
+        // 首次只建立基线；文件实际变化后才解析 Context。
+        if (changed) await loadRecentMessages(activeSessionId, false);
+        if (isRunning && !stopped && sessionIdRef.current === activeSessionId) {
+          await loadSessionState(activeSessionId);
+        }
       } catch {
-        // ignore transient polling errors (incl. abort on session switch)
+        // ignore transient polling failures and session-switch aborts
       } finally {
-        clearTimeout(timeout);
-        if (sessionSignal) sessionSignal.removeEventListener("abort", onSessionAbort);
         inFlight = false;
       }
     };
@@ -2917,9 +3024,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => {
       stopped = true;
       window.clearInterval(timer);
-      tickController?.abort();
     };
-  }, [activeSessionId, applySessionSnapshot, newSessionCwd]);
+  }, [activeSessionId, loadRecentMessages, loadSessionState, newSessionCwd]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -2991,7 +3097,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     data, loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, systemPrompt: systemPrompt ?? lastSystemPromptRef.current, forkingEntryId,
-    isCompacting, compactionProgress, clearCompactionProgress: () => setCompactionProgress(null), compactError, lastModelError, currentModel, displayModel, sessionStats,
+    isCompacting, compactionProgress, clearCompactionProgress: () => setCompactionProgress(null), compactError, lastModelError, terminalNotice, clearTerminalNotice, currentModel, displayModel, sessionStats,
     agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,
     subagentEnabled,
     isNew,

@@ -445,7 +445,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     loading, error, data, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId, watchdogInfo,
-    isCompacting, compactionProgress, clearCompactionProgress, compactError, lastModelError, displayModel: displayModelValue, sessionStats,
+    isCompacting, compactionProgress, clearCompactionProgress, compactError, lastModelError, terminalNotice, clearTerminalNotice, displayModel: displayModelValue, sessionStats,
     agentPhase,
     isNew,
     stallLevel, autoRecoveryMode,
@@ -1162,6 +1162,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         compactError={compactError || compactionDialogError}
         lastModelError={lastModelError}
         onClearModelError={() => setLastModelError(null)}
+        terminalNotice={terminalNotice}
+        onClearTerminalNotice={clearTerminalNotice}
         agentMode={agentMode}
         onAgentModeChange={session || isNew ? handleAgentModeChange : undefined}
         planReady={planReady}

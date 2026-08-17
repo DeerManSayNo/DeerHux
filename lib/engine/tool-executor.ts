@@ -26,16 +26,23 @@ import type { ExtensionContext } from "./extension-context.ts";
 import type { AgentToolResult, LoopEvent } from "./loop-event.ts";
 import type { AnyToolDefinition, ToolRegistry } from "./tool-registry.ts";
 import {
+  ToolExecutionPipeline,
+  type ToolExecutionPipelineOptions,
+  type ToolPipelineOutput,
+} from "./tool-execution-pipeline.ts";
+import {
   MAX_SUBAGENT_TOOL_CALLS_PER_TURN,
   SUBAGENT_TOOL_NAME,
   type SubagentConcurrencyRejectionDetails,
   makeSubagentToolCallLimitDetails,
 } from "../parallel-agent/subagent-concurrency.ts";
-import { spillLargeText } from "./context-archive.ts";
+import { buildPreview, spillLargeText, SPILL_PREVIEW_MAX_BYTES, SPILL_PREVIEW_MAX_LINES } from "./context-archive.ts";
 
 export interface ToolExecutorOptions {
   /** 用于长工具输出 spill；缺失时跳过落盘。 */
   sessionId?: string;
+  /** 可选策略流水线；未配置时保持原有直接执行行为。 */
+  pipeline?: ToolExecutionPipeline | ToolExecutionPipelineOptions;
 }
 
 /**
@@ -63,6 +70,12 @@ export interface ToolCallLimitState {
 
 export interface ToolExecuteBatchOptions {
   callLimits?: ToolCallLimitState[];
+  /** 回合准入时冻结的可用工具名，防止 set_tools/MCP reload 改写运行中回合。 */
+  activeToolNames?: readonly string[];
+  /** 回合开始时冻结的工具定义，防止 MCP 热替换移除运行中回合的工具。 */
+  tools?: ReadonlyMap<string, AnyToolDefinition>;
+  /** 回合开始时冻结的执行模式。 */
+  executionModes?: ReadonlyMap<string, "parallel" | "sequential">;
 }
 
 /**
@@ -76,10 +89,14 @@ export class ToolExecutor {
   /** 绑定的工具注册表（查 executionMode / 取工具定义）。 */
   private readonly registry: ToolRegistry;
   private readonly sessionId?: string;
+  private readonly pipeline: ToolExecutionPipeline;
 
   constructor(registry: ToolRegistry, options?: ToolExecutorOptions) {
     this.registry = registry;
     this.sessionId = options?.sessionId;
+    this.pipeline = options?.pipeline instanceof ToolExecutionPipeline
+      ? options.pipeline
+      : new ToolExecutionPipeline(options?.pipeline);
   }
 
   /**
@@ -103,6 +120,9 @@ export class ToolExecutor {
     // 结果数组（按源序占位，最后返回）。
     const outputs: ToolExecOutput[] = new Array(calls.length);
     const rejectedCalls = this.collectRejectedLimitedToolCalls(calls, options);
+    const activeToolNames = options?.activeToolNames ? new Set(options.activeToolNames) : undefined;
+    const tools = options?.tools;
+    const executionModes = options?.executionModes;
 
     // ① 按源序切 segment：连续 parallel 并发；sequential 单独阻塞。
     let parallelSegment: number[] = [];
@@ -110,12 +130,12 @@ export class ToolExecutor {
       if (parallelSegment.length === 0) return;
       if (parallelSegment.length === 1) {
         const idx = parallelSegment[0];
-        outputs[idx] = await this.executeLimitedAware(calls[idx], idx, signal, ctx, onToolEvent, rejectedCalls);
+        outputs[idx] = await this.executeLimitedAware(calls[idx], idx, signal, ctx, onToolEvent, rejectedCalls, activeToolNames, tools);
       } else {
         const segment = parallelSegment;
         const settled = await Promise.all(
           segment.map((idx) =>
-            this.executeLimitedAware(calls[idx], idx, signal, ctx, onToolEvent, rejectedCalls),
+            this.executeLimitedAware(calls[idx], idx, signal, ctx, onToolEvent, rejectedCalls, activeToolNames, tools),
           ),
         );
         for (let k = 0; k < segment.length; k++) {
@@ -126,10 +146,10 @@ export class ToolExecutor {
     };
 
     for (let i = 0; i < calls.length; i++) {
-      const mode = this.registry.getExecutionMode(calls[i].name);
+      const mode = executionModes?.get(calls[i].name) ?? this.registry.getExecutionMode(calls[i].name);
       if (mode === "sequential") {
         await flushParallelSegment();
-        outputs[i] = await this.executeLimitedAware(calls[i], i, signal, ctx, onToolEvent, rejectedCalls);
+        outputs[i] = await this.executeLimitedAware(calls[i], i, signal, ctx, onToolEvent, rejectedCalls, activeToolNames, tools);
       } else {
         parallelSegment.push(i);
       }
@@ -154,9 +174,11 @@ export class ToolExecutor {
     signal: AbortSignal,
     ctx: ExtensionContext,
     onToolEvent: ToolEventEmitter,
+    activeToolNames?: ReadonlySet<string>,
+    tools?: ReadonlyMap<string, AnyToolDefinition>,
   ): Promise<ToolExecOutput> {
     const { id: toolCallId, name: toolName, arguments: rawArgs } = call;
-    const tool = this.registry.get(toolName);
+    const tool = tools?.get(toolName) ?? this.registry.get(toolName);
 
     // emit start（即使工具不存在也 emit，便于前端显示「调用了但没工具」）。
     onToolEvent({
@@ -166,16 +188,26 @@ export class ToolExecutor {
       args: rawArgs,
     });
 
-    // 工具不存在：合成错误结果。
-    if (!tool) {
-      const errMsg = `Tool "${toolName}" is not registered`;
-      const output = this.makeErrorOutput(errMsg);
-      this.emitEnd(onToolEvent, toolCallId, toolName, output);
-      return output;
+    // 准备参数：优先 prepareArguments，兜底处理字符串 args。解析失败必须 fail-closed，
+    // 不能把未经验证的原始参数继续交给工具。
+    let params: unknown = rawArgs;
+    let argumentError: string | undefined;
+    if (tool) {
+      try {
+        params = this.resolveArguments(tool, rawArgs);
+      } catch (error) {
+        argumentError = error instanceof Error ? error.message : String(error);
+      }
     }
-
-    // 准备参数：优先 prepareArguments，兜底处理「字符串 args」。
-    const params = this.resolveArguments(tool, rawArgs);
+    const executionContext = {
+      call,
+      toolCallId,
+      toolName,
+      rawArguments: rawArgs,
+      arguments: params,
+      signal,
+      extensionContext: ctx,
+    };
 
     // onUpdate 回调：把工具的流式 partial 转成 tool_execution_update 事件。
     const onUpdate = (partialResult: AgentToolResult): void => {
@@ -188,29 +220,40 @@ export class ToolExecutor {
       });
     };
 
-    try {
-      const result = await tool.execute(toolCallId, params, signal, onUpdate, ctx);
-      // pi 的 AgentToolResult 类型不保证有 changedFiles（那是 DeerHux 的扩展），
-      // 但内置 bash/edit/write 工具会在运行时塞这个字段。用类型断言安全提取。
-      const changedFiles = (result as { changedFiles?: string[] })?.changedFiles;
-      const spilledResult = this.spillResultContent(result, toolCallId, toolName);
-      const output: ToolExecOutput = {
-        result: spilledResult,
-        isError: false,
-        changedFiles,
-      };
-      this.emitEnd(onToolEvent, toolCallId, toolName, output);
-      return output;
-    } catch (err) {
-      // 错误隔离：不向上抛，转成 isError 结果。
-      const isAborted = signal.aborted || this.isAbortError(err);
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const output = this.makeErrorOutput(
-        isAborted ? `Tool "${toolName}" aborted: ${errMsg}` : errMsg,
-      );
-      this.emitEnd(onToolEvent, toolCallId, toolName, output);
-      return output;
-    }
+    const output = await this.pipeline.execute(executionContext, async (): Promise<ToolPipelineOutput> => {
+      if (!tool) {
+        return this.makeErrorOutput(`Tool "${toolName}" is not registered`);
+      }
+      if (!activeToolNames?.has(toolName) && activeToolNames !== undefined) {
+        return this.makeErrorOutput(`Tool "${toolName}" is not active for this turn`);
+      }
+      if (!this.registry.isActive(toolName) && activeToolNames === undefined) {
+        return this.makeErrorOutput(`Tool "${toolName}" is not active for this session`);
+      }
+      if (argumentError) {
+        return this.makeErrorOutput(`Tool "${toolName}" argument preparation failed: ${argumentError}`);
+      }
+      try {
+        const result = await tool.execute(toolCallId, params, signal, onUpdate, ctx);
+        // pi 的 AgentToolResult 类型不保证有 changedFiles（那是 DeerHux 的扩展），
+        // 但内置 bash/edit/write 工具会在运行时塞这个字段。用类型断言安全提取。
+        const changedFiles = (result as { changedFiles?: string[] })?.changedFiles;
+        return {
+          result: this.spillResultContent(result, toolCallId, toolName),
+          isError: false,
+          changedFiles,
+        };
+      } catch (err) {
+        // 错误隔离：不向上抛，转成 isError 结果。
+        const isAborted = signal.aborted || this.isAbortError(err);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        return this.makeErrorOutput(
+          isAborted ? `Tool "${toolName}" aborted: ${errMsg}` : errMsg,
+        );
+      }
+    });
+    this.emitEnd(onToolEvent, toolCallId, toolName, output);
+    return output;
   }
 
   // -------------------------------------------------------------------------
@@ -251,12 +294,14 @@ export class ToolExecutor {
     ctx: ExtensionContext,
     onToolEvent: ToolEventEmitter,
     rejectedCalls: Map<number, { message: string; details?: SubagentConcurrencyRejectionDetails }>,
+    activeToolNames?: ReadonlySet<string>,
+    tools?: ReadonlyMap<string, AnyToolDefinition>,
   ): Promise<ToolExecOutput> {
     const rejection = rejectedCalls.get(index);
     if (rejection) {
       return this.executeRejectedToolCall(call, rejection, onToolEvent);
     }
-    return this.executeOne(call, signal, ctx, onToolEvent);
+    return this.executeOne(call, signal, ctx, onToolEvent, activeToolNames, tools);
   }
 
   private async executeRejectedToolCall(
@@ -294,11 +339,7 @@ export class ToolExecutor {
     raw: unknown,
   ): unknown {
     if (typeof tool.prepareArguments === "function") {
-      try {
-        return tool.prepareArguments(raw);
-      } catch {
-        // prepareArguments 抛错时退回原始值（兜底）。
-      }
+      return tool.prepareArguments(raw);
     }
     if (typeof raw === "string") {
       try {
@@ -321,6 +362,8 @@ export class ToolExecutor {
   ): AgentToolResult {
     if (!this.sessionId || !Array.isArray(result.content)) return result;
     let changed = false;
+    let spilledToArchive = false;
+    let spillFailed = false;
     const nextContent = result.content.map((block) => {
       if (!block || typeof block !== "object") return block;
       const b = block as { type?: string; text?: string };
@@ -333,16 +376,29 @@ export class ToolExecutor {
         });
         if (!spilled.spilled) return block;
         changed = true;
+        spilledToArchive = true;
         return { ...b, text: spilled.preview };
       } catch (error) {
         console.warn(`ToolExecutor: spill failed for ${toolName}`, error);
-        return block;
+        // 磁盘满/权限错误时也不能把多 MB 原文重新放回 Engine、Session 和 SSE。
+        const bytes = Buffer.byteLength(b.text, "utf8");
+        if (bytes <= SPILL_PREVIEW_MAX_BYTES) return block;
+        changed = true;
+        spillFailed = true;
+        return {
+          ...b,
+          text: `${buildPreview(b.text, SPILL_PREVIEW_MAX_BYTES, SPILL_PREVIEW_MAX_LINES)}\n\n[Output truncated because archive spill failed]`,
+        };
       }
     });
     if (!changed) return result;
+    const spillDetails = {
+      ...(spilledToArchive ? { spilledToArchive: true } : {}),
+      ...(spillFailed ? { spillFailed: true, outputTruncated: true } : {}),
+    };
     const details = result.details && typeof result.details === "object"
-      ? { ...(result.details as Record<string, unknown>), spilledToArchive: true }
-      : { spilledToArchive: true, originalDetails: result.details };
+      ? { ...(result.details as Record<string, unknown>), ...spillDetails }
+      : { ...spillDetails, originalDetails: result.details };
     return { ...result, content: nextContent, details };
   }
 

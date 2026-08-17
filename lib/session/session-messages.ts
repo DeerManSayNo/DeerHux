@@ -13,6 +13,7 @@
 import { readSessionFileCached } from "../session-reader";
 import { normalizeAgentMode, type AgentMode } from "../agent-modes";
 import type { AgentMessage } from "../types";
+import { isSessionPagingEnabled } from "./paging-policy";
 
 /**
  * Response shape for GET /api/sessions/:id/messages.
@@ -40,9 +41,7 @@ export interface SessionMessagesResult {
 export const DEFAULT_PAGE_LIMIT = 100;
 export const MAX_PAGE_LIMIT = 500;
 
-export function isSessionPagingEnabled(): boolean {
-  return process.env.DEERHUX_SESSION_PAGING === "1";
-}
+export { isSessionPagingEnabled } from "./paging-policy";
 
 /**
  * Read the (cached) session file and return only the most recent `limit`
@@ -60,10 +59,11 @@ export function readRecentMessages(
   // When paging is disabled, return the full history in one page. This keeps
   // the frontend code path identical while honouring the rollback flag.
   const pagingOn = isSessionPagingEnabled();
-  const requestedLimit = pagingOn ? limit : Number.MAX_SAFE_INTEGER;
-  const effectiveLimit = Math.max(1, Math.min(requestedLimit, MAX_PAGE_LIMIT));
   const { context } = readSessionFileCached(filePath);
   const all = context.messages;
+  const effectiveLimit = pagingOn
+    ? Math.max(1, Math.min(limit, MAX_PAGE_LIMIT))
+    : Math.max(1, all.length);
   const allEntryIds = context.entryIds;
   const total = all.length;
 
