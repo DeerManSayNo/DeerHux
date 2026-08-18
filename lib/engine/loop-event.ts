@@ -69,6 +69,8 @@ export type LoopEvent =
   | {
       type: "agent_end";
       willRetry: boolean;
+      /** 结构化终止原因；用户取消与模型/工具错误分离。 */
+      stopReason?: "stop" | "aborted" | "error";
       error?: string;
       /** 标准化错误码（如 UPSTREAM_TTFT_TIMEOUT、SESSION_PERSIST_FAILED）。前端可据此触发恢复或展示确定错误。 */
       errorCode?: LlmErrorCode | typeof SESSION_PERSISTENCE_ERROR_CODE;

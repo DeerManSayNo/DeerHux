@@ -10,7 +10,8 @@ import { isAmbiguousAgentCommandError, sendAgentCommand } from "@/lib/agent-clie
 import type { ToolEntry } from "@/components/ToolPanel";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "@/lib/agent-modes";
 import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
-import { ensureAgentEventsConnected, prepareAgentEvents, subscribeAgentEvents } from "@/lib/agent-event-client";
+import { ensureAgentEventsConnected, prepareAgentEvents, subscribeAgentEvents, subscribeSessionTransient } from "@/lib/agent-event-client";
+import type { SessionTransientSnapshot } from "@/lib/host-event-bus";
 
 type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
@@ -305,8 +306,18 @@ export type AgentPhase =
   | { kind: "stopping" }
   | null;
 
+export type StreamRenderPriority = "focused" | "visible" | "hidden";
+
+const STREAM_RENDER_DELAY: Record<StreamRenderPriority, number | null> = {
+  focused: 32,
+  visible: 64,
+  hidden: null,
+};
+
 export interface UseAgentSessionOptions {
   activeTabId?: string | null;
+  /** 控制累计正文提交频率；可见非焦点窗格仍会持续渲染。 */
+  streamRenderPriority?: StreamRenderPriority;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   onAgentEnd?: (sessionId: string, changedFiles?: string[]) => void;
@@ -545,6 +556,7 @@ const AWAITING_AGENT_START_MAX_CHECKS = 2;
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     activeTabId,
+    streamRenderPriority = "focused",
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey, onSystemPromptChange,
   } = opts;
@@ -600,7 +612,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // "load full history" affordance.
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const fullHistoryLoadedRef = useRef(false);
-  const polledSessionVersionRef = useRef<{ sessionId: string; mtimeMs: number; size: number } | null>(null);
   const [loadingFullHistory, setLoadingFullHistory] = useState(false);
   const loadingFullHistoryRef = useRef(false);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
@@ -641,14 +652,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return getLocalStorageItem("deerhux.subagent-enabled") === "true";
   });
   const subagentEnabledRef = useRef(subagentEnabled);
+  const getTurnCapabilities = useCallback(() => ({
+    subagent: subagentEnabledRef.current,
+  }), []);
   const stallRecoveriesRef = useRef(0);
 
   const eventSubscriptionRef = useRef<(() => void) | null>(null);
+  const transientSubscriptionRef = useRef<(() => void) | null>(null);
   const eventSubscriptionSessionIdRef = useRef<string | null>(null);
-  // 累计完整 message_update 可能按 token 到达。这里只保留最新快照并按动画帧
-  // 提交，避免 React/Markdown 渲染频率被上游事件频率直接放大。
-  const pendingMessageUpdateRef = useRef<AgentEvent | null>(null);
-  const messageUpdateFrameRef = useRef<number | null>(null);
+  // 累计完整 message_update 可能按 token 到达。这里只保留当前 Session 的最新快照，
+  // 再按窗格可见性限频提交，避免 React/Markdown 渲染频率被上游事件直接放大。
+  const pendingMessageUpdateRef = useRef<{ event: AgentEvent; sessionId: string } | null>(null);
+  const messageUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamRenderPriorityRef = useRef<StreamRenderPriority>(streamRenderPriority);
   const sessionIdRef = useRef<string | null>(null);
   const agentRunningRef = useRef(false);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
@@ -802,7 +818,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
 
     const hasAssistant = applyMessages && loadedMessages.some((msg) => msg.role === "assistant");
-    if (awaitingAgentStartRef.current && (changed || hasAssistant || d.agentState?.running)) {
+    if (awaitingAgentStartRef.current && (changed || hasAssistant)) {
       clearAwaitingAgentStartGuard();
       awaitingAgentStartRef.current = false;
       setAgentPhase({ kind: "waiting_model", reason: "restored" });
@@ -1051,50 +1067,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * caller (this never throws for missing fields).
    */
   const applyAgentStatePayload = useCallback((agentState: AgentStatePayload | null, sid: string) => {
-    if (sid !== sessionIdRef.current) return;
-    const runtimeRunning = Boolean(agentState?.running && agentState.state?.isRunning !== false);
-    // 状态请求与 SSE 并行：若最终 agent_end 已先抵达，此响应即使迟到也不能
-    // 覆盖终态。新的 agent_start / 用户发送会清除此标记。
-    const terminalEndAlreadySeen = terminalTurnEndedSessionIdRef.current === sid;
-    if (runtimeRunning && !terminalEndAlreadySeen) {
-      loadTools(sid);
-      // isRunning stays true across gaps (waiting-for-model, between tool
-      // batches, auto-retry backoff). Falls back to true for older servers.
-      agentRunningRef.current = true;
-      setAgentRunning(true);
-      const stopRequested = agentState?.state?.stopRequested === true;
-      stopRequestedRef.current = stopRequested;
-      setAgentPhase(stopRequested ? { kind: "stopping" } : { kind: "waiting_model", reason: "restored" });
-    } else {
-      // 状态同步必须是双向的。只把 false→true 应用到 UI、却忽略 true→false，
-      // 会让丢失 agent_end 的历史会话永久锁住发送按钮。
-      stopRequestedRef.current = false;
-      agentRunningRef.current = false;
-      setAgentRunning(false);
-      setAgentPhase(null);
-      dispatch({ type: "end" });
-    }
-    if (agentState?.state) {
-      if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-      if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
-      if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
-      if (agentState.state.thinkingLevel !== undefined) {
-        setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
-      }
-      if (agentState.state.agentMode !== undefined) setAgentMode(normalizeAgentMode(agentState.state.agentMode));
-    }
-    // 会话非运行态时，检查持久化 Run 事实：interrupted / SESSION_PERSIST_FAILED
-    // 需要向用户解释「上次回合到底怎么结束的」，而不是静默当作空闲。
-    if (!runtimeRunning || terminalEndAlreadySeen) {
-      const lastRun = agentState?.lastRun ?? agentState?.state?.lastRun ?? null;
-      const notice = lastRun
-        ? describeTerminalRunStatus({ lastRun })
-        : null;
-      if (notice) {
-        setTerminalNoticeState(notice);
-      }
-    }
-  }, [loadTools, setTerminalNoticeState]);
+    if (sid !== sessionIdRef.current || !agentState?.state) return;
+    // GET remains the metadata/history channel only. running, streaming,
+    // compacting and thinkingLevel are authoritative mux transient fields.
+    if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
+    if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
+    if (agentState.state.agentMode !== undefined) setAgentMode(normalizeAgentMode(agentState.state.agentMode));
+    const lastRun = agentState.lastRun ?? agentState.state.lastRun ?? null;
+    const notice = lastRun ? describeTerminalRunStatus({ lastRun }) : null;
+    if (notice) setTerminalNoticeState(notice);
+  }, [setTerminalNoticeState]);
 
   /**
    * Fetch ONLY the live runtime state for a session via the dedicated state
@@ -1154,35 +1136,76 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const cancelPendingMessageUpdate = useCallback(() => {
     pendingMessageUpdateRef.current = null;
-    if (messageUpdateFrameRef.current !== null) {
-      cancelAnimationFrame(messageUpdateFrameRef.current);
-      messageUpdateFrameRef.current = null;
+    if (messageUpdateTimerRef.current !== null) {
+      clearTimeout(messageUpdateTimerRef.current);
+      messageUpdateTimerRef.current = null;
     }
   }, []);
 
-  const flushPendingMessageUpdate = useCallback(() => {
-    if (messageUpdateFrameRef.current !== null) {
-      cancelAnimationFrame(messageUpdateFrameRef.current);
-      messageUpdateFrameRef.current = null;
+  const flushPendingMessageUpdate = useCallback((expectedSessionId?: string) => {
+    if (messageUpdateTimerRef.current !== null) {
+      clearTimeout(messageUpdateTimerRef.current);
+      messageUpdateTimerRef.current = null;
     }
     const pending = pendingMessageUpdateRef.current;
     pendingMessageUpdateRef.current = null;
-    if (pending) handleAgentEventRef.current?.(pending);
+    if (
+      pending
+      && pending.sessionId === sessionIdRef.current
+      && (!expectedSessionId || pending.sessionId === expectedSessionId)
+    ) {
+      handleAgentEventRef.current?.(pending.event);
+    }
   }, []);
 
   const enqueueMessageUpdate = useCallback((event: AgentEvent, sid: string) => {
-    pendingMessageUpdateRef.current = event;
-    if (messageUpdateFrameRef.current !== null) return;
-    messageUpdateFrameRef.current = requestAnimationFrame(() => {
-      messageUpdateFrameRef.current = null;
-      if (sessionIdRef.current !== sid) {
-        pendingMessageUpdateRef.current = null;
-        return;
-      }
-      const pending = pendingMessageUpdateRef.current;
-      pendingMessageUpdateRef.current = null;
-      if (pending) handleAgentEventRef.current?.(pending);
-    });
+    pendingMessageUpdateRef.current = { event, sessionId: sid };
+    const delay = STREAM_RENDER_DELAY[streamRenderPriorityRef.current];
+    if (delay === null || messageUpdateTimerRef.current !== null) return;
+
+    messageUpdateTimerRef.current = setTimeout(() => {
+      messageUpdateTimerRef.current = null;
+      flushPendingMessageUpdate(sid);
+    }, delay);
+  }, [flushPendingMessageUpdate]);
+
+  useEffect(() => {
+    const previous = streamRenderPriorityRef.current;
+    streamRenderPriorityRef.current = streamRenderPriority;
+
+    if (streamRenderPriority === "hidden" && messageUpdateTimerRef.current !== null) {
+      clearTimeout(messageUpdateTimerRef.current);
+      messageUpdateTimerRef.current = null;
+    }
+
+    const becameMoreVisible = (
+      (previous === "visible" && streamRenderPriority === "focused")
+      || (previous === "hidden" && streamRenderPriority !== "hidden")
+    );
+    if (becameMoreVisible) flushPendingMessageUpdate(sessionIdRef.current ?? undefined);
+  }, [streamRenderPriority, flushPendingMessageUpdate]);
+
+  const applyTransientSnapshot = useCallback((snapshot: SessionTransientSnapshot | null, sid: string) => {
+    if (sessionIdRef.current !== sid) return;
+    if (!snapshot) {
+      agentRunningRef.current = false;
+      setAgentRunning(false);
+      setIsCompacting(false);
+      dispatch({ type: "end" });
+      return;
+    }
+    agentRunningRef.current = snapshot.running;
+    setAgentRunning(snapshot.running);
+    setIsCompacting(snapshot.isCompacting);
+    if (snapshot.thinkingLevel) setThinkingLevel(snapshot.thinkingLevel as ThinkingLevelOption);
+    if (snapshot.isStreaming) dispatch({ type: "start" });
+    else if (!snapshot.running) dispatch({ type: "end" });
+    if (snapshot.running) {
+      setAgentPhase((phase) => phase ?? { kind: "waiting_model", reason: "restored" });
+    } else {
+      stopRequestedRef.current = false;
+      setAgentPhase(null);
+    }
   }, []);
 
   const connectEvents = useCallback((sid: string, _isReconnect = false) => {
@@ -1191,13 +1214,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return;
     }
     eventSubscriptionRef.current?.();
+    transientSubscriptionRef.current?.();
     eventSubscriptionRef.current = null;
+    transientSubscriptionRef.current = null;
     eventSubscriptionSessionIdRef.current = sid;
 
     // Sync controls to a possibly cold-started session. These remain best-effort
     // HTTP commands during the multiplexed-SSE migration phase.
     void sendAgentCommand(sid, { type: "set_subagent_enabled", enabled: subagentEnabledRef.current }).catch(() => {});
     void sendAgentCommand(sid, { type: "set_auto_recovery_mode", mode: autoRecoveryModeRef.current }).catch(() => {});
+
+    transientSubscriptionRef.current = subscribeSessionTransient(sid, (snapshot) => {
+      applyTransientSnapshot(snapshot, sid);
+    });
 
     eventSubscriptionRef.current = subscribeAgentEvents(
       sid,
@@ -1206,7 +1235,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (event.type === "message_update") {
           enqueueMessageUpdate(event, sid);
         } else {
-          flushPendingMessageUpdate();
+          // message_end / agent_end 等终态前必须同步提交最后一份完整快照，
+          // 即使窗格在后台也不能让终态越过尚未渲染的内容。
+          flushPendingMessageUpdate(sid);
           handleAgentEventRef.current?.(event);
         }
       },
@@ -1230,13 +1261,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             && !agentRunningRef.current
           );
           applySessionSnapshot(snapshot, messagesAreCurrent);
-          applyAgentStatePayload(snapshot.agentState ?? null, sid);
+          // Runtime transient state is rebuilt by the mux baseline. The HTTP
+          // snapshot is history/metadata only and must never overwrite it.
         } finally {
           clearTimeout(timeout);
         }
       },
     );
-  }, [applyAgentStatePayload, applySessionSnapshot, enqueueMessageUpdate, flushPendingMessageUpdate]);
+  }, [applySessionSnapshot, applyTransientSnapshot, enqueueMessageUpdate, flushPendingMessageUpdate]);
 
   const ensureEventsConnected = useCallback((sid: string) => {
     connectEvents(sid);
@@ -1733,6 +1765,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "auto_compaction_start":
       case "compaction_start":
+        isCompactingRef.current = true;
         setIsCompacting(true);
         setCompactError(null);
         setCompactionProgress({
@@ -1752,6 +1785,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           model?: { provider?: string; modelId?: string };
         };
         if (progressEvent.phase && progressEvent.message) {
+          isCompactingRef.current = true;
           setIsCompacting(true);
           setCompactionProgress({
             phase: progressEvent.phase,
@@ -1770,6 +1804,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "auto_compaction_end":
       case "compaction_end":
+        // Follow-up gates can run before React commits this state update.
+        isCompactingRef.current = false;
         setIsCompacting(false);
         if (event.errorMessage) {
           setCompactError(event.errorMessage as string);
@@ -1891,6 +1927,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             message,
             clientMessageId,
             creationRequestId: clientMessageId,
+            capabilities: getTurnCapabilities(),
             agentMode,
             ...(sentReferences ? { references: sentReferences } : {}),
             ...(piImages?.length ? { images: piImages } : {}),
@@ -1938,6 +1975,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           type: "prompt",
           message,
           clientMessageId,
+          capabilities: getTurnCapabilities(),
           ...(sentReferences ? { references: sentReferences } : {}),
           ...(piImages?.length ? { images: piImages } : {}),
           ...(roleId ? { roleId } : {}),
@@ -1999,7 +2037,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       releasePreparedEvents?.();
     }
-  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, cancelPendingMessageUpdate, connectEvents, ensureEventsConnected, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
+  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, cancelPendingMessageUpdate, connectEvents, ensureEventsConnected, getTurnCapabilities, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
 
   const handleRetryDelivery = useCallback(async (userMessage: UserMessage) => {
     let sid = sessionIdRef.current;
@@ -2036,6 +2074,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           type: "prompt",
           message: userTextContent(userMessage),
           clientMessageId,
+          capabilities: getTurnCapabilities(),
           ...(userMessage.references?.length ? { references: userMessage.references } : {}),
           ...(images.length ? { images } : {}),
           ...(userMessage.skill?.name ? { skillName: userMessage.skill.name } : {}),
@@ -2051,6 +2090,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             message: userTextContent(userMessage),
             clientMessageId,
             creationRequestId: clientMessageId,
+            capabilities: getTurnCapabilities(),
             agentMode,
             ...(userMessage.references?.length ? { references: userMessage.references } : {}),
             ...(images.length ? { images } : {}),
@@ -2081,18 +2121,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         item.role === "user" && item.clientMessageId === clientMessageId ? acceptedMessage : item
       ));
       if (receipt.duplicate && sid) {
-        const state = await loadSessionState(sid);
-        const stillRunning = Boolean(state?.running || state?.state?.isRunning || state?.state?.isStreaming);
-        if (!stillRunning) {
-          await loadSession(sid);
-          agentRunningRef.current = false;
-          setAgentRunning(false);
-          setAgentPhase(null);
-          dispatch({ type: "end" });
-          eventSubscriptionRef.current?.();
-          eventSubscriptionRef.current = null;
-          eventSubscriptionSessionIdRef.current = null;
-        }
+        // The mux transient baseline decides whether the accepted turn is still
+        // running; HTTP only refreshes durable message history.
+        await loadSession(sid);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2114,7 +2145,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "end" });
       }
     }
-  }, [agentMode, connectEvents, ensureEventsConnected, isNew, loadSession, loadSessionState, newSessionCwd, newSessionModel, onSessionCreated, thinkingLevel]);
+  }, [agentMode, connectEvents, ensureEventsConnected, getTurnCapabilities, isNew, loadSession, newSessionCwd, newSessionModel, onSessionCreated, thinkingLevel]);
 
   const forceStopLocally = useCallback((opts?: { keepPendingAbort?: boolean }) => {
     clearAwaitingAgentStartGuard();
@@ -2293,6 +2324,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, {
         type: "steer",
         message,
+        capabilities: getTurnCapabilities(),
         ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
         ...(skill ? { skillName: skill.name } : {}),
@@ -2300,7 +2332,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to steer:", e);
     }
-  }, []);
+  }, [getTurnCapabilities]);
 
   const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => {
     const sid = sessionIdRef.current;
@@ -2336,6 +2368,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         type: "follow_up",
         message,
         clientMessageId,
+        capabilities: getTurnCapabilities(),
         ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
         ...(skill ? { skillName: skill.name } : {}),
@@ -2354,7 +2387,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setMessages((prev) => prev.map((item) => item === userMsg ? failedMessage : item));
       console.error("Failed to follow up:", e);
     }
-  }, []);
+  }, [getTurnCapabilities]);
 
   // Watchdog thresholds - can be configured via environment variables
   const WATCHDOG_STALE_EVENT_MS = parseInt(process.env.NEXT_PUBLIC_WATCHDOG_STALE_EVENT_MS || '', 10) || 60_000;  // 60 seconds (was 30s)
@@ -2389,6 +2422,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         source,
         reason: source === "retry_exhausted" ? "auto_retry_exhausted" : source,
         message: AUTO_CONTINUE_MESSAGE,
+        capabilities: getTurnCapabilities(),
         ...(fallbackModel ? { provider: fallbackModel.provider, modelId: fallbackModel.modelId } : {}),
       });
       if (fallbackModel) setCurrentModelOverride(fallbackModel);
@@ -2412,7 +2446,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setStallLevel(null);
       dispatch({ type: "end" });
     }
-  }, [connectEvents, loadSession, scheduleAwaitingAgentStartGuard]);
+  }, [connectEvents, getTurnCapabilities, loadSession, scheduleAwaitingAgentStartGuard]);
 
   // Keep executeRecoveryRef in sync so handleAgentEvent (declared above) can
   // invoke the latest version without listing it as a dependency.
@@ -2423,7 +2457,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Keep a lightweight UI-facing counter so users can see when the watchdog is
   // getting close to intervening.
   useEffect(() => {
-    if (!agentRunning) {
+    if (!agentRunning || streamRenderPriority !== "focused") {
       setWatchdogInfo(null);
       return;
     }
@@ -2440,7 +2474,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     update();
     const id = setInterval(update, 1000);
     return () => clearInterval(id);
-  }, [agentRunning, WATCHDOG_STALE_CONTENT_MS, WATCHDOG_STALE_EVENT_MS]);
+  }, [agentRunning, streamRenderPriority, WATCHDOG_STALE_CONTENT_MS, WATCHDOG_STALE_EVENT_MS]);
 
   // Tiered business watchdog: detects stalled model turns and provides
   // configurable auto-recovery (off / conservative / aggressive).
@@ -2815,7 +2849,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       connectEvents(sid);
       scheduleAwaitingAgentStartGuard(sid, currentTurnId);
-      await sendAgentCommand(sid, { type: "follow_up", message: "请按刚才用户批准的计划开始实施。", clientMessageId });
+      await sendAgentCommand(sid, {
+        type: "follow_up",
+        message: "请按刚才用户批准的计划开始实施。",
+        clientMessageId,
+        capabilities: getTurnCapabilities(),
+      });
     } catch (e) {
       awaitingAgentStartRef.current = false;
       clearAwaitingAgentStartGuard();
@@ -2829,7 +2868,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       setLastModelError(e instanceof Error ? e.message : String(e));
     }
-  }, [clearAwaitingAgentStartGuard, connectEvents, handleAgentModeChange, scheduleAwaitingAgentStartGuard]);
+  }, [clearAwaitingAgentStartGuard, connectEvents, getTurnCapabilities, handleAgentModeChange, scheduleAwaitingAgentStartGuard]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     messagesEndRef.current?.scrollIntoView({ behavior });
@@ -2850,24 +2889,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // changes here keeps the component tree alive and makes tab switches cheaper.
   useEffect(() => {
     const sessionId = activeSessionId;
+    // If this Session is already fully subscribed, there is nothing to rebuild.
+    // Checking the live subscription as well as sessionIdRef is required for
+    // React Strict Mode: its simulated cleanup removes listeners while retaining refs.
+    if (
+      sessionId
+      && sessionId === sessionIdRef.current
+      && eventSubscriptionSessionIdRef.current === sessionId
+      && eventSubscriptionRef.current
+      && transientSubscriptionRef.current
+    ) return;
     // If a brand-new session just received its real id, handleSend has already
     // connected SSE and populated optimistic messages. Do not tear it down just
     // because AppShell replaced the placeholder tab with the real session tab.
-    if (sessionId && sessionId === sessionIdRef.current) return;
-    if (sessionId && sessionId === optimisticSessionIdRef.current) return;
-    if (sessionId && sessionId === adoptingCreatedSessionRef.current) {
+    if (
+      sessionId
+      && (sessionId === optimisticSessionIdRef.current || sessionId === adoptingCreatedSessionRef.current)
+      && eventSubscriptionSessionIdRef.current === sessionId
+      && eventSubscriptionRef.current
+      && transientSubscriptionRef.current
+    ) {
       adoptingCreatedSessionRef.current = null;
       return;
     }
 
     let cancelled = false;
 
-    // Move this window's subscription; the application-level EventSource stays
-    // alive while any other ChatWindow remains subscribed.
-    eventSubscriptionRef.current?.();
-    eventSubscriptionRef.current = null;
-    eventSubscriptionSessionIdRef.current = null;
+    // This view is leaving its current Session. Do not dispatch a delayed update
+    // into an about-to-reset tree; terminal events already flush synchronously.
     cancelPendingMessageUpdate();
+    eventSubscriptionRef.current?.();
+    transientSubscriptionRef.current?.();
+    eventSubscriptionRef.current = null;
+    transientSubscriptionRef.current = null;
+    eventSubscriptionSessionIdRef.current = null;
     // Abort any inflight background loadSession / polling requests from the
     // previous session so they don't keep hitting the backend (and racing
     // this new session's requests). A fresh controller is installed for the
@@ -2905,7 +2960,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setRetryInfo(null);
     setContextUsage(null);
     fullHistoryLoadedRef.current = false;
-    polledSessionVersionRef.current = null;
     setHasOlderMessages(false);
     setSystemPrompt(null);
     setForkingEntryId(null);
@@ -2952,18 +3006,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     loadRecentMessages(sessionId, true).then(() => {
       if (cancelled || sessionIdRef.current !== sessionId) return;
 
-      // Now fetch runtime state asynchronously — failures here never affect
-      // the already-displayed messages.
+      // Fetch non-transient runtime metadata asynchronously. Running,
+      // streaming, compacting and thinking level come from the mux baseline.
       void loadSessionState(sessionId);
     });
 
     const activeSubagentToolIds = activeSubagentToolIdsRef.current;
     return () => {
       cancelled = true;
-      eventSubscriptionRef.current?.();
-      eventSubscriptionRef.current = null;
-      eventSubscriptionSessionIdRef.current = null;
       cancelPendingMessageUpdate();
+      // Only tear down the subscription installed for this Effect run. This
+      // prevents a stale cleanup from removing a newer Session subscription.
+      if (eventSubscriptionSessionIdRef.current === sessionId) {
+        eventSubscriptionRef.current?.();
+        transientSubscriptionRef.current?.();
+        eventSubscriptionRef.current = null;
+        transientSubscriptionRef.current = null;
+        eventSubscriptionSessionIdRef.current = null;
+      }
       activeSubagentToolIds.clear();
       stopSubagentLiveRefresh();
     };
@@ -2973,59 +3033,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     messagesRef.current = messages;
     entryIdsRef.current = entryIds;
   }, [messages, entryIds]);
-
-  // 兜底同步：远程连接（微信 Bot 等）可能从服务端直接写入当前 session，
-  // 在某些 dev/runtime 场景下 SSE 事件不会可靠到达浏览器。这里对当前打开的
-  // 已有 session 做轻量轮询，只在 entryIds 变化时刷新消息，避免必须右键 reload。
-  useEffect(() => {
-    if (!activeSessionId || newSessionCwd) return;
-    let stopped = false;
-    let inFlight = false;
-
-    const tick = async () => {
-      if (stopped || inFlight || sessionIdRef.current !== activeSessionId) return;
-      const isRunning = agentRunningRef.current;
-      if (isRunning) {
-        const now = Date.now();
-        const sseQuietMs = now - lastAgentEventAtRef.current;
-        const contentQuietMs = now - lastContentChangedAtRef.current;
-        const shouldPollRunning = awaitingAgentStartRef.current || sseQuietMs > 15_000 || contentQuietMs > 15_000;
-        if (!shouldPollRunning) return;
-      }
-
-      inFlight = true;
-      try {
-        const response = await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/version`, {
-          cache: "no-store",
-          signal: AbortSignal.any([sessionAbortRef.current?.signal ?? new AbortController().signal, AbortSignal.timeout(10_000)]),
-        });
-        if (!response.ok) return;
-        const version = await response.json() as { mtimeMs: number; size: number };
-        const previous = polledSessionVersionRef.current;
-        const changed = !previous || previous.sessionId !== activeSessionId
-          || previous.mtimeMs !== version.mtimeMs || previous.size !== version.size;
-        polledSessionVersionRef.current = { sessionId: activeSessionId, ...version };
-        // 首次只建立基线；文件实际变化后才解析 Context。
-        if (changed) await loadRecentMessages(activeSessionId, false);
-        if (isRunning && !stopped && sessionIdRef.current === activeSessionId) {
-          await loadSessionState(activeSessionId);
-        }
-      } catch {
-        // ignore transient polling failures and session-switch aborts
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    // 6s cadence: SSE is still the primary live channel, but when it goes
-    // quiet during an active turn we read the session snapshot so the UI
-    // recovers the same way a manual reload would.
-    const timer = window.setInterval(tick, 6000);
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [activeSessionId, loadRecentMessages, loadSessionState, newSessionCwd]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);

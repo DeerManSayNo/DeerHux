@@ -1,5 +1,9 @@
 import { getAgentEventStore, type SequencedAgentEvent } from "@/lib/agent-runtime/event-store";
 import { MessageUpdateCoalescer } from "@/lib/agent-runtime/event-coalescer";
+import { hostEventBus } from "@/lib/host-event-bus";
+import { listCollaborationRuns } from "@/lib/parallel-agent/collaboration-store";
+import { toCollaborationMuxSnapshot } from "@/lib/parallel-agent/collaboration-mux";
+import { listRpcHostRunningSessions, listRpcSessionTransientSnapshots } from "@/lib/rpc-manager";
 import { openSseConnection, recordSlowConsumerDrop } from "@/lib/agent-runtime/transport-diagnostics";
 import { isSseConsumerOverBudget, sseByteStrategy } from "@/lib/agent-runtime/sse-backpressure";
 
@@ -27,6 +31,7 @@ export async function GET(req: Request) {
       const cursor = parseCursor(req);
       let closed = false;
       let unsubscribe: () => void = () => {};
+      let unsubscribeHost: () => void = () => {};
       const closeMetric = openSseConnection();
       const resources: {
         heartbeat?: ReturnType<typeof setInterval>;
@@ -39,6 +44,7 @@ export async function GET(req: Request) {
         if (resources.heartbeat) clearInterval(resources.heartbeat);
         resources.coalescer?.cancel();
         unsubscribe();
+        unsubscribeHost();
         closeMetric();
         req.signal.removeEventListener("abort", cleanup);
         try { controller.close(); } catch { /* already closed */ }
@@ -83,6 +89,7 @@ export async function GET(req: Request) {
       // Subscribe before reading the replay snapshot. append() and getGlobalSince()
       // are synchronous, so no event can fall between these two operations.
       unsubscribe = store.subscribeAll((event) => coalescer.push(event));
+      unsubscribeHost = hostEventBus.subscribe((frame) => send(frame));
 
       if (cursor) {
         const replay = store.getGlobalSince(cursor);
@@ -106,6 +113,23 @@ export async function GET(req: Request) {
         // A new UI loads message snapshots independently. Start at the current
         // journal tail instead of replaying unrelated historic sessions.
         send({ type: "connected", epoch: store.epoch, globalSeq: store.getLastGlobalSeq(), resumed: false });
+      }
+
+      // Control-plane baselines are sent after the epoch barrier on every
+      // connection, including cursor resumes. Clients clear mirrors on a new
+      // epoch/snapshot_required and rebuild exclusively from these frames.
+      const baselineAt = Date.now();
+      send({ type: "host_running_snapshot", sessions: listRpcHostRunningSessions(baselineAt), authoritative: true });
+      for (const snapshot of listRpcSessionTransientSnapshots(baselineAt)) send(snapshot);
+      const runsByParent = new Map<string, ReturnType<typeof toCollaborationMuxSnapshot>[]>();
+      for (const run of listCollaborationRuns()) {
+        if (!run.parentSessionId) continue;
+        const group = runsByParent.get(run.parentSessionId) ?? [];
+        group.push(toCollaborationMuxSnapshot(run));
+        runsByParent.set(run.parentSessionId, group);
+      }
+      for (const [parentSessionId, runs] of runsByParent) {
+        send({ type: "subagent_runs_snapshot", parentSessionId, runs, updatedAt: baselineAt });
       }
 
       resources.heartbeat = setInterval(() => {

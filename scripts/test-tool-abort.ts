@@ -42,8 +42,8 @@ async function testMcpAbort(): Promise<void> {
     sourcePath: "test",
     priority: 0,
   }, process.cwd());
-  (client as unknown as { proc: { stdin: { write: (value: string) => void } } }).proc = {
-    stdin: { write: (value: string) => { writes.push(value); } },
+  (client as unknown as { proc: { stdin: { destroyed: boolean; writable: boolean; write: (value: string) => void } } }).proc = {
+    stdin: { destroyed: false, writable: true, write: (value: string) => { writes.push(value); } },
   };
 
   const controller = new AbortController();

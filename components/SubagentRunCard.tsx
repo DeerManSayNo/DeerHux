@@ -6,11 +6,8 @@ import type { CollaborationRunSnapshot, CollaborationWorkerState, CollaborationR
 interface Props {
   run: CollaborationRunSnapshot;
   onOpenSession?: (sessionId: string) => void;
-  /** 把卡片自行拉取/SSE 收到的最新快照同步给父级，供父级决定历史归位。 */
   onRunUpdate?: (run: CollaborationRunSnapshot) => void;
 }
-
-const TERMINAL_STATUSES: ReadonlySet<CollaborationRunStatus> = new Set(["complete", "aborted", "error", "applied"]);
 
 type AnyRunStatus = CollaborationRunStatus | CollaborationWorkerStatus;
 
@@ -74,69 +71,11 @@ function injectToolPulseStyle() {
   document.head.appendChild(style);
 }
 
-export function SubagentRunCard({ run, onOpenSession, onRunUpdate }: Props) {
-  const [latest, setLatest] = useState<CollaborationRunSnapshot>(run);
-  const closedRef = useRef(false);
-
+export function SubagentRunCard({ run, onOpenSession }: Props) {
   // 注入 CSS 动画
   useEffect(() => { injectToolPulseStyle(); }, []);
 
-  useEffect(() => {
-    setLatest((prev) => {
-      if (!run.updatedAt || run.updatedAt < (prev.updatedAt ?? "")) return prev;
-      return { ...run, workers: run.workers ?? prev.workers };
-    });
-  }, [run]);
-
-  // 实时状态：先拉一次，未终结则订阅 SSE。
-  useEffect(() => {
-    closedRef.current = false;
-    let es: EventSource | null = null;
-    let cancelled = false;
-
-    async function refresh() {
-      try {
-        const res = await fetch(`/api/agent-runs/${run.runId}`, { cache: "no-store" });
-        if (!res.ok) return;
-        const data = (await res.json()) as CollaborationRunSnapshot;
-        if (cancelled || closedRef.current) return;
-        onRunUpdate?.(data);
-        if (data?.updatedAt && data.updatedAt >= (latest.updatedAt ?? "")) {
-          setLatest({ ...data, workers: data.workers ?? latest.workers });
-        }
-        if (TERMINAL_STATUSES.has(data?.status ?? latest.status)) return;
-        es = new EventSource(`/api/agent-runs/${run.runId}/events`);
-        es.onmessage = (e: MessageEvent<string>) => {
-          if (closedRef.current) { es?.close(); return; }
-          // 方案 A：SSE 直推完整快照，直接 JSON.parse 消费，不再 fetch。
-          // 心跳注释行（":\n\n"）不会触发 onmessage，这里只处理真正的 data 帧。
-          let snap: CollaborationRunSnapshot | null = null;
-          try {
-            snap = JSON.parse(e.data) as CollaborationRunSnapshot;
-          } catch {
-            return; // 异常帧忽略，等下一帧
-          }
-          if (cancelled || closedRef.current) return;
-          // SSE 推送有序，直接覆盖；保留 workers 回退以防某帧缺失。
-          setLatest({ ...snap, workers: snap.workers ?? latest.workers });
-          onRunUpdate?.(snap);
-          if (TERMINAL_STATUSES.has(snap.status)) es?.close();
-        };
-        es.onerror = () => { es?.close(); };
-      } catch {
-        /* 网络错误：保持初始快照即可 */
-      }
-    }
-    void refresh();
-
-    return () => {
-      cancelled = true;
-      closedRef.current = true;
-      es?.close();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [run.runId, onRunUpdate]);
-
+  const latest = run;
   const workers = useMemo(() => latest.workers ?? [], [latest.workers]);
   const doneCount = useMemo(
     () => workers.filter((w) => w.status === "complete" || w.status === "error" || w.status === "aborted").length,

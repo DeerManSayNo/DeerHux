@@ -366,10 +366,18 @@ const MAX_QUEUE_LENGTH = 50;
 const QUEUE_UPDATE_TEXT_TRUNCATE = 200;
 
 /** ★ M5：队列条目类型（文本 + 可选图片，对齐 Port steer/followUp 的签名）。 */
+interface QueueExecutionEnvironment {
+  effectiveSystemPrompt: string;
+  activeToolNames: readonly string[];
+  tools: ReadonlyMap<string, AnyToolDefinition>;
+  executionModes: ReadonlyMap<string, "sequential" | "parallel">;
+}
+
 interface QueueEntry {
   text: string;
   images?: Array<{ type: "image"; data: string; mimeType: string }>;
   context?: TurnContextSnapshot;
+  executionEnvironment?: QueueExecutionEnvironment;
 }
 
 /** consumeStream 的返回值（一轮 LLM 调用的状态快照）。 */
@@ -720,16 +728,16 @@ export class DeerLoopEngine implements AgentEnginePort {
 
     // 回合环境冻结：上下文来自准入时的 TurnContextSnapshot；工具定义与
     // executionMode 在 mutex 获取后快照，set_tools / MCP reload 只影响后续回合。
-    const activeToolNames = turnContext ? [...turnContext.activeToolNames] : this.registry.getActiveNames();
-    const effectiveSystemPrompt = turnContext?.effectiveSystemPrompt ?? this._baseSystemPrompt;
-    const frozenToolMap = turnContext
+    let activeToolNames = turnContext ? [...turnContext.activeToolNames] : this.registry.getActiveNames();
+    let effectiveSystemPrompt = turnContext?.effectiveSystemPrompt ?? this._baseSystemPrompt;
+    let frozenToolMap = turnContext
       ? new Map(
         activeToolNames
           .map((name) => [name, this.registry.get(name)] as const)
           .filter((entry): entry is readonly [string, NonNullable<typeof entry[1]>] => entry[1] !== undefined),
       )
       : undefined;
-    const frozenExecutionModes = turnContext
+    let frozenExecutionModes = turnContext
       ? new Map(activeToolNames.map((name) => [name, this.registry.getExecutionMode(name)] as const))
       : undefined;
 
@@ -788,10 +796,11 @@ export class DeerLoopEngine implements AgentEnginePort {
           //     - "one-at-a-time"：只注入最老一条，其余留队列等下一轮
           //   drain 后 emit queue_update（队列变化）。abort 不会清空队列（见 abort 注释）。
           if (this.steeringQueue.length > 0) {
-            const toInject =
-              this._steeringMode === "one-at-a-time"
-                ? [this.steeringQueue.shift()!]
-                : this.steeringQueue.splice(0);
+            const toInject = this.takeQueueEntriesForNextEnvironment(this.steeringQueue, this._steeringMode);
+            const steeringEnvironment = toInject[0]?.executionEnvironment;
+            if (steeringEnvironment) {
+              ({ activeToolNames, effectiveSystemPrompt, frozenToolMap, frozenExecutionModes } = this.useQueueExecutionEnvironment(steeringEnvironment));
+            }
             for (const entry of toInject) {
               const steerMsg: UserMessage = {
                 role: "user",
@@ -867,6 +876,14 @@ export class DeerLoopEngine implements AgentEnginePort {
               this.emit({ type: "message_end", message: assistantMessage });
             }
 
+            // Different queued steer environments cannot be merged into one LLM
+            // request. If any remain after this response, continue and let the
+            // next loop iteration adopt the next entry's frozen environment.
+            if (this.steeringQueue.length > 0) {
+              toolRounds = 0;
+              continue;
+            }
+
             // ★ M5：drain followUp 队列（turn 结束后的追问）。
             //   时机：agent 本要停止时（无工具调用、stopReason=stop）。
             //   行为：
@@ -880,10 +897,11 @@ export class DeerLoopEngine implements AgentEnginePort {
               this.followUpQueue.length > 0 &&
               followUpTurnsConsumed < this._maxFollowUps
             ) {
-              const toInject =
-                this._followUpMode === "one-at-a-time"
-                  ? [this.followUpQueue.shift()!]
-                  : this.followUpQueue.splice(0);
+              const toInject = this.takeQueueEntriesForNextEnvironment(this.followUpQueue, this._followUpMode);
+              const followUpEnvironment = toInject[0]?.executionEnvironment;
+              if (followUpEnvironment) {
+                ({ activeToolNames, effectiveSystemPrompt, frozenToolMap, frozenExecutionModes } = this.useQueueExecutionEnvironment(followUpEnvironment));
+              }
               this.emitQueueUpdate();
               for (const entry of toInject) {
                 const followMsg: UserMessage = {
@@ -998,12 +1016,18 @@ export class DeerLoopEngine implements AgentEnginePort {
         const agentEndEvent: LoopEvent = {
           type: "agent_end",
           willRetry: false,
+          stopReason: agentError === "aborted"
+            ? "aborted"
+            : agentError
+              ? "error"
+              : "stop",
         };
         const endError =
           (agentError && agentError !== "aborted" ? agentError : undefined)
           ?? failureMessage;
         if (endError) {
-          (agentEndEvent as { error?: string }).error = endError;
+          agentEndEvent.error = endError;
+          if (agentEndEvent.stopReason !== "aborted") agentEndEvent.stopReason = "error";
         }
         if (agentErrorCode) {
           (agentEndEvent as { errorCode?: NormalizedLlmError["code"] | typeof SessionPersistenceError.prototype.code }).errorCode = agentErrorCode;
@@ -1943,6 +1967,13 @@ export class DeerLoopEngine implements AgentEnginePort {
     this.emit({ type: "compaction_start", reason });
 
     const tokensBefore = this.getContextUsage()?.tokens ?? estimateTokens(this._messages);
+    const emitCompactionEnd = (event: Omit<Extract<LoopEvent, { type: "compaction_end" }>, "type">): void => {
+      // Observers synchronously query isCompacting from compaction_end handlers.
+      // Clear authoritative engine state before publishing the terminal event.
+      this._isCompacting = false;
+      this.compactionAbortController = null;
+      this.emit({ type: "compaction_end", ...event });
+    };
     const emitProgress = (
       phase: "preparing" | "summarizing" | "archiving" | "applying" | "done",
       message: string,
@@ -2075,7 +2106,7 @@ export class DeerLoopEngine implements AgentEnginePort {
       );
       if (this.compactionAbortController.signal.aborted) {
         const result = { summary: "", tokensBefore, tokensAfter: tokensBefore };
-        this.emit({ type: "compaction_end", reason, aborted: true, willRetry: false });
+        emitCompactionEnd({ reason, aborted: true, willRetry: false });
         return result;
       }
       if (!summary.trim()) throw new Error("压缩模型未返回有效摘要");
@@ -2133,18 +2164,20 @@ export class DeerLoopEngine implements AgentEnginePort {
           model: { provider: summaryModel.provider, modelId: summaryModel.id },
         },
       );
-      this.emit({ type: "compaction_end", reason, result, aborted: false, willRetry: false });
+      emitCompactionEnd({ reason, result, aborted: false, willRetry: false });
       return result;
     } catch (err) {
       if (this.compactionAbortController?.signal.aborted || this.isAbortError(err)) {
         const result = { summary: "", tokensBefore, tokensAfter: tokensBefore };
-        this.emit({ type: "compaction_end", reason, aborted: true, willRetry: false });
+        emitCompactionEnd({ reason, aborted: true, willRetry: false });
         return result;
       }
       const errorMessage = err instanceof Error ? err.message : String(err);
-      this.emit({ type: "compaction_end", reason, aborted: false, willRetry: false, errorMessage });
+      emitCompactionEnd({ reason, aborted: false, willRetry: false, errorMessage });
       throw err;
     } finally {
+      // Defensive cleanup for failures thrown before a terminal event can be
+      // constructed. Normal paths already clear these before compaction_end.
       this._isCompacting = false;
       this.compactionAbortController = null;
     }
@@ -2465,7 +2498,12 @@ export class DeerLoopEngine implements AgentEnginePort {
   ): Promise<void> {
     const entry: QueueEntry = typeof input === "string"
       ? { text: input, images: legacyImages }
-      : { text: input.text, images: input.images, context: input.context };
+      : {
+        text: input.text,
+        images: input.images,
+        context: input.context,
+        executionEnvironment: this.captureQueueExecutionEnvironment(input.context),
+      };
     this.enqueueBounded(this.steeringQueue, entry, "steering");
     this.emitQueueUpdate();
   }
@@ -2476,7 +2514,12 @@ export class DeerLoopEngine implements AgentEnginePort {
   ): Promise<void> {
     const entry: QueueEntry = typeof input === "string"
       ? { text: input, images: legacyImages }
-      : { text: input.text, images: input.images, context: input.context };
+      : {
+        text: input.text,
+        images: input.images,
+        context: input.context,
+        executionEnvironment: this.captureQueueExecutionEnvironment(input.context),
+      };
     this.enqueueBounded(this.followUpQueue, entry, "followUp");
     this.emitQueueUpdate();
   }
@@ -2636,6 +2679,70 @@ export class DeerLoopEngine implements AgentEnginePort {
         console.error("[DeerLoopEngine] subscribe listener threw:", err);
       }
     }
+  }
+
+  private captureQueueExecutionEnvironment(context?: TurnContextSnapshot): QueueExecutionEnvironment | undefined {
+    if (!context) return undefined;
+    const activeToolNames = Object.freeze([...context.activeToolNames]);
+    const tools = new Map(
+      activeToolNames
+        .map((name) => [name, this.registry.get(name)] as const)
+        .filter((entry): entry is readonly [string, NonNullable<typeof entry[1]>] => entry[1] !== undefined),
+    );
+    const executionModes = new Map(
+      activeToolNames.map((name) => [name, this.registry.getExecutionMode(name)] as const),
+    );
+    return Object.freeze({
+      effectiveSystemPrompt: context.effectiveSystemPrompt,
+      activeToolNames,
+      tools,
+      executionModes,
+    });
+  }
+
+  private useQueueExecutionEnvironment(environment: QueueExecutionEnvironment): {
+    activeToolNames: string[];
+    effectiveSystemPrompt: string;
+    frozenToolMap: Map<string, AnyToolDefinition>;
+    frozenExecutionModes: Map<string, "sequential" | "parallel">;
+  } {
+    return {
+      activeToolNames: [...environment.activeToolNames],
+      effectiveSystemPrompt: environment.effectiveSystemPrompt,
+      frozenToolMap: new Map(environment.tools),
+      frozenExecutionModes: new Map(environment.executionModes),
+    };
+  }
+
+  private sameQueueExecutionEnvironment(
+    a?: QueueExecutionEnvironment,
+    b?: QueueExecutionEnvironment,
+  ): boolean {
+    if (!a || !b) return a === b;
+    if (a.effectiveSystemPrompt !== b.effectiveSystemPrompt) return false;
+    if (a.activeToolNames.length !== b.activeToolNames.length) return false;
+    for (let index = 0; index < a.activeToolNames.length; index++) {
+      const name = a.activeToolNames[index];
+      if (name !== b.activeToolNames[index]) return false;
+      // 工具定义必须按对象身份比较：同名 MCP 工具 reload 后可能已有不同 schema。
+      if (a.tools.get(name) !== b.tools.get(name)) return false;
+      if (a.executionModes.get(name) !== b.executionModes.get(name)) return false;
+    }
+    return true;
+  }
+
+  private takeQueueEntriesForNextEnvironment(queue: QueueEntry[], mode: QueueMode): QueueEntry[] {
+    const first = queue.shift();
+    if (!first) return [];
+    if (mode === "one-at-a-time") return [first];
+    const entries = [first];
+    while (
+      queue.length > 0
+      && this.sameQueueExecutionEnvironment(queue[0]?.executionEnvironment, first.executionEnvironment)
+    ) {
+      entries.push(queue.shift()!);
+    }
+    return entries;
   }
 
   private buildQueuedUserText(entry: QueueEntry): string {

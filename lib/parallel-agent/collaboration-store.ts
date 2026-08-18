@@ -1,3 +1,5 @@
+import { hostEventBus } from "../host-event-bus";
+import { removedCollaborationMuxSnapshot, toCollaborationMuxSnapshot } from "./collaboration-mux";
 import type { CollaborationRunEvent, CollaborationRunState } from "./collaboration-types";
 import { deletePersistedTask, listPersistedTasks, loadTask, persistTaskEvent, persistTaskState } from "./subagent-persistence";
 
@@ -23,6 +25,7 @@ const SNAPSHOT_EVENT_TYPES = new Set<CollaborationRunEvent["type"]>([
 interface StoredCollaborationRun {
   state: CollaborationRunState;
   listeners: Set<Listener>;
+  removalListeners: Set<() => void>;
   abort?: () => Promise<void>;
   cleanup?: () => void;
 }
@@ -37,9 +40,20 @@ function runs(): Map<string, StoredCollaborationRun> {
   return globalThis.__deerhuxCollaborationRuns;
 }
 
+function broadcastRun(state: CollaborationRunState): void {
+  if (!state.parentSessionId) return;
+  hostEventBus.emit({
+    type: "subagent_run_update",
+    parentSessionId: state.parentSessionId,
+    run: toCollaborationMuxSnapshot(state),
+    updatedAt: Date.now(),
+  });
+}
+
 export function createCollaborationRun(state: CollaborationRunState): void {
-  runs().set(state.runId, { state, listeners: new Set() });
+  runs().set(state.runId, { state, listeners: new Set(), removalListeners: new Set() });
   persistTaskState(state);
+  broadcastRun(state);
 }
 
 export function getCollaborationRun(runId: string): CollaborationRunState | undefined {
@@ -47,7 +61,7 @@ export function getCollaborationRun(runId: string): CollaborationRunState | unde
   if (existing) return existing;
   const persisted = loadTask(runId);
   if (!persisted) return undefined;
-  runs().set(runId, { state: persisted, listeners: new Set() });
+  runs().set(runId, { state: persisted, listeners: new Set(), removalListeners: new Set() });
   return persisted;
 }
 
@@ -55,7 +69,7 @@ export function listCollaborationRuns(): CollaborationRunState[] {
   const store = runs();
   if (!globalThis.__deerhuxCollaborationRunsLoaded) {
     for (const state of listPersistedTasks()) {
-      if (!store.has(state.runId)) store.set(state.runId, { state, listeners: new Set() });
+      if (!store.has(state.runId)) store.set(state.runId, { state, listeners: new Set(), removalListeners: new Set() });
     }
     globalThis.__deerhuxCollaborationRunsLoaded = true;
   }
@@ -69,6 +83,7 @@ export function updateCollaborationRun(runId: string, updater: (state: Collabora
   updater(run.state);
   run.state.updatedAt = new Date().toISOString();
   persistTaskState(run.state);
+  broadcastRun(run.state);
   return run.state;
 }
 
@@ -85,15 +100,24 @@ export function emitCollaborationRunEvent(event: CollaborationRunEvent): void {
   run.state.updatedAt = new Date().toISOString();
   persistTaskEvent(stamped);
   if (SNAPSHOT_EVENT_TYPES.has(stamped.type)) persistTaskState(run.state);
+  broadcastRun(run.state);
   for (const listener of run.listeners) listener(stamped);
 }
 
-export function subscribeCollaborationRun(runId: string, listener: Listener): () => void {
+export function subscribeCollaborationRun(
+  runId: string,
+  listener: Listener,
+  onRemoved?: () => void,
+): () => void {
   if (!runs().has(runId)) getCollaborationRun(runId);
   const run = runs().get(runId);
   if (!run) return () => undefined;
   run.listeners.add(listener);
-  return () => run.listeners.delete(listener);
+  if (onRemoved) run.removalListeners.add(onRemoved);
+  return () => {
+    run.listeners.delete(listener);
+    if (onRemoved) run.removalListeners.delete(onRemoved);
+  };
 }
 
 export function setCollaborationAbort(runId: string, abort: () => Promise<void>): void {
@@ -157,6 +181,19 @@ export function removeCollaborationRun(runId: string): void {
   const run = runs().get(runId);
   if (run) {
     try { run.cleanup?.(); } catch { /* best effort */ }
+    if (run.state.parentSessionId) {
+      hostEventBus.emit({
+        type: "subagent_run_update",
+        parentSessionId: run.state.parentSessionId,
+        run: removedCollaborationMuxSnapshot(runId),
+        updatedAt: Date.now(),
+      });
+    }
+    // Notify the legacy per-run stream before deleting host state.
+    for (const listener of [...run.removalListeners]) {
+      try { listener(); } catch { /* one mirror must not block cleanup */ }
+    }
+    run.removalListeners.clear();
     run.listeners.clear();
     // 释放对 abort/cleanup 闭包（捕获 workerSessions、runDir 等大对象）的引用。
     run.abort = undefined;

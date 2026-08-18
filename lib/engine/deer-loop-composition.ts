@@ -17,7 +17,7 @@ import { searchIndex } from "../code-index/search";
 import { createCodeGraphTools } from "../codegraph/tools";
 import type { LlmRequestKind } from "../llm-gateway";
 import type { McpRuntimeLease } from "../mcp-runtime";
-import { createSubagentTool } from "../parallel-agent/subagent-tool";
+import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../parallel-agent/subagent-tool";
 import { createStandardCodingTools, STANDARD_CODING_TOOL_NAMES } from "./coding-tools";
 import { getContextDir } from "./context-archive";
 import { deerLoopEngineFactory } from "./deer-loop-engine-factory";
@@ -256,6 +256,7 @@ export async function composeDeerLoopEngine(
     ...STANDARD_CODING_TOOL_NAMES,
     ...(codeSearchTool ? ["code_search"] : []),
     ...codeGraphTools.map((tool) => tool.name),
+    ...(subagentTool ? [SUBAGENT_TOOL_NAME] : []),
     ...(mcpRuntime?.toolNames ?? []),
   ];
 

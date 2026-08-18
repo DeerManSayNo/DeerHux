@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -36,6 +36,7 @@ interface WatchdogInfo {
 interface Props {
   message: AgentMessage;
   isStreaming?: boolean;
+  isBackground?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
   watchdogInfo?: WatchdogInfo | null;
@@ -96,7 +97,7 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
+function MessageViewImpl({ message, isStreaming, isBackground, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
   // 新 run 用 parentEntryId 精确归属到触发它的 user turn；旧数据没有该字段时，
   // 才保留 createdAt 时间窗作为兼容兜底。
   const rawTs = message.role === "user" ? (message as UserMessage).timestamp : undefined;
@@ -134,7 +135,7 @@ function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchd
     );
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} isBackground={isBackground} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -146,6 +147,7 @@ function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchd
 export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.message === next.message &&
   prev.isStreaming === next.isStreaming &&
+  prev.isBackground === next.isBackground &&
   prev.toolResults === next.toolResults &&
   prev.modelNames === next.modelNames &&
   prev.watchdogInfo === next.watchdogInfo &&
@@ -402,7 +404,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
     const isClickable = systemPrompt !== null && systemPrompt !== "";
     return (
       <span
-        title={systemPrompt === null ? "系统提示词加载中" : systemPrompt || "（空）"}
+        title={systemPrompt === null ? "当前系统提示词加载中" : systemPrompt || "（空）"}
         onClick={isClickable ? () => setShowSystemPromptModal(true) : undefined}
         style={{
           display: "inline-flex",
@@ -425,7 +427,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
           <polyline points="14 2 14 8 20 8" />
         </svg>
-        系统提示词
+        当前系统提示词
       </span>
     );
   };
@@ -737,7 +739,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                   <polyline points="14 2 14 8 20 8" />
                 </svg>
-                <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text)" }}>系统提示词</span>
+                <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text)" }}>当前系统提示词</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <button
@@ -784,6 +786,9 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
                 </button>
               </div>
             </div>
+            <div style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
+              这是会话当前配置，不一定等于该历史回合发送时使用的系统提示词和工具集合。
+            </div>
             <div
               style={{
                 overflow: "auto",
@@ -809,6 +814,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
 function AssistantMessageView({
   message,
   isStreaming,
+  isBackground,
   toolResults,
   modelNames,
   watchdogInfo,
@@ -821,6 +827,7 @@ function AssistantMessageView({
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
+  isBackground?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
   watchdogInfo?: WatchdogInfo | null;
@@ -901,6 +908,7 @@ function AssistantMessageView({
       setTps(null);
       return;
     }
+    if (isBackground) return;
     const tick = () => {
       const bs = blocksRef.current;
       const now = Date.now();
@@ -941,7 +949,7 @@ function AssistantMessageView({
     };
     const id = setInterval(tick, 300);
     return () => clearInterval(id);
-  }, [isStreaming]);
+  }, [isStreaming, isBackground]);
 
   return (
     <div
@@ -1110,7 +1118,7 @@ function AssistantMessageView({
 
 function BlockView({ block, toolResults, streamingDuration, toolCallDurations, isStreaming }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; streamingDuration?: number; toolCallDurations?: Map<string, number>; isStreaming?: boolean }) {
   if (block.type === "text") {
-    return <TextBlock block={block as TextContent} />;
+    return <TextBlock block={block as TextContent} isStreaming={isStreaming} />;
   }
   if (block.type === "thinking") {
     return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={isStreaming} />;
@@ -1124,51 +1132,58 @@ function BlockView({ block, toolResults, streamingDuration, toolCallDurations, i
   return null;
 }
 
-function TextBlock({ block }: { block: TextContent }) {
+function createMarkdownComponents(isStreaming: boolean): Components {
+  return {
+    a({ href, children, ...props }) {
+      return (
+        <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+          {children}
+        </a>
+      );
+    },
+    code({ className, children, node: _node, ...props }) {
+      const lang = className?.replace("language-", "") ?? "";
+      const raw = String(children);
+      const isBlock = className?.includes("language-") || raw.includes("\n");
+      if (isBlock && isStreaming) {
+        return (
+          <pre className="streaming-code-block">
+            <code className={className} {...props}>{children}</code>
+          </pre>
+        );
+      }
+      if (isBlock) return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
+      return (
+        <code
+          style={{
+            background: "var(--bg-selected)",
+            padding: "1px 4px",
+            borderRadius: 3,
+            fontFamily: "var(--font-mono)",
+            fontSize: "0.9em",
+          }}
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    },
+    pre({ children }) {
+      // CodeBlock 和流式轻量代码块都管理自己的容器。
+      return <>{children}</>;
+    },
+  };
+}
+
+const STREAMING_MARKDOWN_COMPONENTS = createMarkdownComponents(true);
+const COMPLETED_MARKDOWN_COMPONENTS = createMarkdownComponents(false);
+
+function TextBlock({ block, isStreaming }: { block: TextContent; isStreaming?: boolean }) {
   return (
     <div className="markdown-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        components={{
-          a({ href, children, ...props }) {
-            return (
-              <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                {...props}
-              >
-                {children}
-              </a>
-            );
-          },
-          code({ className, children, ...props }) {
-            const lang = className?.replace("language-", "") ?? "";
-            const raw = String(children);
-            const isBlock = className?.includes("language-") || raw.includes("\n");
-            if (isBlock) {
-              return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
-            }
-            return (
-              <code
-                style={{
-                  background: "var(--bg-selected)",
-                  padding: "1px 4px",
-                  borderRadius: 3,
-                  fontFamily: "var(--font-mono)",
-                  fontSize: "0.9em",
-                }}
-                {...props}
-              >
-                {children}
-              </code>
-            );
-          },
-          pre({ children }) {
-            // Unwrap <pre> wrapper — CodeBlock handles its own container
-            return <>{children}</>;
-          },
-        }}
+        components={isStreaming ? STREAMING_MARKDOWN_COMPONENTS : COMPLETED_MARKDOWN_COMPONENTS}
       >
         {block.text}
       </ReactMarkdown>

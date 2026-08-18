@@ -17,7 +17,8 @@ import { getAgentRunStore } from "./agent-runtime/run-store";
 import { isTerminalAgentRunStatus, type AgentRunRecord } from "./agent-runtime/run-types";
 import { registerShutdownCleanup } from "./process-shutdown";
 import type { AgentRuntimeEventBase } from "./agent-runtime/types";
-import type { FileReference, ImageContent, SkillReference, TextContent } from "./types";
+import { hostEventBus, type HostRunningSession, type SessionTransientSnapshot } from "./host-event-bus";
+import type { FileReference, ImageContent, SkillReference, TextContent, TurnCapabilities } from "./types";
 import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
 import {
   applyModePrompt,
@@ -48,6 +49,20 @@ interface PreparedTurnContext {
   references: FileReference[];
   skill?: SkillReference;
   systemPromptBlock: string;
+}
+
+interface TurnAdmissionSnapshot {
+  systemPrompt: string;
+  activeToolNames: readonly string[];
+  roleId: string | null;
+  agentMode: AgentMode;
+}
+
+interface EnsureMcpRuntimeOptions {
+  activateMcp?: boolean;
+  signal?: AbortSignal;
+  /** 提交 Runtime 时，发起该任务的准入代次仍必须有效。 */
+  canCommit?: () => boolean;
 }
 
 type RuntimeImage = {
@@ -207,6 +222,34 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * 让 Wrapper 的准入等待可被及时取消。底层任务可能不支持 AbortSignal，
+ * 但竞速 Promise 会立即拒绝并持有晚到 rejection handler，避免未处理拒绝。
+ */
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 const FULL_PRESET_MARKERS = ["bash", "edit", "write", "grep", "find", "ls"];
 
 function isFullToolPreset(toolNames: string[]): boolean {
@@ -300,6 +343,8 @@ export class AgentSessionWrapper {
   private _turnActive = false;
   /** prompt 正在做异步预处理、尚未进入 engine.prompt 的准入锁。 */
   private pendingPromptController: AbortController | null = null;
+  /** recover / 空闲 follow-up 在停止旧回合与建立新回合之间持有的统一新回合准入锁。 */
+  private freshTurnAdmissionController: AbortController | null = null;
   /** 同一 clientMessageId 的并发重试共享同一准入结果，不能落入 AGENT_BUSY。 */
   private pendingPromptAdmissions = new Map<string, { turnId?: string; promise: Promise<{ turnId: string }> }>();
   /** 用户已请求停止；直到准入任务和 engine turn 都停止前保持为 true。 */
@@ -338,8 +383,8 @@ export class AgentSessionWrapper {
     return this.mcpRuntimeLease?.runtime ?? null;
   }
 
-  private syncRoleMcpActiveTools(): void {
-    const allMcpToolNames = this.mcpRuntime?.toolNames ?? [];
+  private syncRoleMcpActiveTools(targetRuntime: McpRuntime | null = this.mcpRuntime): void {
+    const allMcpToolNames = targetRuntime?.toolNames ?? [];
     if (allMcpToolNames.length === 0) return;
 
     const config = readRoleSystemPromptConfig(this.roleId);
@@ -363,17 +408,38 @@ export class AgentSessionWrapper {
     this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));
   }
 
-  /** Keep subagent in (or out of) the active tool set based on the toggle. */
+  /** Keep subagent in (or out of) the active tool set based on capability and mode. */
   private applySubagentToActiveTools(): void {
     const all = this.inner.getAllTools();
     if (!all.some((t) => t.name === SUBAGENT_TOOL_NAME)) return; // tool not registered for this session
     const current = this.inner.getActiveToolNames();
-    if (this._subagentEnabled) {
+    const shouldEnable = this._subagentEnabled && !isReadOnlyAgentMode(this.agentMode);
+    if (shouldEnable) {
       if (!current.includes(SUBAGENT_TOOL_NAME)) {
         this.inner.setActiveToolsByName([...current, SUBAGENT_TOOL_NAME]);
       }
     } else if (current.includes(SUBAGENT_TOOL_NAME)) {
       this.inner.setActiveToolsByName(current.filter((name) => name !== SUBAGENT_TOOL_NAME));
+    }
+  }
+
+  private setSubagentEnabled(enabled: boolean): void {
+    this._subagentEnabled = enabled;
+    this.applySubagentToActiveTools();
+    this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));
+    this.applyRolePrompt();
+  }
+
+  private readTurnCapabilities(command: Record<string, unknown>): TurnCapabilities {
+    const value = command.capabilities;
+    if (!isRecord(value)) return {};
+    return typeof value.subagent === "boolean" ? { subagent: value.subagent } : {};
+  }
+
+  private applyTurnCapabilities(command: Record<string, unknown>): void {
+    const capabilities = this.readTurnCapabilities(command);
+    if (typeof capabilities.subagent === "boolean") {
+      this.setSubagentEnabled(capabilities.subagent);
     }
   }
 
@@ -384,12 +450,16 @@ export class AgentSessionWrapper {
    * 注意：内部恢复 baseSystemPrompt 失败后会重新 throw，让调用方感知并处理；
    * 回合级上下文已改由不可变 TurnContextSnapshot 承载，不再依赖此处的临时覆盖。
    */
-  private applyRolePrompt(): void {
+  private applyRolePrompt(
+    targetRuntime: McpRuntime | null = this.mcpRuntime,
+    throwOnFailure = false,
+  ): void {
     try {
       try {
-        this.syncRoleMcpActiveTools();
+        this.syncRoleMcpActiveTools(targetRuntime);
       } catch (syncErr) {
-        // syncRoleMcp 失败不中断整个 applyRolePrompt，MCP 工具保持旧状态即可
+        // 普通配置刷新保持原有 best-effort 语义；MCP 安装事务必须感知失败并回滚。
+        if (throwOnFailure) throw syncErr;
         console.error("syncRoleMcpActiveTools failed, MCP tools unchanged:", syncErr);
       }
       const promptWithTools = upsertToolsSection(
@@ -413,6 +483,7 @@ export class AgentSessionWrapper {
         // 让调用方（set_role / set_mode / set_tools 等重建入口）感知失败并中止
         throw err2;
       }
+      if (throwOnFailure) throw err;
     }
   }
 
@@ -463,11 +534,11 @@ export class AgentSessionWrapper {
     return null;
   }
 
-  private appendTurnContextMetadata(references: FileReference[], skill?: SkillReference): void {
+  private appendTurnContextMetadata(references: FileReference[], skill?: SkillReference, mode: AgentMode = this.agentMode): void {
     if (!this.session.persisted) return;
     try {
       this.session.appendCustomEntry("turn_context", {
-        mode: this.agentMode,
+        mode,
         ...(references.length ? { references } : {}),
         ...(skill ? { skill } : {}),
       });
@@ -481,9 +552,9 @@ export class AgentSessionWrapper {
     return await this.projectResources.resolveSkill(cwd, skillName) ?? { name: skillName };
   }
 
-  private buildTurnSystemPromptBlock(ctx: { references: FileReference[]; skill?: SkillInvocation }): string {
+  private buildTurnSystemPromptBlock(ctx: { references: FileReference[]; skill?: SkillInvocation; agentMode: AgentMode }): string {
     const lines = ["<turn_context>"];
-    lines.push(`Current turn mode: ${this.agentMode}`);
+    lines.push(`Current turn mode: ${ctx.agentMode}`);
     if (ctx.references.length > 0) {
       lines.push("");
       lines.push("User-selected references for this turn:");
@@ -505,7 +576,12 @@ export class AgentSessionWrapper {
     return lines.join("\n");
   }
 
-  private async prepareTurnContext(rawMessage: string, rawReferences: unknown, rawSkillName: unknown): Promise<PreparedTurnContext> {
+  private async prepareTurnContext(
+    rawMessage: string,
+    rawReferences: unknown,
+    rawSkillName: unknown,
+    agentMode: AgentMode,
+  ): Promise<PreparedTurnContext> {
     const references = normalizeReferences(rawReferences);
     const parsedSkill = parseSkillCommand(rawMessage);
     const explicitSkillName = typeof rawSkillName === "string" ? rawSkillName : undefined;
@@ -519,7 +595,7 @@ export class AgentSessionWrapper {
       displayMessage,
       references,
       skill,
-      systemPromptBlock: this.buildTurnSystemPromptBlock({ references, skill: skillInvocation }),
+      systemPromptBlock: this.buildTurnSystemPromptBlock({ references, skill: skillInvocation, agentMode }),
     };
   }
 
@@ -560,18 +636,34 @@ export class AgentSessionWrapper {
     return runId;
   }
 
-  private buildFrozenTurnContext(turnId: string, turnContext: PreparedTurnContext): TurnContextSnapshot {
-    const currentPrompt = stripTurnContextBlock(this.inner.systemPrompt);
-    const effectiveSystemPrompt = turnContext.systemPromptBlock.trim()
-      ? `${currentPrompt}\n\n${turnContext.systemPromptBlock.trim()}`
-      : currentPrompt;
+  private captureTurnAdmission(command: Record<string, unknown>): TurnAdmissionSnapshot {
+    const commandRoleId = typeof command.roleId === "string" ? command.roleId : undefined;
+    if (commandRoleId) this.setRole(commandRoleId);
+    this.applyTurnCapabilities(command);
     return Object.freeze({
-      turnId,
-      effectiveSystemPrompt,
-      ...(turnContext.systemPromptBlock.trim() ? { instructionContext: turnContext.systemPromptBlock.trim() } : {}),
+      systemPrompt: stripTurnContextBlock(this.inner.systemPrompt),
       activeToolNames: Object.freeze([...this.inner.getActiveToolNames()]),
       roleId: this.roleId,
       agentMode: this.agentMode,
+    });
+  }
+
+  private buildFrozenTurnContext(
+    turnId: string,
+    turnContext: PreparedTurnContext,
+    admission: TurnAdmissionSnapshot,
+  ): TurnContextSnapshot {
+    const instructionContext = turnContext.systemPromptBlock.trim();
+    const effectiveSystemPrompt = instructionContext
+      ? `${admission.systemPrompt}\n\n${instructionContext}`
+      : admission.systemPrompt;
+    return Object.freeze({
+      turnId,
+      effectiveSystemPrompt,
+      ...(instructionContext ? { instructionContext } : {}),
+      activeToolNames: admission.activeToolNames,
+      roleId: admission.roleId,
+      agentMode: admission.agentMode,
       references: Object.freeze([...turnContext.references]),
       ...(turnContext.skill ? { skill: Object.freeze({ ...turnContext.skill }) } : {}),
       createdAt: Date.now(),
@@ -629,11 +721,13 @@ export class AgentSessionWrapper {
       } else if (event.type === "agent_end" && event.willRetry !== true) {
         const error = typeof event.error === "string" ? event.error : undefined;
         const errorCode = typeof event.errorCode === "string" ? event.errorCode : undefined;
+        const stopReason = typeof event.stopReason === "string" ? event.stopReason : undefined;
+        const cancelled = stopReason === "aborted" || error === "aborted";
         this.transitionCurrentRun({
-          status: error === "aborted" ? "cancelled" : error ? "failed" : "succeeded",
+          status: cancelled ? "cancelled" : error ? "failed" : "succeeded",
           lastEventType: event.type,
-          ...(error ? { error } : {}),
-          ...(errorCode ? { errorCode } : {}),
+          ...(!cancelled && error ? { error } : {}),
+          ...(!cancelled && errorCode ? { errorCode } : {}),
         });
       }
       if (event.type === "auto_retry_start") {
@@ -700,6 +794,9 @@ export class AgentSessionWrapper {
       }
     });
     this.startIdlePulse();
+    // A wrapper may be cold-started after a mux connection baseline was sent.
+    // Publish its initial idle/transient state so late creation still converges.
+    this.emitHostState();
   }
 
   // Idle timeout: keep inactive wrappers cheap, but never kill a running turn
@@ -795,7 +892,25 @@ export class AgentSessionWrapper {
     }
   }
 
+  private emitHostState(updatedAt = Date.now()): void {
+    const status = this.getStatus();
+    hostEventBus.emit({
+      type: "host_running_snapshot",
+      sessions: listRpcHostRunningSessions(updatedAt),
+    });
+    hostEventBus.emit({
+      type: "session_transient_snapshot",
+      sessionId: this.sessionId,
+      running: status.isRunning,
+      isStreaming: status.isStreaming,
+      isCompacting: status.isCompacting,
+      thinkingLevel: this.inner.thinkingLevel,
+      updatedAt,
+    });
+  }
+
   private recordEventStatus(event: AgentEvent): void {
+    const previous = this.getStatus();
     const now = Date.now();
     if (event.type === "agent_start" || !this.runStartedAt || (!this.inner.isStreaming && !this.inner.isCompacting)) {
       this.runStartedAt = now;
@@ -846,6 +961,25 @@ export class AgentSessionWrapper {
     ) {
       this.sawAssistantEventInTurn = true;
     }
+
+    const current = this.getStatus();
+    if (
+      previous.isRunning !== current.isRunning
+      || previous.isStreaming !== current.isStreaming
+      || previous.isCompacting !== current.isCompacting
+      || event.type === "agent_start"
+      || event.type === "agent_end"
+      || event.type === "compaction_start"
+      || event.type === "compaction_end"
+      || event.type === "auto_compaction_start"
+      || event.type === "auto_compaction_end"
+    ) {
+      this.emitHostState(now);
+    }
+  }
+
+  getTransientState(): { thinkingLevel?: string } {
+    return { thinkingLevel: this.inner.thinkingLevel };
   }
 
   getStatus() {
@@ -934,30 +1068,70 @@ export class AgentSessionWrapper {
   }
 
   private async waitForCurrentTurnToStop(timeoutMs: number): Promise<void> {
-    const start = Date.now();
-    while ((this._isRunning || this.inner.isStreaming) && Date.now() - start < timeoutMs) {
-      await sleepMs(50);
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (this._isRunning || this.inner.isStreaming || this.inner.isCompacting) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await sleepMs(Math.min(50, remaining));
     }
   }
 
-  private async abortAndSettleCurrentTurn(): Promise<void> {
+  private async abortAndSettleCurrentTurn(timeoutMs = 8_000): Promise<void> {
     const turnPromise = this.activeTurnPromise;
     const turnId = this.activeTurnId;
+    const deadline = Date.now() + timeoutMs;
+    let timedOut = false;
 
-    await this.inner.abort();
-    await this.waitForCurrentTurnToStop(8_000);
+    // inner.abort() 自身会等待 Engine 最多 30 秒。Recover 的 8 秒必须是包含
+    // 这段等待的总 deadline，而不是等 abort 返回后才开始计时。
+    const abortPromise = Promise.resolve().then(() => this.inner.abort());
+    void abortPromise.catch((error) => {
+      if (timedOut) console.error("Late agent abort failed", error);
+    });
+    const abortSettled = await Promise.race([
+      abortPromise.then(() => true),
+      sleepMs(Math.max(0, deadline - Date.now())).then(() => false),
+    ]);
+    if (!abortSettled) {
+      timedOut = true;
+      throw new Error(`abort timeout: current turn did not settle within ${timeoutMs}ms`);
+    }
 
-    // 8s 后仍在跑 —— turn 卡死，拒绝继续，避免与新 turn 竞争 SDK 状态
+    await this.waitForCurrentTurnToStop(Math.max(0, deadline - Date.now()));
     if (this._isRunning || this.inner.isStreaming || this.inner.isCompacting) {
-      throw new Error("abort timeout: current turn did not settle within 8s");
+      timedOut = true;
+      throw new Error(`abort timeout: current turn did not settle within ${timeoutMs}ms`);
     }
 
     if (turnPromise && this.activeTurnId === turnId) {
-      await Promise.race([
-        turnPromise.catch(() => {}),
-        sleepMs(2_000),
+      const turnSettled = await Promise.race([
+        turnPromise.then(() => true, () => true),
+        sleepMs(Math.max(0, deadline - Date.now())).then(() => false),
       ]);
+      if (!turnSettled) {
+        timedOut = true;
+        throw new Error(`abort timeout: current turn promise did not settle within ${timeoutMs}ms`);
+      }
     }
+  }
+
+  private reserveFreshTurnAdmission(message: string): AbortController {
+    if (this.freshTurnAdmissionController || this.pendingPromptController) {
+      throw new Error(`AGENT_BUSY: ${message}`);
+    }
+    const controller = new AbortController();
+    this.freshTurnAdmissionController = controller;
+    return controller;
+  }
+
+  private releaseFreshTurnAdmission(controller: AbortController): void {
+    if (this.freshTurnAdmissionController === controller) {
+      this.freshTurnAdmissionController = null;
+    }
+  }
+
+  private canReloadMcpNow(): boolean {
+    return !this.isTurnBusy() && !this._turnActive && !this._stopRequested;
   }
 
   private installMcpRuntime(nextRuntime: McpRuntime, activateMcp: boolean): void {
@@ -965,40 +1139,95 @@ export class AgentSessionWrapper {
     const previousMcpToolNames = new Set(previousRuntime?.toolNames ?? []);
     const nextMcpToolNames = new Set(nextRuntime.toolNames);
     const activeBefore = this.inner.getActiveToolNames();
+    const systemPromptBefore = this.inner.systemPrompt;
+    const baseSystemPromptBefore = this.baseSystemPrompt;
 
     const nextActiveToolNames = activeBefore.filter((name) => !previousMcpToolNames.has(name) && !name.startsWith("mcp__"));
     if (activateMcp) nextActiveToolNames.push(...nextMcpToolNames);
 
-    // H9：运行时热替换自定义工具。对 pi 私有字段（_customTools / _allowedToolNames /
-    // _refreshToolRegistry）的直接操作已收敛到 AgentEnginePort.replaceCustomTools。
-    // 这里只保留“保留哪些工具 / 激活哪些”的编排决策。
-    this.inner.replaceCustomTools({
-      removeNames: [...previousMcpToolNames],
-      addTools: nextRuntime.tools,
-      extraAllowedNames: [...nextMcpToolNames],
-      activeToolNames: nextActiveToolNames,
-    });
-    this.inner.applyToolExecutionModes();
-
-    this.baseSystemPrompt = stripTurnContextBlock(this.inner.systemPrompt);
-    this.applyRolePrompt();
+    try {
+      // 后续同步全部显式使用 nextRuntime，不能通过尚未切换的 Lease getter
+      // 读到旧 Runtime。任一步失败都在 catch 中恢复 Registry、激活名单和 Prompt。
+      this.inner.replaceCustomTools({
+        removeNames: [...previousMcpToolNames],
+        addTools: nextRuntime.tools,
+        extraAllowedNames: [...nextMcpToolNames],
+        activeToolNames: nextActiveToolNames,
+      });
+      this.inner.applyToolExecutionModes();
+      this.baseSystemPrompt = stripTurnContextBlock(this.inner.systemPrompt);
+      this.applyRolePrompt(nextRuntime, true);
+    } catch (error) {
+      this.baseSystemPrompt = baseSystemPromptBefore;
+      try {
+        this.inner.replaceCustomTools({
+          removeNames: [...nextMcpToolNames],
+          addTools: previousRuntime?.tools ?? [],
+          extraAllowedNames: [...previousMcpToolNames],
+          activeToolNames: activeBefore,
+        });
+        this.inner.applyToolExecutionModes();
+        this.inner.setSystemPromptPersistent(systemPromptBefore);
+      } catch (rollbackError) {
+        console.error("Failed to roll back MCP runtime installation", rollbackError);
+      }
+      throw error;
+    }
   }
 
-  private async ensureMcpRuntimeLoaded(activateMcp = false): Promise<McpRuntime | null> {
+  private canCommitAsyncRuntime(signal?: AbortSignal, extraCheck?: () => boolean): boolean {
+    return this._alive && !signal?.aborted && (extraCheck?.() ?? true);
+  }
+
+  private throwIfAsyncRuntimeInvalid(signal?: AbortSignal, extraCheck?: () => boolean): void {
+    if (!this._alive) throw new DOMException("Session destroyed", "AbortError");
+    signal?.throwIfAborted();
+    if (extraCheck && !extraCheck()) {
+      throw new DOMException("MCP commit no longer allowed", "AbortError");
+    }
+  }
+
+  /** 独立成可替换边界，便于用 gate 验证 acquire 晚到时的 Lease ownership。 */
+  private async acquireMcpRuntimeLease(): Promise<McpRuntimeLease> {
+    const { acquireMcpRuntime } = await import("./mcp-runtime");
+    return acquireMcpRuntime(this.session.cwd);
+  }
+
+  private async ensureMcpRuntimeLoaded(options: EnsureMcpRuntimeOptions = {}): Promise<McpRuntime | null> {
+    const { activateMcp = false, signal, canCommit } = options;
+    this.throwIfAsyncRuntimeInvalid(signal, canCommit);
+
     if (this.mcpRuntime) {
-      if (activateMcp) this.installMcpRuntime(this.mcpRuntime, true);
+      if (activateMcp) {
+        this.throwIfAsyncRuntimeInvalid(signal, canCommit);
+        this.installMcpRuntime(this.mcpRuntime, true);
+      }
       return this.mcpRuntime;
     }
 
-    const cwd = this.session.cwd;
-    const { acquireMcpRuntime } = await import("./mcp-runtime");
-    const lease = await acquireMcpRuntime(cwd);
+    this.throwIfAsyncRuntimeInvalid(signal, canCommit);
+    const lease = await this.acquireMcpRuntimeLease();
+    let leaseOwned = true;
+    const releaseLease = () => {
+      if (!leaseOwned) return;
+      leaseOwned = false;
+      lease.release();
+    };
+
+    if (!this.canCommitAsyncRuntime(signal, canCommit)) {
+      releaseLease();
+      this.throwIfAsyncRuntimeInvalid(signal, canCommit);
+    }
+
     try {
+      // installMcpRuntime 是同步事务；提交前的校验与 Lease ownership 转移之间
+      // 不存在 event-loop 抢占点，晚到任务无法越过该边界污染未来回合。
       this.installMcpRuntime(lease.runtime, activateMcp);
       this.mcpRuntimeLease = lease;
+      leaseOwned = false;
       return lease.runtime;
     } catch (error) {
-      lease.release();
+      releaseLease();
       throw error;
     }
   }
@@ -1007,14 +1236,19 @@ export class AgentSessionWrapper {
     message: string,
     images?: RuntimeImage[],
     displayMessage = message,
+    signal?: AbortSignal,
+    canCommit?: () => boolean,
   ): Promise<{ message: string; images?: RuntimeImage[]; displayContent?: DisplayUserContent }> {
+    this.throwIfAsyncRuntimeInvalid(signal, canCommit);
     if (!images?.length) return { message, images };
 
     // Resolve filePath → base64 data for images that are stored on disk.
     // This keeps session files lean (only file references) while still
     // sending actual image data to the model API when needed.
     const fs = await import("fs");
+    this.throwIfAsyncRuntimeInvalid(signal, canCommit);
     const resolvedImages = await Promise.all(images.map(async (img) => {
+      signal?.throwIfAborted();
       if (img.filePath && !img.data) {
         try {
           const fileData = fs.readFileSync(img.filePath);
@@ -1027,17 +1261,28 @@ export class AgentSessionWrapper {
       }
       return img;
     }));
+    this.throwIfAsyncRuntimeInvalid(signal, canCommit);
 
     const displayContent = buildDisplayUserContent(displayMessage, resolvedImages);
     const supportsImageInput = (this.inner.model as { input?: string[] } | null | undefined)?.input?.includes("image") ?? false;
     if (supportsImageInput) return { message, images: resolvedImages, displayContent };
 
-    const mcpRuntime = await this.ensureMcpRuntimeLoaded(false).catch(() => null);
+    let mcpRuntime: McpRuntime | null = null;
+    try {
+      mcpRuntime = await this.ensureMcpRuntimeLoaded({ signal, canCommit });
+    } catch (error) {
+      if (signal?.aborted || !this._alive || (canCommit && !canCommit())) throw error;
+    }
+    this.throwIfAsyncRuntimeInvalid(signal, canCommit);
     if (mcpRuntime) {
       const sdkFallbackImages = toSdkImages(resolvedImages);
       if (sdkFallbackImages?.length) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawDescriptions = await mcpRuntime.describeImages(sdkFallbackImages as any, message).catch(() => [] as string[]);
+        const rawDescriptions = await mcpRuntime.describeImages(sdkFallbackImages as any, message, signal).catch((error) => {
+          if (signal?.aborted) throw error;
+          return [] as string[];
+        });
+        this.throwIfAsyncRuntimeInvalid(signal, canCommit);
         // Filter out error lines — keep only actual image descriptions.
         const validDescriptions = rawDescriptions.filter(
           (text) => !text.startsWith("MCP 图片识别失败") && !/^图片 \d+ 识别失败/.test(text),
@@ -1046,6 +1291,7 @@ export class AgentSessionWrapper {
           const imageContext = validDescriptions
             .map((text, index) => `图片 ${index + 1}:\n${text}`)
             .join("\n\n");
+          this.throwIfAsyncRuntimeInvalid(signal, canCommit);
           return {
             message: `${message}\n\n<image_context source="mcp-vision-fallback">\n${imageContext}\n</image_context>\n\n注意：当前模型配置未勾选图片输入，上面的 image_context 是由 MCP 图片识别服务生成的，请基于该内容回答用户。`,
             images: undefined,
@@ -1055,18 +1301,27 @@ export class AgentSessionWrapper {
       }
     }
 
+    this.throwIfAsyncRuntimeInvalid(signal, canCommit);
     // No usable MCP vision fallback — just return the message without images.
     return { message, images: undefined, displayContent };
   }
 
   private async reloadMcpRuntime(): Promise<{ ok: boolean; skipped?: boolean; toolNames?: string[]; serverStatuses?: McpRuntime["serverStatuses"] }> {
-    if (this._isRunning || this.inner.isStreaming || this.inner.isCompacting) {
+    if (!this.canReloadMcpNow()) {
       return { ok: false, skipped: true };
     }
 
     const cwd = this.session.cwd;
     const { acquireMcpRuntime } = await import("./mcp-runtime");
     const nextLease = await acquireMcpRuntime(cwd);
+
+    // acquire 期间可能有新 Prompt/Recover/Steer/Follow-up 进入准入。
+    // 此时新 Lease 不能安装，也不能泄漏。
+    if (!this.canReloadMcpNow()) {
+      nextLease.release();
+      return { ok: false, skipped: true };
+    }
+
     const nextRuntime = nextLease.runtime;
     const previousRuntime = this.mcpRuntime;
     const previousMcpToolNames = new Set(previousRuntime?.toolNames ?? []);
@@ -1098,8 +1353,9 @@ export class AgentSessionWrapper {
     skillName: unknown,
     images: Array<{ type: "image"; data: string; mimeType: string }> | undefined,
     clientMessageId: string | undefined,
+    admission: TurnAdmissionSnapshot,
     signal?: AbortSignal,
-    roleId?: string,
+    canCommit?: () => boolean,
   ): Promise<{ turnId: string }> {
     const turnNum = ++this.activeTurnId;
     const turnKey = `${this.session.id}:t${turnNum}`;
@@ -1108,15 +1364,14 @@ export class AgentSessionWrapper {
     this.transitionCurrentRun({ status: "preparing", lastEventType: "prompt_preparing" });
 
     try {
-      const turnContext = await this.prepareTurnContext(rawMessage, references, skillName);
+      const turnContext = await this.prepareTurnContext(rawMessage, references, skillName, admission.agentMode);
       signal?.throwIfAborted();
       if (turnContext.displayMessage) {
         getLiveIslandClient().recordPrompt(this.session.id, turnContext.displayMessage);
       }
-      const prepared = await this.prepareImageFallback(turnContext.message, images, turnContext.displayMessage);
+      const prepared = await this.prepareImageFallback(turnContext.message, images, turnContext.displayMessage, signal, canCommit);
       signal?.throwIfAborted();
-      if (roleId) this.setRole(roleId);
-      const frozenContext = this.buildFrozenTurnContext(turnKey, turnContext);
+      const frozenContext = this.buildFrozenTurnContext(turnKey, turnContext, admission);
 
       const displayUserContent = prepared.displayContent ?? turnContext.displayMessage;
       // 先写入 durable receipt，再通知 SSE / 启动引擎。写失败时客户端可安全重试，
@@ -1124,7 +1379,7 @@ export class AgentSessionWrapper {
       // 顺序约束：display_user_message 必须是 user message 的直接 parent——
       // session-reader 的 getDisplayUserMessage 靠这个父子关系回读 clientMessageId
       // 与展示内容；turn_context 插在中间会切断该链路（见 32a2d25 引入的回归）。
-      this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
+      this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode);
       this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId, turnKey);
 
       const userEchoEvent = {
@@ -1135,7 +1390,7 @@ export class AgentSessionWrapper {
           ...(turnContext.references.length ? { references: turnContext.references } : {}),
           ...(turnContext.skill ? { skill: turnContext.skill } : {}),
           ...(clientMessageId ? { clientMessageId } : {}),
-          agentMode: this.agentMode,
+          agentMode: admission.agentMode,
           timestamp: Date.now(),
         },
       } as AgentEvent;
@@ -1167,12 +1422,49 @@ export class AgentSessionWrapper {
     }
   }
 
+  private startPreparedFreshTurn(options: {
+    prepared: { message: string; images?: RuntimeImage[]; displayContent?: DisplayUserContent };
+    turnContext: PreparedTurnContext;
+    admission: TurnAdmissionSnapshot;
+    source: "steer_promoted" | "follow_up_promoted";
+  }): { turnId: string } {
+    const turnNum = ++this.activeTurnId;
+    const turnKey = `${this.session.id}:t${turnNum}`;
+    const frozenContext = this.buildFrozenTurnContext(turnKey, options.turnContext, options.admission);
+    const displayUserContent = options.prepared.displayContent ?? options.turnContext.displayMessage;
+
+    this.currentTurnKey = turnKey;
+    this.createPromptRun(turnKey);
+    this.transitionCurrentRun({ status: "preparing", lastEventType: `${options.source}_preparing` });
+    try {
+      this.appendTurnContextMetadata(options.turnContext.references, options.turnContext.skill, options.admission.agentMode);
+      this.appendDisplayUserMessage(displayUserContent, options.turnContext.references, options.turnContext.skill, undefined, turnKey);
+      this._turnActive = true;
+      this.trackTurn(turnNum, this.inner.prompt({
+        text: options.prepared.message,
+        ...(toSdkImages(options.prepared.images) ? { images: toSdkImages(options.prepared.images)! } : {}),
+        context: frozenContext,
+      }));
+      return { turnId: turnKey };
+    } catch (error) {
+      this._turnActive = false;
+      const aborted = error instanceof DOMException && error.name === "AbortError";
+      this.transitionCurrentRun({
+        status: aborted ? "cancelled" : "failed",
+        lastEventType: `${options.source}_admission_failed`,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
   /** 内部准入保护：允许比实际回合状态更保守，防止旧清理与新 prompt 竞争。 */
   private isTurnBusy(): boolean {
     // isCompacting：自动压缩在 `_isRunning`/stream 之前就会占用回合；漏计会导致
     // abort 认为已空闲、stopRequested 立刻被清掉，UI 卡在「正在压缩上下文…」。
     return Boolean(
       this.pendingPromptController
+      || this.freshTurnAdmissionController
       || this._isRunning
       || this.inner.isStreaming
       || this.inner.isCompacting,
@@ -1213,6 +1505,7 @@ export class AgentSessionWrapper {
         if (this.isTurnBusy() || this._stopRequested) {
           throw new Error("AGENT_BUSY: 当前会话仍有回合运行或正在停止，请等待回合结束后重试");
         }
+        const admission = this.captureTurnAdmission(command);
         const admissionController = new AbortController();
         this._turnActive = true;
         this.pendingPromptController = admissionController;
@@ -1225,7 +1518,6 @@ export class AgentSessionWrapper {
           if (bindRequestAbort.aborted) abortAdmission();
           else bindRequestAbort.addEventListener("abort", abortAdmission, { once: true });
         }
-        const promptRoleId = typeof command.roleId === "string" ? command.roleId : undefined;
         const promptText = typeof command.message === "string" ? command.message : "";
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         let admissionPromise: Promise<{ turnId: string }> | null = null;
@@ -1236,8 +1528,9 @@ export class AgentSessionWrapper {
             command.skillName,
             promptImages,
             promptClientMessageId,
+            admission,
             admissionController.signal,
-            promptRoleId,
+            () => this.pendingPromptController === admissionController,
           );
           if (promptClientMessageId) {
             const pending = { promise: admissionPromise } as { turnId?: string; promise: Promise<{ turnId: string }> };
@@ -1298,6 +1591,7 @@ export class AgentSessionWrapper {
           this.transitionCurrentRun({ status: "stopping", lastEventType: "abort_requested" });
         }
         this.pendingPromptController?.abort(new DOMException("Stop requested", "AbortError"));
+        this.freshTurnAdmissionController?.abort(new DOMException("Stop requested", "AbortError"));
         // 显式打断压缩（inner.abort 也会做）；保证压缩窗口 stop 一定生效。
         this.inner.abortCompaction();
         void this.inner.abort().then(() => {
@@ -1312,9 +1606,9 @@ export class AgentSessionWrapper {
       }
 
       case "recover": {
-        // Atomic abort-and-continue: settle the old turn, optionally switch
-        // model, then start a fresh prompt turn. Replaces the frontend's
-        // manual abort + while-wait + sleep(150) + follow_up choreography.
+        // Atomic abort-and-continue: reserve fresh-turn admission before settling
+        // the old turn so no prompt/recover/idle follow-up can enter the gap.
+        const recoveryAdmissionController = this.reserveFreshTurnAdmission("当前会话已有新回合正在准入，请稍后重试恢复");
         const recoverySource = typeof command.source === "string" ? command.source : "manual";
         const recoveryReason = typeof command.reason === "string" ? command.reason : "continue";
         this.appendRuntimeAudit("recover", {
@@ -1341,18 +1635,30 @@ export class AgentSessionWrapper {
           }
 
           await this.abortAndSettleCurrentTurn();
+          recoveryAdmissionController.signal.throwIfAborted();
           let modelChanged = false;
           if (recoveryModel) {
             await this.inner.setModel(recoveryModel);
+            recoveryAdmissionController.signal.throwIfAborted();
             modelChanged = true;
           }
+          const admission = this.captureTurnAdmission(command);
 
           const recoverText = typeof command.message === "string" ? command.message : "";
           const recoverImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const recoverClientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
             ? command.clientMessageId.trim()
             : undefined;
-          const recoverTurn = await this.commitAndTrackPromptTurn(recoverText, command.references, command.skillName, recoverImages, recoverClientMessageId);
+          const recoverTurn = await this.commitAndTrackPromptTurn(
+            recoverText,
+            command.references,
+            command.skillName,
+            recoverImages,
+            recoverClientMessageId,
+            admission,
+            recoveryAdmissionController.signal,
+            () => this.freshTurnAdmissionController === recoveryAdmissionController,
+          );
           this.appendRuntimeAudit("recover", {
             phase: "end",
             success: true,
@@ -1371,6 +1677,9 @@ export class AgentSessionWrapper {
             error: error instanceof Error ? error.message : String(error),
           });
           throw error;
+        } finally {
+          this.releaseFreshTurnAdmission(recoveryAdmissionController);
+          if (!this.isTurnBusy()) this._stopRequested = false;
         }
       }
 
@@ -1394,6 +1703,8 @@ export class AgentSessionWrapper {
           systemPrompt: this.inner.systemPrompt,
           thinkingLevel: this.inner.thinkingLevel,
           agentMode: this.agentMode,
+          capabilities: { subagent: this._subagentEnabled },
+          activeToolNames: this.inner.getActiveToolNames(),
           isRunning: this.isTurnRunningForUi(),
           stopRequested: this._stopRequested,
           lastRun: this.getLastRun(),
@@ -1435,6 +1746,7 @@ export class AgentSessionWrapper {
       case "set_thinking_level": {
         const level = command.level as string;
         this.inner.setThinkingLevel(level);
+        this.emitHostState();
         return null;
       }
 
@@ -1489,47 +1801,88 @@ export class AgentSessionWrapper {
       }
 
       case "steer": {
-        const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const steerText = typeof command.message === "string" ? command.message : "";
-        const turnContext = await this.prepareTurnContext(steerText, command.references, command.skillName);
-        const prepared = await this.prepareImageFallback(turnContext.message, steerImages, turnContext.displayMessage);
-        this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
-        this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
-        await this.inner.steer({
-          text: prepared.message,
-          ...(toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : {}),
-          context: this.buildFrozenTurnContext(`${this.session.id}:steer:${Date.now().toString(36)}`, turnContext),
-        });
-        return null;
+        if (!this._isRunning && !this.inner.isStreaming) {
+          throw new Error("AGENT_NOT_RUNNING: 当前没有可插入的运行回合");
+        }
+        const steerAdmissionController = this.reserveFreshTurnAdmission("当前有新回合正在准入，请稍后重试 Steer");
+        try {
+          const admission = this.captureTurnAdmission(command);
+          const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+          const steerText = typeof command.message === "string" ? command.message : "";
+          const turnContext = await raceWithAbort(
+            this.prepareTurnContext(steerText, command.references, command.skillName, admission.agentMode),
+            steerAdmissionController.signal,
+          );
+          const prepared = await raceWithAbort(
+            this.prepareImageFallback(
+              turnContext.message,
+              steerImages,
+              turnContext.displayMessage,
+              steerAdmissionController.signal,
+              () => this.freshTurnAdmissionController === steerAdmissionController,
+            ),
+            steerAdmissionController.signal,
+          );
+
+          if (this._isRunning || this.inner.isStreaming) {
+            this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode);
+            this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
+            await this.inner.steer({
+              text: prepared.message,
+              ...(toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : {}),
+              context: this.buildFrozenTurnContext(`${this.session.id}:steer:${Date.now().toString(36)}`, turnContext, admission),
+            });
+            return null;
+          }
+
+          // 准备期间根回合已结束：不能把消息留在无人消费的 steeringQueue。
+          // 使用 Steer 自己冻结的环境提升为独立新回合。
+          return this.startPreparedFreshTurn({ prepared, turnContext, admission, source: "steer_promoted" });
+        } finally {
+          this.releaseFreshTurnAdmission(steerAdmissionController);
+        }
       }
 
       case "follow_up": {
-        const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const followText = typeof command.message === "string" ? command.message : "";
-        const turnContext = await this.prepareTurnContext(followText, command.references, command.skillName);
-        const prepared = await this.prepareImageFallback(turnContext.message, followImages, turnContext.displayMessage);
-        this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
-        this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
-        const frozenContext = this.buildFrozenTurnContext(`${this.session.id}:follow:${Date.now().toString(36)}`, turnContext);
-        const imageOptions = toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined;
-        const message = prepared.message;
-
-        if (this._isRunning || this.inner.isStreaming) {
-          // Queued follow-up carries its own immutable instruction context; it cannot
-          // overwrite the currently running turn's system prompt.
-          await this.inner.followUp({ text: message, ...(imageOptions ?? {}), context: frozenContext });
-          return null;
+        const queueIntoRunningTurn = this._isRunning || this.inner.isStreaming;
+        if (!queueIntoRunningTurn && (this.isTurnBusy() || this._stopRequested)) {
+          throw new Error("AGENT_BUSY: 当前会话已有回合或新回合正在准入，请稍后重试");
         }
+        const followAdmissionController = this.reserveFreshTurnAdmission("当前会话已有回合或新回合正在准入，请稍后重试");
+        try {
+          const admission = this.captureTurnAdmission(command);
+          const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+          const followText = typeof command.message === "string" ? command.message : "";
+          const turnContext = await raceWithAbort(
+            this.prepareTurnContext(followText, command.references, command.skillName, admission.agentMode),
+            followAdmissionController.signal,
+          );
+          const prepared = await raceWithAbort(
+            this.prepareImageFallback(
+              turnContext.message,
+              followImages,
+              turnContext.displayMessage,
+              followAdmissionController.signal,
+              () => this.freshTurnAdmissionController === followAdmissionController,
+            ),
+            followAdmissionController.signal,
+          );
 
-        // If the previous turn was already aborted/stopped, followUp would only
-        // sit in the queue and never trigger a model call. Start a fresh turn.
-        const followTurnNum = ++this.activeTurnId;
-        const followTurnKey = `${this.session.id}:t${followTurnNum}`;
-        this.currentTurnKey = followTurnKey;
-        this.createPromptRun(followTurnKey);
-        this.transitionCurrentRun({ status: "preparing", lastEventType: "follow_up_preparing" });
-        this.trackTurn(followTurnNum, this.inner.prompt({ text: message, ...(imageOptions ?? {}), context: frozenContext }));
-        return null;
+          if (this._isRunning || this.inner.isStreaming) {
+            this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode);
+            this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
+            await this.inner.followUp({
+              text: prepared.message,
+              ...(toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : {}),
+              context: this.buildFrozenTurnContext(`${this.session.id}:follow:${Date.now().toString(36)}`, turnContext, admission),
+            });
+            return null;
+          }
+
+          return this.startPreparedFreshTurn({ prepared, turnContext, admission, source: "follow_up_promoted" });
+        } finally {
+          this.releaseFreshTurnAdmission(followAdmissionController);
+        }
       }
 
       case "mcp_reload": {
@@ -1556,7 +1909,7 @@ export class AgentSessionWrapper {
         }
         const isFullPreset = isFullToolPreset(requested);
         if (isFullPreset || includesMcpTool(requested)) {
-          await this.ensureMcpRuntimeLoaded(true);
+          await this.ensureMcpRuntimeLoaded({ activateMcp: true });
         }
         const toolNames = isFullPreset
           ? [...new Set([...requested, ...(this.mcpRuntime?.toolNames ?? [])])]
@@ -1569,10 +1922,7 @@ export class AgentSessionWrapper {
       }
 
       case "set_subagent_enabled": {
-        this._subagentEnabled = command.enabled === true;
-        this.applySubagentToActiveTools();
-        this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));
-        this.applyRolePrompt();
+        this.setSubagentEnabled(command.enabled === true);
         return { enabled: this._subagentEnabled };
       }
 
@@ -1620,9 +1970,12 @@ export class AgentSessionWrapper {
       || this.inner.isCompacting,
     );
     this._turnActive = false;
+    this._isRunning = false;
     this._alive = false;
     this.pendingPromptController?.abort(new DOMException("Session destroyed", "AbortError"));
     this.pendingPromptController = null;
+    this.freshTurnAdmissionController?.abort(new DOMException("Session destroyed", "AbortError"));
+    this.freshTurnAdmissionController = null;
     this._stopRequested = true;
     if (this.idlePulseInterval) { clearInterval(this.idlePulseInterval); this.idlePulseInterval = null; }
     this.unsubscribe?.();
@@ -1673,6 +2026,7 @@ export class AgentSessionWrapper {
     // 清理 EventStore 中该 session 的事件桶，避免长期运行后内存持续增长。
     // fork / idle-timeout / DELETE 都会走到这里，确保 session 销毁时释放事件缓存。
     getAgentEventStore().clearRun(this.session.id);
+    this.emitHostState();
     this.onDestroyCallback?.();
   }
 }
@@ -1875,9 +2229,41 @@ export function getRpcRuntimeDiagnostics(): {
   };
 }
 
-export function listRpcSessionStates(): Array<{ sessionId: string; isStreaming: boolean; isCompacting: boolean; lastEventType: string; eventCount: number; eventRate: number; eventIdleMs: number | null; contentIdleMs: number | null }> {
-  return uniqueRegistrySessions()
-    .map((session) => session.getStatus());
+export function listRpcSessionStates() {
+  return uniqueRegistrySessions().map((session) => session.getStatus());
+}
+
+export function listRpcHostRunningSessions(updatedAt = Date.now()): HostRunningSession[] {
+  return listRpcSessionStates()
+    .filter((state) => state.isRunning || state.isCompacting)
+    .map((state) => ({
+      sessionId: state.sessionId,
+      running: state.isRunning,
+      isStreaming: state.isStreaming,
+      isCompacting: state.isCompacting,
+      lastEventType: state.lastEventType,
+      eventCount: state.eventCount,
+      eventRate: state.eventRate,
+      eventIdleMs: state.eventIdleMs,
+      contentIdleMs: state.contentIdleMs,
+      updatedAt,
+    }));
+}
+
+export function listRpcSessionTransientSnapshots(updatedAt = Date.now()): SessionTransientSnapshot[] {
+  return uniqueRegistrySessions().map((session) => {
+    const status = session.getStatus();
+    const state = session.getTransientState();
+    return {
+      type: "session_transient_snapshot",
+      sessionId: status.sessionId,
+      running: status.isRunning,
+      isStreaming: status.isStreaming,
+      isCompacting: status.isCompacting,
+      thinkingLevel: state.thinkingLevel,
+      updatedAt,
+    };
+  });
 }
 
 export function reloadMcpForIdleSessions(): Promise<Array<{ sessionId: string; ok: boolean; skipped?: boolean; error?: string; toolNames?: string[] }>> {

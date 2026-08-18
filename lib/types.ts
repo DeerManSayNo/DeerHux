@@ -1,6 +1,11 @@
 // Types mirrored from DeerHux coding-agent session-manager
 import type { AgentMode } from "./agent-modes";
 
+/** Optional client capability snapshot applied atomically before a model turn is frozen. */
+export interface TurnCapabilities {
+  subagent?: boolean;
+}
+
 export interface SessionHeader {
   type: "session";
   version?: number;

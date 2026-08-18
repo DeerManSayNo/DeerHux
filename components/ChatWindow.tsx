@@ -1,21 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
+import type { CollaborationMuxSnapshot } from "@/lib/parallel-agent/collaboration-mux";
 import { MessageView } from "./MessageView";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { CompactionConfirmModal } from "./CompactionConfirmModal";
 import { useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
-import { useAgentSession, type AgentPhase, type RetryInfo, type WatchdogInfo } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase, type RetryInfo, type StreamRenderPriority, type WatchdogInfo } from "@/hooks/useAgentSession";
 import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { needsCompaction, type CompactionModelRef } from "@/lib/compaction-ui";
+import { subscribeSubagentRuns } from "@/lib/agent-event-client";
 
 interface AgentRole {
   id: string;
@@ -34,6 +36,8 @@ interface ProjectOption {
 
 interface Props {
   activeTabId?: string | null;
+  isFocused?: boolean;
+  streamRenderPriority?: StreamRenderPriority;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   compact?: boolean;
@@ -59,6 +63,29 @@ function getProjectName(cwd: string): string {
   const normalized = cwd.replace(/[\\/]+$/, "");
   const parts = normalized.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? cwd;
+}
+
+function mergeCollaborationMuxSnapshot(
+  previous: CollaborationRunSnapshot,
+  snapshot: CollaborationMuxSnapshot,
+): CollaborationRunSnapshot {
+  if (previous.updatedAt > snapshot.updatedAt) return previous;
+
+  const details = new Map(
+    previous.workers.map((worker) => [worker.workerId ?? worker.name, worker]),
+  );
+  return {
+    ...previous,
+    title: snapshot.title ?? previous.title,
+    status: snapshot.status === "removed" ? "aborted" : snapshot.status,
+    workflow: snapshot.workflow,
+    updatedAt: snapshot.updatedAt,
+    workers: snapshot.workers.map((worker) => ({
+      ...details.get(worker.workerId ?? worker.name),
+      ...worker,
+      task: details.get(worker.workerId ?? worker.name)?.task ?? "",
+    })),
+  };
 }
 
 function parseUserMessageText(message: Extract<AgentMessage, { role: "user" }>): string {
@@ -378,18 +405,60 @@ const TYPEWRITER_PHRASES = [
 
 const AUTO_SCROLL_THRESHOLD = 80;
 
-function Typewriter({ phrases }: { phrases: string[] }) {
+const ActiveTurnElapsed = memo(function ActiveTurnElapsed({
+  startedAt,
+  paused,
+  maxWidth,
+  sidePadding,
+}: {
+  startedAt: number;
+  paused: boolean;
+  maxWidth: number;
+  sidePadding: number;
+}) {
+  const [seconds, setSeconds] = useState(() => Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+
+  useEffect(() => {
+    if (paused) return;
+    const tick = () => setSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 500);
+    return () => window.clearInterval(timer);
+  }, [paused, startedAt]);
+
+  return (
+    <div
+      style={{
+        width: "100%",
+        maxWidth,
+        margin: "0 auto 6px",
+        padding: `0 ${sidePadding}px 0 16px`,
+        color: "var(--text-dim)",
+        fontSize: 11,
+        fontVariantNumeric: "tabular-nums",
+        textAlign: "right",
+      }}
+      title="从本轮用户消息发出开始计算"
+    >
+      本轮已耗时 {formatTurnDuration(seconds)}
+    </div>
+  );
+});
+
+function Typewriter({ phrases, paused = false }: { phrases: string[]; paused?: boolean }) {
   const [phraseIdx, setPhraseIdx] = useState(() => Math.floor(Math.random() * phrases.length));
   const [text, setText] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [caretOn, setCaretOn] = useState(true);
 
   useEffect(() => {
+    if (paused) return;
     const blink = setInterval(() => setCaretOn((v) => !v), 530);
     return () => clearInterval(blink);
-  }, []);
+  }, [paused]);
 
   useEffect(() => {
+    if (paused) return;
     const current = phrases[phraseIdx];
     let timeout: ReturnType<typeof setTimeout>;
     if (!deleting && text === current) {
@@ -402,7 +471,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
       timeout = setTimeout(() => setText(next), deleting ? 28 : 55);
     }
     return () => clearTimeout(timeout);
-  }, [text, deleting, phraseIdx, phrases]);
+  }, [text, deleting, phraseIdx, phrases, paused]);
 
   return (
     <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>
@@ -412,11 +481,19 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ activeTabId, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession }: Props) {
+export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession }: Props) {
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
   const [liveCollaborationRuns, setLiveCollaborationRuns] = useState<CollaborationRunSnapshot[]>([]);
+  const [hasAuthoritativeCollaborationRuns, setHasAuthoritativeCollaborationRuns] = useState(false);
+  const liveCollaborationRunsRef = useRef<Map<string, CollaborationRunSnapshot>>(new Map());
+  const hydratingRunIdsRef = useRef<Set<string>>(new Set());
+  const pendingRunMuxSnapshotsRef = useRef<Map<string, CollaborationMuxSnapshot>>(new Map());
+  const removedCollaborationRunIdsRef = useRef<Set<string>>(new Set());
+  const authoritativeCollaborationRunIdsRef = useRef<Set<string> | null>(null);
+  const collaborationSessionIdRef = useRef<string | null>(session?.id ?? null);
+  const collaborationSessionGenerationRef = useRef(0);
   const activeSessionKey = session?.id ?? null;
   const changedFiles = activeSessionKey ? (changedFilesBySession[activeSessionKey] ?? []) : [];
   const [currentRoleId, setCurrentRoleId] = useState("default");
@@ -466,6 +543,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey,
     activeTabId,
+    streamRenderPriority,
   });
   // 本地 SSE 状态在布局切换时可能短暂重置；会话级状态用于无缝维持运行中 UI。
   const isRunning = agentRunning || isSessionRunning;
@@ -484,64 +562,178 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
   const showTransientPhaseNotice = useTransientNotice(transientPhaseNoticeKey);
 
   // 实时轮询服务端 agent 状态（用于状态 ticker）
-  const { server: serverStatus } = useAgentStatus(session?.id, isRunning, watchdogInfo);
+  const { server: serverStatus } = useAgentStatus(session?.id, isRunning, watchdogInfo, !isFocused);
+
+  const commitLiveCollaborationRuns = useCallback((
+    updater: (current: Map<string, CollaborationRunSnapshot>) => Map<string, CollaborationRunSnapshot>,
+  ) => {
+    const next = updater(new Map(liveCollaborationRunsRef.current));
+    liveCollaborationRunsRef.current = next;
+    setLiveCollaborationRuns(
+      [...next.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)),
+    );
+  }, []);
 
   const mergeLiveCollaborationRuns = useCallback((incoming: CollaborationRunSnapshot[]) => {
-    setLiveCollaborationRuns((current) => {
-      const byId = new Map<string, CollaborationRunSnapshot>();
-      for (const run of current) byId.set(run.runId, run);
+    commitLiveCollaborationRuns((byId) => {
       for (const run of incoming) {
+        const pending = pendingRunMuxSnapshotsRef.current.get(run.runId);
+        const merged = pending ? mergeCollaborationMuxSnapshot(run, pending) : run;
+        if (pending) pendingRunMuxSnapshotsRef.current.delete(run.runId);
         const previous = byId.get(run.runId);
-        if (!previous || run.updatedAt >= previous.updatedAt) byId.set(run.runId, run);
+        if (!previous || merged.updatedAt >= previous.updatedAt) byId.set(run.runId, merged);
       }
-      return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+      return byId;
     });
-  }, []);
+  }, [commitLiveCollaborationRuns]);
 
   const handleCollaborationRunUpdate = useCallback((run: CollaborationRunSnapshot) => {
     mergeLiveCollaborationRuns([run]);
   }, [mergeLiveCollaborationRuns]);
 
-  // 运行中走轻量内存态 runs 接口；工具刚结束时依赖变化会再做一次最终拉取，
-  // 确保父级拿到终态后把卡片从底部迁入历史。
-  const hasRunningSubagentTool = agentPhase?.kind === "running_tools" && agentPhase.tools.some((tool) => tool.name === "subagent");
-  useEffect(() => {
-    if (!session?.id) {
-      setLiveCollaborationRuns([]);
-      return;
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const fetchRuns = async () => {
-      try {
-        const res = await fetch(`/api/agent-runs?parentSessionId=${encodeURIComponent(session.id)}`, { cache: "no-store" });
-        if (!res.ok) return;
-        const runs = (await res.json()) as CollaborationRunSnapshot[];
-        if (!cancelled) mergeLiveCollaborationRuns(runs);
-      } catch {
-        // best effort：实时 tag 失败不影响主 agent 运行。
+  const hydrateCollaborationRun = useCallback(async (runId: string) => {
+    if (hydratingRunIdsRef.current.has(runId)) return;
+    const expectedSessionId = collaborationSessionIdRef.current;
+    const expectedGeneration = collaborationSessionGenerationRef.current;
+    if (!expectedSessionId) return;
+    hydratingRunIdsRef.current.add(runId);
+
+    try {
+      const response = await fetch(`/api/agent-runs/${encodeURIComponent(runId)}`, { cache: "no-store" });
+      if (!response.ok) return;
+      const run = await response.json() as CollaborationRunSnapshot;
+      if (collaborationSessionIdRef.current !== expectedSessionId) return;
+      if (collaborationSessionGenerationRef.current !== expectedGeneration) return;
+      if (!hydratingRunIdsRef.current.has(runId)) return;
+      const parentSessionId = (run as CollaborationRunSnapshot & { parentSessionId?: string }).parentSessionId;
+      if (parentSessionId && parentSessionId !== expectedSessionId) return;
+
+      const pending = pendingRunMuxSnapshotsRef.current.get(runId);
+      if (!pending || pending.status === "removed") return;
+      pendingRunMuxSnapshotsRef.current.delete(runId);
+      mergeLiveCollaborationRuns([mergeCollaborationMuxSnapshot(run, pending)]);
+    } catch {
+      // 瞬时失败保持静默；后续 Mux 更新可再次触发水合。
+    } finally {
+      if (collaborationSessionGenerationRef.current === expectedGeneration) {
+        hydratingRunIdsRef.current.delete(runId);
       }
-    };
-    void fetchRuns();
-    if (isRunning && hasRunningSubagentTool) timer = setInterval(fetchRuns, 1200);
-    return () => {
-      cancelled = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [session?.id, isRunning, hasRunningSubagentTool, mergeLiveCollaborationRuns]);
+    }
+  }, [mergeLiveCollaborationRuns]);
+
+  const applyCollaborationMuxRuns = useCallback((incoming: CollaborationMuxSnapshot[], authoritative = false) => {
+    const liveRunIds = authoritative
+      ? new Set(incoming.filter((snapshot) => snapshot.status !== "removed").map((snapshot) => snapshot.runId))
+      : null;
+
+    if (liveRunIds) {
+      authoritativeCollaborationRunIdsRef.current = liveRunIds;
+      for (const runId of liveCollaborationRunsRef.current.keys()) {
+        if (!liveRunIds.has(runId)) {
+          pendingRunMuxSnapshotsRef.current.delete(runId);
+          hydratingRunIdsRef.current.delete(runId);
+        }
+      }
+      for (const runId of pendingRunMuxSnapshotsRef.current.keys()) {
+        if (!liveRunIds.has(runId)) pendingRunMuxSnapshotsRef.current.delete(runId);
+      }
+      commitLiveCollaborationRuns((byId) => {
+        for (const runId of byId.keys()) if (!liveRunIds.has(runId)) byId.delete(runId);
+        return byId;
+      });
+    }
+
+    const knownSnapshots: CollaborationMuxSnapshot[] = [];
+    for (const snapshot of incoming) {
+      if (snapshot.status === "removed") {
+        authoritativeCollaborationRunIdsRef.current?.delete(snapshot.runId);
+        removedCollaborationRunIdsRef.current.add(snapshot.runId);
+        pendingRunMuxSnapshotsRef.current.delete(snapshot.runId);
+        hydratingRunIdsRef.current.delete(snapshot.runId);
+        commitLiveCollaborationRuns((byId) => {
+          byId.delete(snapshot.runId);
+          return byId;
+        });
+        continue;
+      }
+
+      removedCollaborationRunIdsRef.current.delete(snapshot.runId);
+      if (liveCollaborationRunsRef.current.has(snapshot.runId)) {
+        knownSnapshots.push(snapshot);
+        continue;
+      }
+
+      const previousPending = pendingRunMuxSnapshotsRef.current.get(snapshot.runId);
+      if (!previousPending || previousPending.updatedAt <= snapshot.updatedAt) {
+        pendingRunMuxSnapshotsRef.current.set(snapshot.runId, snapshot);
+      }
+      void hydrateCollaborationRun(snapshot.runId);
+    }
+
+    if (knownSnapshots.length > 0) {
+      commitLiveCollaborationRuns((byId) => {
+        for (const snapshot of knownSnapshots) {
+          const previous = byId.get(snapshot.runId);
+          if (previous) byId.set(snapshot.runId, mergeCollaborationMuxSnapshot(previous, snapshot));
+        }
+        return byId;
+      });
+    }
+  }, [commitLiveCollaborationRuns, hydrateCollaborationRun]);
 
   useEffect(() => {
+    collaborationSessionIdRef.current = session?.id ?? null;
+    collaborationSessionGenerationRef.current += 1;
+    liveCollaborationRunsRef.current = new Map();
+    hydratingRunIdsRef.current.clear();
+    pendingRunMuxSnapshotsRef.current.clear();
+    removedCollaborationRunIdsRef.current.clear();
+    authoritativeCollaborationRunIdsRef.current = null;
     setLiveCollaborationRuns([]);
+    setHasAuthoritativeCollaborationRuns(false);
   }, [session?.id]);
 
+  // History is fetched once; live changes arrive through the existing global mux.
+  useEffect(() => {
+    if (!session?.id) return;
+    const sessionId = session.id;
+    const expectedGeneration = collaborationSessionGenerationRef.current;
+    let cancelled = false;
+    void fetch(`/api/agent-runs?parentSessionId=${encodeURIComponent(sessionId)}`, { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const runs = await res.json() as CollaborationRunSnapshot[];
+        if (!cancelled && collaborationSessionGenerationRef.current === expectedGeneration) {
+          // HTTP 结果可能早于 Mux；只合并详情，不删除请求期间新出现的 Run。
+          const authoritativeIds = authoritativeCollaborationRunIdsRef.current;
+          mergeLiveCollaborationRuns(runs.filter((run) => (
+            !removedCollaborationRunIdsRef.current.has(run.runId)
+            && (!authoritativeIds || authoritativeIds.has(run.runId))
+          )));
+        }
+      })
+      .catch(() => {});
+    const unsubscribe = subscribeSubagentRuns(sessionId, (frame) => {
+      applyCollaborationMuxRuns(
+        frame.type === "subagent_runs_snapshot" ? frame.runs : [frame.run],
+        frame.type === "subagent_runs_snapshot",
+      );
+      if (frame.type === "subagent_runs_snapshot") setHasAuthoritativeCollaborationRuns(true);
+    });
+    return () => { cancelled = true; unsubscribe(); };
+  }, [session?.id, applyCollaborationMuxRuns, mergeLiveCollaborationRuns]);
+
   const collaborationRuns = useMemo(() => {
+    const source = hasAuthoritativeCollaborationRuns
+      ? liveCollaborationRuns
+      : [...(data?.context?.collaborationRuns ?? []), ...liveCollaborationRuns];
     const byId = new Map<string, CollaborationRunSnapshot>();
-    for (const run of [...(data?.context?.collaborationRuns ?? []), ...liveCollaborationRuns]) {
+    for (const run of source) {
       const previous = byId.get(run.runId);
       if (!previous || run.updatedAt >= previous.updatedAt) byId.set(run.runId, run);
     }
     return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  }, [data?.context?.collaborationRuns, liveCollaborationRuns]);
+  }, [data?.context?.collaborationRuns, liveCollaborationRuns, hasAuthoritativeCollaborationRuns]);
   const activeSubagentRuns = useMemo(
     () => collaborationRuns.filter((run) => !["complete", "aborted", "error", "applied"].includes(run.status)),
     [collaborationRuns],
@@ -1035,7 +1227,6 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     }
     return undefined;
   }, [messages, entryIds]);
-  const [activeTurnElapsedSeconds, setActiveTurnElapsedSeconds] = useState<number | null>(null);
   const [completedTurnDurations, setCompletedTurnDurations] = useState<Record<string, number>>({});
   const activeTurnTimerRef = useRef<{
     sessionKey: string;
@@ -1055,14 +1246,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
       } else if (activeTurnStartedAt !== undefined && activeTurnStartedAt < existing.startedAt) {
         existing.startedAt = activeTurnStartedAt;
       }
-      const tick = () => {
-        const runtime = activeTurnTimerRef.current;
-        if (!runtime) return;
-        setActiveTurnElapsedSeconds(Math.max(0, Math.floor((Date.now() - runtime.startedAt) / 1000)));
-      };
-      tick();
-      const timer = window.setInterval(tick, 500);
-      return () => window.clearInterval(timer);
+      return;
     }
 
     const completed = activeTurnTimerRef.current;
@@ -1082,8 +1266,9 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
       }
       activeTurnTimerRef.current = null;
     }
-    setActiveTurnElapsedSeconds(null);
   }, [isRunning, activeTurnStartedAt, activeTurnKey, activeSessionKey, activeTabId, newSessionCwd]);
+  const activeTurnTimerStartedAt = activeTurnTimerRef.current?.startedAt
+    ?? (isRunning ? activeTurnStartedAt ?? Date.now() : undefined);
 
   // Input state cache — preserves text / images / selected skill across tab switches
   const inputStateCache = useRef<Map<string, ChatInputState>>(new Map());
@@ -1130,22 +1315,13 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
           </div>
         </div>
       )}
-      {isRunning && activeTurnElapsedSeconds !== null && (
-        <div
-          style={{
-            width: "100%",
-            maxWidth: contentMaxWidth,
-            margin: "0 auto 6px",
-            padding: `0 ${contentSidePadding}px 0 16px`,
-            color: "var(--text-dim)",
-            fontSize: 11,
-            fontVariantNumeric: "tabular-nums",
-            textAlign: "right",
-          }}
-          title="从本轮用户消息发出开始计算"
-        >
-          本轮已耗时 {formatTurnDuration(activeTurnElapsedSeconds)}
-        </div>
+      {isRunning && activeTurnTimerStartedAt !== undefined && (
+        <ActiveTurnElapsed
+          startedAt={activeTurnTimerStartedAt}
+          paused={!isFocused}
+          maxWidth={contentMaxWidth}
+          sidePadding={contentSidePadding}
+        />
       )}
       <ChatInput
         key={session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`}
@@ -1418,13 +1594,13 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                 <span style={{ fontSize: compact ? 18 : 22, color: "var(--text)", fontWeight: 760, letterSpacing: "-0.02em" }}>DeerHux</span>
                 {!compact && (
                   <span style={{ fontSize: 14, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
-                    <Typewriter phrases={TYPEWRITER_PHRASES} />
+                    <Typewriter phrases={TYPEWRITER_PHRASES} paused={!isFocused} />
                   </span>
                 )}
               </div>
               {compact && (
                 <div style={{ maxWidth: 280, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
-                  <Typewriter phrases={TYPEWRITER_PHRASES} />
+                  <Typewriter phrases={TYPEWRITER_PHRASES} paused={!isFocused} />
                 </div>
               )}
             </div>
@@ -1683,7 +1859,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             })()}
 
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming isBackground={!isFocused} modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
             )}
 
             {/* 活跃 subagent run 钉在聊天流最底部（所有消息/流式 bubble 之后），

@@ -3,13 +3,33 @@ import { EventStore } from "../lib/agent-runtime/event-store.ts";
 import { MessageUpdateCoalescer } from "../lib/agent-runtime/event-coalescer.ts";
 
 interface TestEvent {
+  sessionId: string;
+  runId: string;
+  turnId?: string;
+  globalSeq: number;
   event: { type: string; message?: { content: string } };
-  seq: number;
 }
 
-const update = (seq: number, content: string): TestEvent => ({
-  seq,
+const update = (
+  sessionId: string,
+  globalSeq: number,
+  content: string,
+  turnId = "turn-1",
+  runId = `run-${sessionId}`,
+): TestEvent => ({
+  sessionId,
+  runId,
+  turnId,
+  globalSeq,
   event: { type: "message_update", message: { content } },
+});
+
+const barrier = (sessionId: string, globalSeq: number, type = "message_end"): TestEvent => ({
+  sessionId,
+  runId: `run-${sessionId}`,
+  turnId: "turn-1",
+  globalSeq,
+  event: { type },
 });
 
 async function testStoreReplayCompression(): Promise<void> {
@@ -69,26 +89,104 @@ async function testLargeCumulativeUpdateRetention(): Promise<void> {
   assert.ok(diagnostics.runRetainedBytes < 20_000);
 }
 
-async function testTransportCoalescingAndEndFlush(): Promise<void> {
+function testSameStreamCoalescing(): void {
+  const delivered: TestEvent[] = [];
+  const coalescer = new MessageUpdateCoalescer<TestEvent>((event) => delivered.push(event));
+  coalescer.push(update("A", 1, "a"));
+  coalescer.push(update("A", 2, "ab"));
+  coalescer.push(update("A", 3, "abc"));
+  coalescer.flush();
+  assert.deepEqual(delivered.map((item) => item.globalSeq), [3]);
+}
+
+function testInterleavedSessions(): void {
+  const delivered: TestEvent[] = [];
+  const coalescer = new MessageUpdateCoalescer<TestEvent>((event) => delivered.push(event));
+  coalescer.push(update("A", 1, "A1"));
+  coalescer.push(update("B", 2, "B1"));
+  coalescer.push(update("A", 3, "A2"));
+  coalescer.push(update("B", 4, "B2"));
+  coalescer.flush();
+  assert.deepEqual(delivered.map((item) => [item.sessionId, item.globalSeq]), [["A", 3], ["B", 4]]);
+}
+
+async function testAutomaticTimerFlush(): Promise<void> {
   const delivered: TestEvent[] = [];
   const coalescer = new MessageUpdateCoalescer<TestEvent>((event) => delivered.push(event), 10);
-  coalescer.push(update(1, "a"));
-  coalescer.push(update(2, "ab"));
-  coalescer.push(update(3, "abc"));
-  coalescer.push({ seq: 4, event: { type: "message_end", message: { content: "abc" } } });
+  coalescer.push(update("A", 1, "A1"));
+  coalescer.push(update("B", 2, "B1"));
+  coalescer.push(update("A", 3, "A2"));
+  coalescer.push(update("B", 4, "B2"));
 
-  assert.deepEqual(delivered.map((item) => item.seq), [3, 4]);
-  assert.equal(delivered[0].event.message?.content, "abc");
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(delivered.length, 2, "message_end flush must cancel the pending timer");
+  assert.deepEqual(
+    delivered.map((item) => [item.sessionId, item.globalSeq]),
+    [["A", 3], ["B", 4]],
+    "单个自动定时器必须提交每条流的最新快照",
+  );
+}
 
-  coalescer.push(update(5, "discard me"));
+function testSameSessionRunAndTurnIsolation(): void {
+  const delivered: TestEvent[] = [];
+  const coalescer = new MessageUpdateCoalescer<TestEvent>((event) => delivered.push(event));
+  coalescer.push(update("A", 1, "run-1 turn-1 old", "turn-1", "run-1"));
+  coalescer.push(update("A", 2, "run-1 turn-2", "turn-2", "run-1"));
+  coalescer.push(update("A", 3, "run-2 turn-1", "turn-1", "run-2"));
+  coalescer.push(update("A", 4, "run-1 turn-1 latest", "turn-1", "run-1"));
+  coalescer.flush();
+
+  assert.deepEqual(
+    delivered.map((item) => [item.runId, item.turnId, item.globalSeq]),
+    [["run-1", "turn-2", 2], ["run-2", "turn-1", 3], ["run-1", "turn-1", 4]],
+  );
+}
+
+function testManyInterleavedSessions(): void {
+  const delivered: TestEvent[] = [];
+  const coalescer = new MessageUpdateCoalescer<TestEvent>((event) => delivered.push(event));
+  const sessions = ["A", "B", "C", "D", "E"];
+  let seq = 0;
+  for (const id of ["A", "B", "C", "D", "A", "C", "B", "D", "E", "D", "A", "C", "E", "B"]) {
+    seq += 1;
+    coalescer.push(update(id, seq, `${id}${seq}`));
+  }
+  coalescer.flush();
+
+  assert.deepEqual(new Set(delivered.map((item) => item.sessionId)), new Set(sessions));
+  assert.deepEqual(delivered.map((item) => item.globalSeq), [...delivered.map((item) => item.globalSeq)].sort((a, b) => a - b));
+  for (const id of sessions) {
+    const expected = Math.max(...Array.from({ length: seq }, (_, index) => index + 1).filter((value) => {
+      const eventId = ["A", "B", "C", "D", "A", "C", "B", "D", "E", "D", "A", "C", "E", "B"][value - 1];
+      return eventId === id;
+    }));
+    assert.equal(delivered.find((item) => item.sessionId === id)?.globalSeq, expected);
+  }
+}
+
+async function testBarrierAndCancel(): Promise<void> {
+  const delivered: TestEvent[] = [];
+  const coalescer = new MessageUpdateCoalescer<TestEvent>((event) => delivered.push(event), 10);
+  coalescer.push(update("A", 1, "A1"));
+  coalescer.push(update("B", 2, "B1"));
+  coalescer.push(barrier("A", 3));
+  assert.deepEqual(delivered.map((item) => item.globalSeq), [1, 2, 3]);
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(delivered.length, 3, "顺序屏障必须取消待执行的定时器");
+
+  coalescer.push(update("A", 4, "discard A"));
+  coalescer.push(update("B", 5, "discard B"));
   coalescer.cancel();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(delivered.length, 2, "cancel must prevent post-unmount delivery");
+  assert.equal(delivered.length, 3, "cancel 后不得发送任何 Session 的延迟事件");
 }
 
 await testStoreReplayCompression();
 await testLargeCumulativeUpdateRetention();
-await testTransportCoalescingAndEndFlush();
+testSameStreamCoalescing();
+testInterleavedSessions();
+await testAutomaticTimerFlush();
+testSameSessionRunAndTurnIsolation();
+testManyInterleavedSessions();
+await testBarrierAndCancel();
 console.log("stream event performance tests passed");

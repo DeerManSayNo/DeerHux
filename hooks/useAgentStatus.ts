@@ -31,6 +31,7 @@ export function useAgentStatus(
   sessionId: string | null | undefined,
   agentRunning: boolean,
   watchdogInfo: WatchdogInfo | null,
+  paused = false,
 ): AgentStatusInfo {
   const POLL_INTERVAL_MS = 2000;
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
@@ -43,7 +44,7 @@ export function useAgentStatus(
       timerRef.current = null;
     }
 
-    if (!sessionId || !agentRunning) {
+    if (!sessionId || !agentRunning || paused) {
       setServerStatus(null);
       return;
     }
@@ -78,7 +79,7 @@ export function useAgentStatus(
         timerRef.current = null;
       }
     };
-  }, [sessionId, agentRunning]);
+  }, [sessionId, agentRunning, paused]);
 
   return { server: serverStatus, watchdog: watchdogInfo };
 }

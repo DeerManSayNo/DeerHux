@@ -30,6 +30,7 @@ import {
 import { useTheme } from "@/hooks/useTheme";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import type { SessionInfo } from "@/lib/types";
+import { subscribeHostEvents } from "@/lib/agent-event-client";
 import type { ChatInputHandle } from "./ChatInput";
 
 type SidebarMode = "open" | "closed";
@@ -64,6 +65,7 @@ function shouldStartWindowDrag(event: PointerEventType<Element>) {
 
 type RunningSessionStatus = {
   sessionId: string;
+  running?: boolean;
   isStreaming: boolean;
   isCompacting: boolean;
   lastEventType: string;
@@ -137,6 +139,7 @@ export function AppShell() {
   const [wechatConfigOpen, setWechatConfigOpen] = useState(false);
   const [wechatStatus, setWechatStatus] = useState<{ connected: boolean; polling: boolean; accountId?: string; activeUserCount?: number } | null>(null);
   const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
+  const hostRunningBaselineReceivedRef = useRef(false);
   const pendingSessionIdsBySlotRef = useRef<Map<number, string>>(new Map());
   const pendingTempTabIdsBySlotRef = useRef<Map<number, string>>(new Map());
   // Track which tab ids are genuine placeholders (not real sessions),
@@ -269,37 +272,31 @@ export function AppShell() {
       const res = await fetch("/api/agent/running", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { runningSessionIds?: string[]; sessions?: RunningSessionStatus[] };
-      setRunningSessionStatuses(new Map((data.sessions ?? []).map((session) => [session.sessionId, session])));
+      if (!hostRunningBaselineReceivedRef.current) {
+        setRunningSessionStatuses(new Map((data.sessions ?? []).map((session) => [session.sessionId, session])));
+      }
     } catch {
-      setRunningSessionStatuses(new Map());
+      if (!hostRunningBaselineReceivedRef.current) setRunningSessionStatuses(new Map());
     }
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      if (cancelled) return;
-      await loadRunningSessions();
-    };
-    run();
-    const interval = window.setInterval(loadRunningSessions, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
+    // One HTTP fallback covers startup before the mux baseline. Afterwards all
+    // running flips are delivered on the existing tab-global EventSource.
+    void loadRunningSessions();
+    let previousIds = new Set<string>();
+    return subscribeHostEvents((frame) => {
+      hostRunningBaselineReceivedRef.current = true;
+      const next = new Map(frame.sessions.map((session) => [session.sessionId, session]));
+      const nextIds = new Set(next.keys());
+      const changed = nextIds.size !== previousIds.size || [...nextIds].some((id) => !previousIds.has(id));
+      previousIds = nextIds;
+      setRunningSessionStatuses(next);
+      // Session modified timestamps and newly-created sessions only need a
+      // refresh at semantic turn boundaries, never on a periodic timer.
+      if (changed) setRefreshKey((key) => key + 1);
+    });
   }, [loadRunningSessions]);
-
-  // Periodically refresh the sidebar session list while any session is running,
-  // so newly created sessions and updated modified timestamps are reflected.
-  // Uses stale-while-revalidate: API returns cached data instantly, background
-  // refresh handles updates without blocking the UI.
-  useEffect(() => {
-    if (runningSessionStatuses.size === 0) return;
-    const interval = setInterval(() => {
-      setRefreshKey((k) => k + 1);
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [runningSessionStatuses.size]);
 
   // Poll WeChat bot status for the settings dropdown inline indicator
   useEffect(() => {

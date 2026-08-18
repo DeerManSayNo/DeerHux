@@ -285,6 +285,8 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                   <div style={{ position: "relative", height: "100%", minHeight: 0 }}>
                     <ChatWindow
                       activeTabId={slotId}
+                      isFocused={isFocused}
+                      streamRenderPriority={isFocused ? "focused" : "visible"}
                       session={activeSession}
                       newSessionCwd={newSessionCwd}
                       onAgentEnd={onAgentEnd}

@@ -606,7 +606,7 @@ export interface McpRuntime {
   tools: ToolDefinition[];
   toolNames: string[];
   serverStatuses: McpServerStatus[];
-  describeImages(images: RuntimeImage[], userPrompt?: string): Promise<string[]>;
+  describeImages(images: RuntimeImage[], userPrompt?: string, signal?: AbortSignal): Promise<string[]>;
   close(): void;
 }
 
@@ -738,25 +738,30 @@ export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpS
     tools,
     toolNames: tools.map((tool) => tool.name),
     serverStatuses,
-    describeImages: async (images, userPrompt) => {
+    describeImages: async (images, userPrompt, signal) => {
+      signal?.throwIfAborted();
       const visionTool = runtimeTools.find(looksLikeVisionTool);
       if (!visionTool) return [];
       const descriptions: string[] = [];
       for (let index = 0; index < images.length; index += 1) {
+        signal?.throwIfAborted();
         const image = images[index];
         let result: unknown;
         try {
-          result = await visionTool.client.callTool(visionTool.tool.name, buildVisionToolArgs(visionTool.tool, image, userPrompt ?? ""));
-        } catch {
+          result = await visionTool.client.callTool(visionTool.tool.name, buildVisionToolArgs(visionTool.tool, image, userPrompt ?? ""), signal);
+        } catch (error) {
+          if (signal?.aborted) throw error;
           // Some MCP image tools expect a data URL for a generic `image` field.
           // Retry once with data URL before surfacing the failure text.
           try {
-            result = await visionTool.client.callTool(visionTool.tool.name, buildVisionToolArgs(visionTool.tool, image, userPrompt ?? "", true));
+            result = await visionTool.client.callTool(visionTool.tool.name, buildVisionToolArgs(visionTool.tool, image, userPrompt ?? "", true), signal);
           } catch (retryError) {
+            if (signal?.aborted) throw retryError;
             descriptions.push(`图片 ${index + 1} 识别失败：${retryError instanceof Error ? retryError.message : String(retryError)}`);
             continue;
           }
         }
+        signal?.throwIfAborted();
         descriptions.push(mcpContentToText(result));
       }
       return descriptions;
