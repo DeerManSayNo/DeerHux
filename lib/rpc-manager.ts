@@ -1121,8 +1121,11 @@ export class AgentSessionWrapper {
       const displayUserContent = prepared.displayContent ?? turnContext.displayMessage;
       // 先写入 durable receipt，再通知 SSE / 启动引擎。写失败时客户端可安全重试，
       // 且绝不允许模型先看到一条刷新后不存在的用户消息。
-      this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId, turnKey);
+      // 顺序约束：display_user_message 必须是 user message 的直接 parent——
+      // session-reader 的 getDisplayUserMessage 靠这个父子关系回读 clientMessageId
+      // 与展示内容；turn_context 插在中间会切断该链路（见 32a2d25 引入的回归）。
       this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
+      this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId, turnKey);
 
       const userEchoEvent = {
         type: "message_end",

@@ -291,6 +291,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                       onSessionCreated={(created) => onSessionCreated?.(created, index)}
                       onSessionStarted={(started) => onSessionStarted?.(started, index)}
                       onAgentRunningChange={onAgentRunningChange}
+                      isSessionRunning={isRunning}
                       onSessionForked={(newSessionId) => onSessionForked?.(newSessionId, index)}
                       modelsRefreshKey={modelsRefreshKey}
                       chatInputRef={isFocused ? chatInputRef : undefined}

@@ -559,12 +559,21 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       .trim();
   };
 
+  const isCustomEntryOf = (e: SessionEntry | undefined, customType: string): boolean =>
+    e?.type === "custom" && (e as { customType?: string }).customType === customType;
+
   const getDisplayUserMessage = (entryId: string | undefined): { content: unknown; references?: FileReference[]; agentMode?: AgentMode; skill?: SkillReference; clientMessageId?: string } | null => {
     if (!entryId) return null;
     const entry = byId.get(entryId);
     if (!entry?.parentId) return null;
-    const parent = byId.get(entry.parentId);
-    if (parent?.type !== "custom" || (parent as { customType?: string }).customType !== "display_user_message") return null;
+    let parent = byId.get(entry.parentId);
+    // 兼容两种落盘顺序：display_user_message 应直接挂在 user message 上；
+    // 旧回归版本（32a2d25）曾把 turn_context 写在其后，使其隔了一层。
+    // 沿链向上跳过 turn_context，两种顺序都能读到回执。
+    if (parent && !isCustomEntryOf(parent, "display_user_message") && isCustomEntryOf(parent, "turn_context") && parent.parentId) {
+      parent = byId.get(parent.parentId);
+    }
+    if (!isCustomEntryOf(parent, "display_user_message")) return null;
     const data = (parent as { data?: { content?: unknown; references?: unknown; agentMode?: unknown; skill?: { name?: unknown }; clientMessageId?: unknown } }).data;
     if (!data || !("content" in data)) return null;
     const references = normalizeReferences(data.references);

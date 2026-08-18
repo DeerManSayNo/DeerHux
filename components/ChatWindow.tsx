@@ -41,6 +41,8 @@ interface Props {
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionStarted?: (session: SessionInfo | null) => void;
   onAgentRunningChange?: (sessionId: string | null | undefined, running: boolean) => void;
+  /** 会话级运行态：布局重排/窗口重挂载期间用于维持流式 UI。 */
+  isSessionRunning?: boolean;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -410,7 +412,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ activeTabId, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession }: Props) {
+export function ChatWindow({ activeTabId, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession }: Props) {
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
@@ -465,6 +467,9 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     modelsRefreshKey,
     activeTabId,
   });
+  // 本地 SSE 状态在布局切换时可能短暂重置；会话级状态用于无缝维持运行中 UI。
+  const isRunning = agentRunning || isSessionRunning;
+
   const transientPhaseNoticeKey = retryInfo
     ? [
         "retry",
@@ -479,7 +484,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
   const showTransientPhaseNotice = useTransientNotice(transientPhaseNoticeKey);
 
   // 实时轮询服务端 agent 状态（用于状态 ticker）
-  const { server: serverStatus } = useAgentStatus(session?.id, agentRunning, watchdogInfo);
+  const { server: serverStatus } = useAgentStatus(session?.id, isRunning, watchdogInfo);
 
   const mergeLiveCollaborationRuns = useCallback((incoming: CollaborationRunSnapshot[]) => {
     setLiveCollaborationRuns((current) => {
@@ -518,12 +523,12 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
       }
     };
     void fetchRuns();
-    if (agentRunning && hasRunningSubagentTool) timer = setInterval(fetchRuns, 1200);
+    if (isRunning && hasRunningSubagentTool) timer = setInterval(fetchRuns, 1200);
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
     };
-  }, [session?.id, agentRunning, hasRunningSubagentTool, mergeLiveCollaborationRuns]);
+  }, [session?.id, isRunning, hasRunningSubagentTool, mergeLiveCollaborationRuns]);
 
   useEffect(() => {
     setLiveCollaborationRuns([]);
@@ -653,11 +658,11 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     skill?: SkillReference,
   ): boolean => {
     // 新会话无历史；无 session 时无法单独压缩。
-    if (!session?.id || agentRunning || isCompacting) return true;
+    if (!session?.id || isRunning || isCompacting) return true;
     if (!needsCompaction(contextUsage)) return true;
     openCompactionDialog("threshold", { message, images, references, skill });
     return false;
-  }, [session?.id, agentRunning, isCompacting, contextUsage, openCompactionDialog]);
+  }, [session?.id, isRunning, isCompacting, contextUsage, openCompactionDialog]);
 
   const closeCompactionDialog = useCallback(() => {
     if (compactionBusy || isCompacting) return;
@@ -725,20 +730,20 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
   }, [pendingRoleSetting, currentCwd, session?.id, applyRoleToSession, setSystemPrompt]);
 
   const handleResend = useCallback((message: string, _entryId?: string, references?: FileReference[], skill?: SkillReference) => {
-    if (agentRunning && handleSteer) {
+    if (isRunning && handleSteer) {
       handleSteer(message, undefined, references, skill);
-    } else if (!agentRunning) {
+    } else if (!isRunning) {
       if (session?.id && needsCompaction(contextUsage)) {
         openCompactionDialog("threshold", { message, references, skill });
         return;
       }
       handleSend(message, undefined, currentRoleId, references, skill);
     }
-  }, [agentRunning, handleSteer, handleSend, currentRoleId, session?.id, contextUsage, openCompactionDialog]);
+  }, [isRunning, handleSteer, handleSend, currentRoleId, session?.id, contextUsage, openCompactionDialog]);
 
   useEffect(() => {
-    onAgentRunningChange?.(session?.id, agentRunning);
-  }, [agentRunning, onAgentRunningChange, session?.id]);
+    onAgentRunningChange?.(session?.id, isRunning);
+  }, [isRunning, onAgentRunningChange, session?.id]);
 
   const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
   const playDoneSoundRef = useRef(playDoneSound);
@@ -891,27 +896,27 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     if (!container) return true;
 
     const liveEnd = liveStreamEndRef.current;
-    if (agentRunning && liveEnd) {
+    if (isRunning && liveEnd) {
       const containerRect = container.getBoundingClientRect();
       const liveEndRect = liveEnd.getBoundingClientRect();
       return liveEndRect.bottom - containerRect.bottom < AUTO_SCROLL_THRESHOLD;
     }
 
     return container.scrollHeight - container.scrollTop - container.clientHeight < AUTO_SCROLL_THRESHOLD;
-  }, [agentRunning, scrollContainerRef]);
+  }, [isRunning, scrollContainerRef]);
 
   const scrollToLiveBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
     const liveEnd = liveStreamEndRef.current;
-    if (agentRunning && liveEnd) {
+    if (isRunning && liveEnd) {
       liveEnd.scrollIntoView({ block: "end", behavior });
       return;
     }
 
     container.scrollTo({ top: container.scrollHeight - container.clientHeight, behavior });
-  }, [agentRunning, scrollContainerRef]);
+  }, [isRunning, scrollContainerRef]);
 
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -988,7 +993,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
   }, [session?.id, isNew, setAutoScroll, scrollContainerRef]);
 
   useEffect(() => {
-    if (!agentRunning) return;
+    if (!isRunning) return;
     if (!shouldAutoScrollRef.current) return;
 
     const frame = requestAnimationFrame(() => {
@@ -997,9 +1002,9 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [agentRunning, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom, scrollContainerRef]);
+  }, [isRunning, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom, scrollContainerRef]);
 
-  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
+  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !isRunning;
   const contentMaxWidth = compact ? 640 : 820;
   const contentSidePadding = 16;
   const messagePaddingClass = compact ? "px-3" : "px-4";
@@ -1039,7 +1044,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
   } | null>(null);
   useEffect(() => {
     const sessionKey = activeSessionKey ?? `new:${activeTabId ?? ""}:${newSessionCwd ?? ""}`;
-    if (agentRunning) {
+    if (isRunning) {
       const existing = activeTurnTimerRef.current;
       if (!existing || (existing.sessionKey !== sessionKey && existing.initialTurnKey !== activeTurnKey)) {
         activeTurnTimerRef.current = {
@@ -1078,7 +1083,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
       activeTurnTimerRef.current = null;
     }
     setActiveTurnElapsedSeconds(null);
-  }, [agentRunning, activeTurnStartedAt, activeTurnKey, activeSessionKey, activeTabId, newSessionCwd]);
+  }, [isRunning, activeTurnStartedAt, activeTurnKey, activeSessionKey, activeTabId, newSessionCwd]);
 
   // Input state cache — preserves text / images / selected skill across tab switches
   const inputStateCache = useRef<Map<string, ChatInputState>>(new Map());
@@ -1125,7 +1130,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
           </div>
         </div>
       )}
-      {agentRunning && activeTurnElapsedSeconds !== null && (
+      {isRunning && activeTurnElapsedSeconds !== null && (
         <div
           style={{
             width: "100%",
@@ -1149,9 +1154,9 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         onSend={sendWithRole}
         onBeforeSend={handleBeforeSend}
         onAbort={handleAbort}
-        onSteer={agentRunning ? handleSteer : undefined}
-        onFollowUp={agentRunning ? handleFollowUp : undefined}
-        isStreaming={agentRunning}
+        onSteer={isRunning ? handleSteer : undefined}
+        onFollowUp={isRunning ? handleFollowUp : undefined}
+        isStreaming={isRunning}
         model={displayModelValue}
         modelNames={modelNames}
         modelList={modelList}
@@ -1646,10 +1651,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
                     entryId={entryIds[idx]}
-                    onFork={agentRunning || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
+                    onFork={isRunning || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     showTimestamp={showTimestamp}
-                    showTurnDuration={isLastAssistantInTurn && (idx < lastUserIdx || !agentRunning)}
+                    showTurnDuration={isLastAssistantInTurn && (idx < lastUserIdx || !isRunning)}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as import("@/lib/types").AgentMessage & { timestamp?: number }).timestamp : undefined}
                     turnStartTimestamp={turnStartTimestamp}
                     turnEndTimestamp={turnEndTimestamp}
@@ -1694,7 +1699,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
               </div>
             )}
 
-            {agentRunning && !streamState.streamingMessage && (
+            {isRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
                 <div className="flex items-center gap-0 flex-wrap">
                   {(!transientPhaseNoticeKey || showTransientPhaseNotice) && (
@@ -1715,9 +1720,9 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
               </div>
             )}
 
-            {agentRunning && <div ref={liveStreamEndRef} />}
+            {isRunning && <div ref={liveStreamEndRef} />}
 
-            {!agentRunning && changedFiles.length > 0 && (
+            {!isRunning && changedFiles.length > 0 && (
               <ChangedFilesList
                 files={changedFiles}
                 cwd={session?.cwd ?? newSessionCwd ?? null}
@@ -1730,7 +1735,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             <div ref={messagesEndRef} />
           </div>
         </div>
-        {!shouldAutoScroll && agentRunning && (
+        {!shouldAutoScroll && isRunning && (
           <button
             type="button"
             onClick={handleResumeAutoScroll}
