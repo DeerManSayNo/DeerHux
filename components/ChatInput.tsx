@@ -5,6 +5,7 @@ import type { AutoRecoveryMode, RetryInfo, StallLevel } from "@/hooks/useAgentSe
 import type { AgentMode } from "@/lib/agent-modes";
 import type { FileReference, SkillReference } from "@/lib/types";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
+import { subscribeToAppNotification } from "@/lib/app-notifications";
 import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 
 export interface AttachedImage {
@@ -782,9 +783,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   useEffect(() => {
     loadRoles();
-    const handler = () => loadRoles();
-    window.addEventListener("deerhux.roles-updated", handler);
-    return () => window.removeEventListener("deerhux.roles-updated", handler);
+    return subscribeToAppNotification("deerhux.roles-updated", () => { loadRoles(); });
   }, [loadRoles]);
 
   const selectedRole = roles.find((r) => r.id === currentRoleId) ?? roles.find((r) => r.id === "default");

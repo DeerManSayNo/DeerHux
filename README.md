@@ -119,7 +119,6 @@ lib/
   agent-client.ts    # Agent 客户端通信
   normalize.ts       # 规范化 toolCall 字段名
   file-paths.ts      # 跨平台文件路径处理
-  deerhux-types.ts   # DeerHux 类型定义
   npx.ts             # npx 运行工具
   types.ts           # UI 类型定义
 src-tauri/          # Tauri 桌面壳（Rust 后端）
@@ -145,7 +144,6 @@ DeerHux 的界面已全面中文化，所有 UI 文本直接内联在组件中�
 - `components/SkillsConfig.tsx` — 技能配置面板
 - `components/ToolPanel.tsx` — 工具预设选择面板
 - `components/FileExplorer.tsx` — 文件浏览器
-- `components/BranchNavigator.tsx` — 分支导航器
 - `components/TabBar.tsx` — 文件标签页
 - `components/FileViewer.tsx` — 文件查看器
 - `components/ChatMinimap.tsx` — 对话缩略图

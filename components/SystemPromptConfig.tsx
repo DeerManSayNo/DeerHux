@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { notifyApp } from "@/lib/app-notifications";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -143,7 +144,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
       });
       if (res.ok) {
         setSaved(true);
-        window.dispatchEvent(new Event("deerhux.roles-updated"));
+        notifyApp("deerhux.roles-updated");
       }
     } finally {
       setSavingGlobal(false);
@@ -171,7 +172,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
       if (!res.ok) return;
       setSaveName(""); setSaveDesc(""); setSaveOpen(false);
       await load();
-      window.dispatchEvent(new Event("deerhux.roles-updated"));
+      notifyApp("deerhux.roles-updated");
     } catch { /* ignore */ }
   }, [saveName, saveDesc, sections, load, roleId]);
 
@@ -197,10 +198,12 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
     async (versionId: string, name: string) => {
       if (!window.confirm(`确定删除版本「${name}」吗？`)) return;
       try {
-        await fetch(`/api/system-prompt/${encodeURIComponent(versionId)}`, {
+        const response = await fetch(`/api/system-prompt/${encodeURIComponent(versionId)}`, {
           method: "DELETE",
         });
+        if (!response.ok) return;
         await load();
+        notifyApp("deerhux.roles-updated");
       } catch { /* ignore */ }
     },
     [load],

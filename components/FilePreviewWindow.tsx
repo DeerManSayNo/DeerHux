@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useTheme } from "@/hooks/useTheme";
 import { FilePreviewPanel } from "./FilePreviewPanel";
 import {
   FILE_PREVIEW_CHANNEL_NAME,
@@ -25,6 +26,7 @@ function readInitialState(): FilePreviewState {
 }
 
 export function FilePreviewWindow() {
+  useTheme();
   const [state, setState] = useState<FilePreviewState>({ tabs: [], activeTabId: null, cwd: null, viewerCwd: null });
   const [channel, setChannel] = useState<BroadcastChannel | null>(null);
 

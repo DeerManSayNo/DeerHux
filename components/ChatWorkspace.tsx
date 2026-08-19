@@ -1,7 +1,7 @@
 "use client";
 
 import type { RefObject } from "react";
-import type { ChatInputHandle } from "./ChatInput";
+import type { ChatInputHandle, ChatInputState } from "./ChatInput";
 import { ChatWindow } from "./ChatWindow";
 import { ChatFileExplorerButton } from "./ChatFileExplorerButton";
 import type { SessionInfo } from "@/lib/types";
@@ -41,6 +41,8 @@ interface ChatWorkspaceProps {
   projectOptions?: { cwd: string; displayName: string }[];
   onNewSessionCwdChange?: (cwd: string, slotIndex: number) => void;
   onOpenSession?: (sessionId: string) => void;
+  getInputState: (slotIndex: number, sessionId: string) => ChatInputState | null;
+  saveInputState: (slotIndex: number, sessionId: string, state: ChatInputState) => void;
 }
 
 function sessionTitle(session: SessionInfo | null, index: number): string {
@@ -56,15 +58,16 @@ function getProjectName(cwd: string): string {
 }
 
 function gridTemplate(mode: ChatLayoutMode): { columns: string; rows: string; minWidth: number } {
+  // 多窗口始终横向排列：空间不足时由工作区横向滚动，绝不折成宫格。
   switch (mode) {
     case "double":
       return { columns: "repeat(2, minmax(360px, 1fr))", rows: "1fr", minWidth: 740 };
     case "triple":
       return { columns: "repeat(3, minmax(300px, 1fr))", rows: "1fr", minWidth: 940 };
     case "quad":
-      return { columns: "repeat(2, minmax(340px, 1fr))", rows: "repeat(2, minmax(0, 1fr))", minWidth: 700 };
+      return { columns: "repeat(4, minmax(300px, 1fr))", rows: "1fr", minWidth: 1_230 };
     case "six":
-      return { columns: "repeat(3, minmax(300px, 1fr))", rows: "repeat(2, minmax(0, 1fr))", minWidth: 940 };
+      return { columns: "repeat(6, minmax(300px, 1fr))", rows: "1fr", minWidth: 1_850 };
     default:
       return { columns: "minmax(0, 1fr)", rows: "1fr", minWidth: 0 };
   }
@@ -96,6 +99,8 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
     projectOptions,
     onNewSessionCwdChange,
     onOpenSession,
+    getInputState,
+    saveInputState,
   } = props;
 
   const visibleCount = CHAT_LAYOUT_COUNTS[layoutMode];
@@ -304,6 +309,8 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                       projectOptions={projectOptions}
                       onNewSessionCwdChange={(cwd) => onNewSessionCwdChange?.(cwd, index)}
                       onOpenSession={onOpenSession}
+                      initialInputState={slotId ? getInputState(index, slotId) : null}
+                      saveInputState={slotId ? (state) => saveInputState(index, slotId, state) : undefined}
                       compact={compact}
                     />
                   </div>

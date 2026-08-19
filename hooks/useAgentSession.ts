@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
+import { useChatAutoScroll } from "@/hooks/agent-session/useChatAutoScroll";
 import { getLocalStorageItem } from "@/lib/client-storage";
+import { subscribeToAppNotification } from "@/lib/app-notifications";
 import type { AgentMessage, AssistantMessage, FileReference, ImageContent, SessionInfo, SkillReference, TextContent, UserMessage } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
@@ -479,12 +481,54 @@ function reconcilePendingUserMessages(
 ): { messages: AgentMessage[]; entryIds: string[] } {
   if (!pending.size) return { messages: loaded, entryIds: loadedEntryIds };
 
-  // SSE 的 user echo 只表示服务端已受理，不表示消息已经写入 session 文件。
-  // 只有持久化快照带回相同 clientMessageId 时，才能确认并移除本地 pending。
+  // 优先通过持久化的 clientMessageId 精确确认。
   for (const msg of loaded) {
     if (msg.role === "user" && msg.clientMessageId) {
       pending.delete(msg.clientMessageId);
     }
+  }
+
+  // clientMessageId 保存在 display_user_message 自定义条目中；旧会话或其他
+  // 写入来源可能没有该字段。此时若继续把 pending 直接拼到末尾，就会将本应
+  // 位于 assistant 之前的用户气泡错误移到最后。对仍待确认的本地消息，以内容
+  // 和提交时间作受限兼容回退匹配，保留服务端快照的顺序。
+  const usedFallbackIndexes = new Set<number>();
+  for (const [clientMessageId, pendingMessage] of pending) {
+    if (pendingMessage.role !== "user" || pendingMessage.deliveryState === "failed") continue;
+    const pendingText = userMessageTextKey(pendingMessage.content);
+    if (!pendingText) continue;
+
+    let matchedIndex = -1;
+    let smallestTimestampDelta = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < loaded.length; index++) {
+      const loadedMessage = loaded[index];
+      if (
+        usedFallbackIndexes.has(index)
+        || loadedMessage.role !== "user"
+        || loadedMessage.clientMessageId
+        || userMessageTextKey(loadedMessage.content) !== pendingText
+      ) continue;
+
+      const pendingTimestamp = pendingMessage.timestamp;
+      const loadedTimestamp = loadedMessage.timestamp;
+      // 本地消息先创建，服务端持久化条目只能随后出现。拒绝任何早于本地
+      // 发送时间的同文历史，避免连续发送“继续”等相同内容时误配旧回合。
+      const timestampDelta = typeof pendingTimestamp === "number" && typeof loadedTimestamp === "number"
+        && loadedTimestamp >= pendingTimestamp
+        ? loadedTimestamp - pendingTimestamp
+        : Number.POSITIVE_INFINITY;
+      // 两个时间戳都存在且候选在本地发送之后，才允许回退确认；缺失时间戳则
+      // 保守地保留 pending 气泡，等待带 clientMessageId 的下次快照确认。
+      if (timestampDelta > 5 * 60_000 || timestampDelta >= smallestTimestampDelta) continue;
+      matchedIndex = index;
+      smallestTimestampDelta = timestampDelta;
+    }
+
+    if (matchedIndex < 0) continue;
+    usedFallbackIndexes.add(matchedIndex);
+    // 将本地 id 补到当前内存快照，后续 SSE user echo 仍可精确去重；不会写回 session 文件。
+    loaded[matchedIndex] = { ...loaded[matchedIndex], clientMessageId } as AgentMessage;
+    pending.delete(clientMessageId);
   }
 
   if (!pending.size) return { messages: loaded, entryIds: loadedEntryIds };
@@ -668,12 +712,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const sessionIdRef = useRef<string | null>(null);
   const agentRunningRef = useRef(false);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
-  const initialScrollDoneRef = useRef(false);
-  const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
+  const {
+    messagesEndRef, scrollContainerRef, lastUserMsgRef,
+    pendingScrollToUserRef, initialScrollDoneRef,
+    resetAutoScroll, syncAfterMessageChange,
+  } = useChatAutoScroll();
   const changedFilesRef = useRef<Set<string>>(new Set());
-  const pendingScrollToUserRef = useRef(false);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<AgentMessage[]>([]);
   const entryIdsRef = useRef<string[]>([]);
   const lastAgentEventAtRef = useRef(Date.now());
@@ -1231,7 +1275,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventSubscriptionRef.current = subscribeAgentEvents(
       sid,
       (event) => {
-        agentEventBus.emit(event);
+        agentEventBus.emit({ sessionId: sid, event });
         if (event.type === "message_update") {
           enqueueMessageUpdate(event, sid);
         } else {
@@ -1524,6 +1568,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 错误回合也只刷新最近窗口；完整历史由用户显式加载。
         if (sessionIdRef.current && endedWithError) {
           void loadRecentMessages(sessionIdRef.current, false);
+        }
+        const eventChangedFiles = Array.isArray(event.changedFiles) ? event.changedFiles : [];
+        for (const filePath of eventChangedFiles) {
+          if (typeof filePath === "string" && filePath.trim()) changedFilesRef.current.add(filePath);
         }
         const changedFiles = [...changedFilesRef.current];
         changedFilesRef.current.clear();
@@ -1855,6 +1903,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoContinueSentRef.current = false;
     autoContinueInProgressRef.current = false;
     retryExhaustedRecoveryUsedRef.current = false;
+    changedFilesRef.current.clear();
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
     awaitingAgentStartRef.current = true;
@@ -2030,14 +2079,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase(null);
         dispatch({ type: "end" });
         eventSubscriptionRef.current?.();
+        transientSubscriptionRef.current?.();
         eventSubscriptionRef.current = null;
+        transientSubscriptionRef.current = null;
         eventSubscriptionSessionIdRef.current = null;
         cancelPendingMessageUpdate();
       }
     } finally {
       releasePreparedEvents?.();
     }
-  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, cancelPendingMessageUpdate, connectEvents, ensureEventsConnected, getTurnCapabilities, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
+  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, cancelPendingMessageUpdate, connectEvents, ensureEventsConnected, getTurnCapabilities, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted, pendingScrollToUserRef]);
 
   const handleRetryDelivery = useCallback(async (userMessage: UserMessage) => {
     let sid = sessionIdRef.current;
@@ -2870,18 +2921,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [clearAwaitingAgentStartGuard, connectEvents, getTurnCapabilities, handleAgentModeChange, scheduleAwaitingAgentStartGuard]);
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
-    messagesEndRef.current?.scrollIntoView({ behavior });
-  }, []);
-
-  const scrollUserMsgToTop = useCallback(() => {
-    const container = scrollContainerRef.current;
-    const el = lastUserMsgRef.current;
-    if (!container || !el) return;
-    const elAbsTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
-    container.scrollTo({ top: elAbsTop - 16, behavior: "smooth" });
-  }, []);
-
   const activeSessionId = session?.id;
 
   // Load or reset session when the active tab changes. Previously AppShell
@@ -2947,8 +2986,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     stallDismissedRef.current = false;
     stallRecoveriesRef.current = 0;
     setStallLevel(null);
-    initialScrollDoneRef.current = false;
-    pendingScrollToUserRef.current = false;
+    resetAutoScroll();
     changedFilesRef.current.clear();
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
@@ -3027,7 +3065,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       activeSubagentToolIds.clear();
       stopSubagentLiveRefresh();
     };
-  }, [cancelPendingMessageUpdate, connectEvents, loadRecentMessages, loadSession, loadSessionState, loadTools, activeTabId, newSessionCwd, activeSessionId, stopSubagentLiveRefresh]);
+  }, [cancelPendingMessageUpdate, connectEvents, loadRecentMessages, loadSession, loadSessionState, loadTools, activeTabId, newSessionCwd, activeSessionId, resetAutoScroll, stopSubagentLiveRefresh]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -3039,19 +3077,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [systemPrompt, onSystemPromptChange]);
 
   useEffect(() => {
-    if (messages.length > 0) {
-      if (pendingScrollToUserRef.current) {
-        pendingScrollToUserRef.current = false;
-        initialScrollDoneRef.current = true;
-        scrollUserMsgToTop();
-      } else if (!initialScrollDoneRef.current) {
-        initialScrollDoneRef.current = true;
-        scrollToBottom("instant");
-      } else if (!agentRunningRef.current) {
-        scrollToBottom("smooth");
-      }
-    }
-  }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
+    syncAfterMessageChange(messages.length, agentRunningRef.current);
+  }, [messages.length, agentRunning, syncAfterMessageChange]);
 
   // Load cached control-plane data immediately, then revalidate. A saturated
   // backend must never turn one transient models request failure into a missing
@@ -3088,8 +3115,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [isNew, modelsRefreshKey, modelsConfigVersion, setNewSessionModel]);
 
   useEffect(() => {
-    window.addEventListener("deerhux.models-updated", bumpModelsConfigVersion);
-    return () => window.removeEventListener("deerhux.models-updated", bumpModelsConfigVersion);
+    return subscribeToAppNotification("deerhux.models-updated", () => {
+      bumpModelsConfigVersion();
+    });
   }, []);
 
   // Compact error auto-dismiss

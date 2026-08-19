@@ -28,8 +28,34 @@ export function writeCachedJson<T>(key: string, value: T): void {
   }
 }
 
+export class ControlPlaneHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`HTTP ${status}`);
+    this.name = "ControlPlaneHttpError";
+    this.status = status;
+  }
+}
+
+export class ControlPlaneTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number, cause?: unknown) {
+    super(`请求超时（${timeoutMs}ms）`, cause === undefined ? undefined : { cause });
+    this.name = "ControlPlaneTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
+
+function isRetryableReadError(error: unknown): boolean {
+  if (error instanceof ControlPlaneHttpError) return error.status >= 500;
+  if (error instanceof DOMException && error.name === "AbortError") return false;
+  return true;
 }
 
 export async function fetchJsonWithRetry<T>(
@@ -39,27 +65,36 @@ export async function fetchJsonWithRetry<T>(
 ): Promise<T> {
   const attempts = Math.max(1, config.attempts ?? 3);
   const timeoutMs = config.timeoutMs ?? 10_000;
+  const externalSignal = options.signal;
+  if (externalSignal?.aborted) {
+    throw externalSignal.reason ?? new DOMException("The request was aborted.", "AbortError");
+  }
+
   let lastError: unknown;
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-    const externalSignal = options.signal;
-    const abortFromExternal = () => controller.abort(externalSignal?.reason);
-    if (externalSignal) {
-      if (externalSignal.aborted) abortFromExternal();
-      else externalSignal.addEventListener("abort", abortFromExternal, { once: true });
+    if (externalSignal?.aborted) {
+      throw externalSignal.reason ?? new DOMException("The request was aborted.", "AbortError");
     }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = globalThis.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const abortFromExternal = () => controller.abort(externalSignal?.reason);
+    if (externalSignal) externalSignal.addEventListener("abort", abortFromExternal, { once: true });
 
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) throw new ControlPlaneHttpError(response.status);
       return await response.json() as T;
     } catch (error) {
-      lastError = error;
-      if (externalSignal?.aborted || attempt === attempts - 1) throw error;
+      lastError = timedOut ? new ControlPlaneTimeoutError(timeoutMs, error) : error;
+      if (externalSignal?.aborted || !isRetryableReadError(lastError) || attempt === attempts - 1) throw lastError;
     } finally {
-      window.clearTimeout(timeout);
+      globalThis.clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", abortFromExternal);
     }
 

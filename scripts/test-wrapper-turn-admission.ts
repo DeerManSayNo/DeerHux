@@ -170,6 +170,9 @@ await assert.rejects(
   /Abort|Stop requested/,
 );
 listener?.({ type: "agent_end", willRetry: false });
+for (let i = 0; i < 50 && (wrapper as unknown as { changedFilesFinalizing: boolean }).changedFilesFinalizing; i++) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
 await wrapper.send({ type: "prompt", message: "reservation released" });
 assert.equal(promptInputs.at(-1)?.text, "reservation released");
 

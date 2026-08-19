@@ -2,22 +2,16 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { PointerEvent as PointerEventType, MouseEvent as MouseEventType, ReactNode } from "react";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { CHAT_LAYOUT_COUNTS, ChatWorkspace, type ChatLayoutMode } from "./ChatWorkspace";
 import { FilePreviewPanel } from "./FilePreviewPanel";
 import type { Tab } from "./TabBar";
-import { ModelsConfig } from "./ModelsConfig";
-import { SkillsConfig } from "./SkillsConfig";
-import { SchedulerPanel } from "./SchedulerPanel";
-import { RoleConfig } from "./RoleConfig";
-import { MemoryConfig } from "./MemoryConfig";
-import { McpConfig } from "./McpConfig";
-import { ExtensionsConfig } from "./ExtensionsConfig";
-import { WeChatConfig } from "./WeChatConfig";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import { normalizeExternalHref, openExternalLink } from "@/lib/external-links";
 import { getRelativeFilePath } from "@/lib/file-paths";
+import { retainCwdWorkspaceState } from "@/lib/workspace-cwd-state";
 import {
   FILE_PREVIEW_CHANNEL_NAME,
   FILE_PREVIEW_STATE_STORAGE_KEY,
@@ -31,7 +25,8 @@ import { useTheme } from "@/hooks/useTheme";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import type { SessionInfo } from "@/lib/types";
 import { subscribeHostEvents } from "@/lib/agent-event-client";
-import type { ChatInputHandle } from "./ChatInput";
+import type { ChatInputHandle, ChatInputState } from "./ChatInput";
+import { ChatDraftStore, clearCwdScopedDraftResources, promoteNewSessionDraft } from "@/lib/chat-drafts";
 
 type SidebarMode = "open" | "closed";
 
@@ -40,6 +35,17 @@ declare global {
     __TAURI_INTERNALS__?: unknown;
   }
 }
+
+// These settings panels are only mounted after an explicit user action. Keep their
+// named exports behind dynamic imports so they do not inflate the initial app shell.
+const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig));
+const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig));
+const SchedulerPanel = dynamic(() => import("./SchedulerPanel").then((module) => module.SchedulerPanel));
+const RoleConfig = dynamic(() => import("./RoleConfig").then((module) => module.RoleConfig));
+const MemoryConfig = dynamic(() => import("./MemoryConfig").then((module) => module.MemoryConfig));
+const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig));
+const ExtensionsConfig = dynamic(() => import("./ExtensionsConfig").then((module) => module.ExtensionsConfig));
+const WeChatConfig = dynamic(() => import("./WeChatConfig").then((module) => module.WeChatConfig));
 
 const WINDOW_DRAG_HEIGHT = 32;
 const WINDOW_DRAG_EXCLUDE_SELECTOR = [
@@ -75,19 +81,8 @@ type RunningSessionStatus = {
   contentIdleMs: number | null;
 };
 
-const AUTO_OPEN_EXTENSIONS = new Set([".html", ".htm", ".md", ".mdx", ".txt", ".json", ".yaml", ".yml", ".toml", ".env", ".xml", ".ini", ".cfg", ".conf"]);
 const MAX_CHAT_WINDOWS = 6;
 const CHAT_WINDOW_LIMIT_MESSAGE = "请先关闭一个窗口";
-
-function fileNameFromPath(filePath: string): string {
-  return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
-}
-
-function shouldAutoOpenFile(filePath: string): boolean {
-  const name = fileNameFromPath(filePath).toLowerCase();
-  const ext = "." + (name.split(".").pop() ?? "");
-  return Boolean(name) && AUTO_OPEN_EXTENSIONS.has(ext);
-}
 
 function getProjectName(cwd: string): string {
   const normalized = cwd.replace(/[\\/]+$/, "");
@@ -119,15 +114,22 @@ export function AppShell() {
   const searchParams = useSearchParams();
   const { isDark, toggleTheme } = useTheme();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
+  const selectedSessionRef = useRef<SessionInfo | null>(null);
   const [pendingSession, setPendingSession] = useState<SessionInfo | null>(null);
+  const pendingSessionRef = useRef<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
+  const newSessionCwdRef = useRef<string | null>(null);
   // Open chat sessions are assigned to workspace slots; layout follows the slot count.
   const [sessionTabs, setSessionTabs] = useState<SessionInfo[]>([]);
+  const sessionTabsRef = useRef<SessionInfo[]>([]);
   const [activeSessionTabId, setActiveSessionTabId] = useState<string | null>(null);
+  const activeSessionTabIdRef = useRef<string | null>(null);
   const [chatSlotIds, setChatSlotIds] = useState<(string | null)[]>(() => Array(MAX_CHAT_WINDOWS).fill(null));
   const chatSlotIdsRef = useRef<(string | null)[]>(Array(MAX_CHAT_WINDOWS).fill(null));
+  const chatDraftsRef = useRef(new ChatDraftStore<ChatInputState>());
   const [focusedChatSlotIndex, setFocusedChatSlotIndex] = useState(0);
+  const focusedChatSlotIndexRef = useRef(0);
   const [refreshKey, setRefreshKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
@@ -139,12 +141,14 @@ export function AppShell() {
   const [wechatConfigOpen, setWechatConfigOpen] = useState(false);
   const [wechatStatus, setWechatStatus] = useState<{ connected: boolean; polling: boolean; accountId?: string; activeUserCount?: number } | null>(null);
   const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
+  const runningSessionIdsRef = useRef<Set<string>>(new Set());
   const hostRunningBaselineReceivedRef = useRef(false);
   const pendingSessionIdsBySlotRef = useRef<Map<number, string>>(new Map());
   const pendingTempTabIdsBySlotRef = useRef<Map<number, string>>(new Map());
   // Track which tab ids are genuine placeholders (not real sessions),
   // so handleSelectSession knows when to show a new-session UI vs load from API.
   const placeholderTabIdsRef = useRef<Set<string>>(new Set());
+  const ignoredWorkspaceSessionIdsRef = useRef<Set<string>>(new Set());
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("open");
   const sidebarOpen = sidebarMode === "open";
   const SIDEBAR_MIN = 180;
@@ -189,6 +193,7 @@ export function AppShell() {
 
   const [initialSessionId] = useState<string | null>(() => searchParams.get("session"));
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
+  const activeCwdRef = useRef<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
   const [customCwds, setCustomCwds] = useState<string[]>([]);
   const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
@@ -215,6 +220,38 @@ export function AppShell() {
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !searchParams.get("session"));
   // Suppresses extra cwd handling during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
+
+  useEffect(() => {
+    selectedSessionRef.current = selectedSession;
+  }, [selectedSession]);
+
+  useEffect(() => {
+    pendingSessionRef.current = pendingSession;
+  }, [pendingSession]);
+
+  useEffect(() => {
+    newSessionCwdRef.current = newSessionCwd;
+  }, [newSessionCwd]);
+
+  useEffect(() => {
+    sessionTabsRef.current = sessionTabs;
+  }, [sessionTabs]);
+
+  useEffect(() => {
+    runningSessionIdsRef.current = new Set(runningSessionStatuses.keys());
+  }, [runningSessionStatuses]);
+
+  useEffect(() => {
+    activeSessionTabIdRef.current = activeSessionTabId;
+  }, [activeSessionTabId]);
+
+  useEffect(() => {
+    focusedChatSlotIndexRef.current = focusedChatSlotIndex;
+  }, [focusedChatSlotIndex]);
+
+  useEffect(() => {
+    activeCwdRef.current = activeCwd;
+  }, [activeCwd]);
 
   useEffect(() => {
     const handleExternalLinkClick = (event: MouseEvent) => {
@@ -273,7 +310,11 @@ export function AppShell() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { runningSessionIds?: string[]; sessions?: RunningSessionStatus[] };
       if (!hostRunningBaselineReceivedRef.current) {
-        setRunningSessionStatuses(new Map((data.sessions ?? []).map((session) => [session.sessionId, session])));
+        setRunningSessionStatuses(new Map(
+          (data.sessions ?? [])
+            .filter((session) => !ignoredWorkspaceSessionIdsRef.current.has(session.sessionId))
+            .map((session) => [session.sessionId, session]),
+        ));
       }
     } catch {
       if (!hostRunningBaselineReceivedRef.current) setRunningSessionStatuses(new Map());
@@ -287,7 +328,9 @@ export function AppShell() {
     let previousIds = new Set<string>();
     return subscribeHostEvents((frame) => {
       hostRunningBaselineReceivedRef.current = true;
-      const next = new Map(frame.sessions.map((session) => [session.sessionId, session]));
+      const next = new Map(frame.sessions
+        .filter((session) => !ignoredWorkspaceSessionIdsRef.current.has(session.sessionId))
+        .map((session) => [session.sessionId, session]));
       const nextIds = new Set(next.keys());
       const changed = nextIds.size !== previousIds.size || [...nextIds].some((id) => !previousIds.has(id));
       previousIds = nextIds;
@@ -325,7 +368,7 @@ export function AppShell() {
   }, []);
 
   const setSessionRunning = useCallback((sessionId: string | null | undefined, running: boolean) => {
-    if (!sessionId) return;
+    if (!sessionId || (running && ignoredWorkspaceSessionIdsRef.current.has(sessionId))) return;
     setRunningSessionStatuses((prev) => {
       const next = new Map(prev);
       if (running) {
@@ -349,34 +392,86 @@ export function AppShell() {
 
   const handleCwdChange = useCallback((cwd: string | null) => {
     setActiveCwd(cwd);
+    activeCwdRef.current = cwd;
     // Skip if cwd is null (initial mount) or during the initial URL restore.
+    // URL restore deliberately keeps the restored session workspace intact.
     if (!cwd || suppressCwdBumpRef.current) return;
-    // Close any session that belongs to a different cwd — it no longer
-    // matches the selected project directory.
-    setSelectedSession((prev) => {
-      if (prev && prev.cwd !== cwd) return null;
-      return prev;
-    });
-    setNewSessionCwd((prev) => {
-      if (prev && prev !== cwd) return null;
-      return prev;
-    });
+
+    const workspace = retainCwdWorkspaceState({
+      sessionTabs: sessionTabsRef.current,
+      chatSlotIds: chatSlotIdsRef.current,
+      selectedSession: selectedSessionRef.current,
+      pendingSession: pendingSessionRef.current,
+      activeSessionTabId: activeSessionTabIdRef.current,
+      newSessionCwd: newSessionCwdRef.current,
+      focusedChatSlotIndex: focusedChatSlotIndexRef.current,
+      placeholderTabIds: placeholderTabIdsRef.current,
+      pendingSessionIdsBySlot: pendingSessionIdsBySlotRef.current,
+      pendingTempTabIdsBySlot: pendingTempTabIdsBySlotRef.current,
+      runningSessionIds: runningSessionIdsRef.current,
+    }, cwd);
+
+    // Keep refs in sync before React commits. Async ChatWindow callbacks read
+    // these refs, so leaving the old values until an effect runs can resurrect
+    // a tab from the previously selected project.
+    const retainedSessionIds = new Set(workspace.sessionTabs.map((session) => session.id));
+    ignoredWorkspaceSessionIdsRef.current = new Set([
+      ...[...ignoredWorkspaceSessionIdsRef.current].filter((sessionId) => !retainedSessionIds.has(sessionId)),
+      ...workspace.staleSessionIds,
+    ]);
+    sessionTabsRef.current = workspace.sessionTabs;
+    chatSlotIdsRef.current = workspace.chatSlotIds;
+    selectedSessionRef.current = workspace.selectedSession;
+    pendingSessionRef.current = workspace.pendingSession;
+    activeSessionTabIdRef.current = workspace.activeSessionTabId;
+    newSessionCwdRef.current = workspace.newSessionCwd;
+    focusedChatSlotIndexRef.current = workspace.focusedChatSlotIndex;
+    placeholderTabIdsRef.current = workspace.placeholderTabIds;
+    pendingSessionIdsBySlotRef.current = workspace.pendingSessionIdsBySlot;
+    pendingTempTabIdsBySlotRef.current = workspace.pendingTempTabIdsBySlot;
+    runningSessionIdsRef.current = workspace.runningSessionIds;
+
+    setSessionTabs(workspace.sessionTabs);
+    setChatSlotIds(workspace.chatSlotIds);
+    setSelectedSession(workspace.selectedSession);
+    setPendingSession(workspace.pendingSession);
+    setActiveSessionTabId(workspace.activeSessionTabId);
+    setNewSessionCwd(workspace.newSessionCwd);
+    setFocusedChatSlotIndex(workspace.focusedChatSlotIndex);
+    setRunningSessionStatuses((previous) => new Map(
+      [...previous].filter(([sessionId]) => workspace.runningSessionIds.has(sessionId)),
+    ));
     replaceUrl("/");
   }, [replaceUrl]);
 
   const handleNewSessionProjectChange = useCallback((cwd: string, slotIndex: number) => {
     const slotId = chatSlotIdsRef.current[slotIndex] ?? null;
     if (!slotId || !placeholderTabIdsRef.current.has(slotId)) return;
-    setActiveCwd(cwd);
+
+    // The project picker changes the workspace CWD too. Update this placeholder
+    // synchronously before reusing the normal CWD convergence path, otherwise
+    // all existing tabs remain from the old project while activeCwd points here.
+    const updatedTabs = sessionTabsRef.current.map((tab) => (
+      tab.id === slotId && tab.path === "" ? { ...tab, cwd } : tab
+    ));
+    sessionTabsRef.current = updatedTabs;
+
+    // Plain text is safe to carry across an intentional project switch; image
+    // paths, file references and selected skills are CWD-scoped and must not
+    // leak into the newly selected project.
+    const draft = chatDraftsRef.current.get(slotIndex, slotId);
+    if (draft) chatDraftsRef.current.set(slotIndex, slotId, clearCwdScopedDraftResources(draft));
+
+    handleCwdChange(cwd);
+    focusedChatSlotIndexRef.current = slotIndex;
+    activeSessionTabIdRef.current = slotId;
+    selectedSessionRef.current = null;
+    newSessionCwdRef.current = cwd;
     setFocusedChatSlotIndex(slotIndex);
     setActiveSessionTabId(slotId);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
-    setSessionTabs((prev) => prev.map((tab) => (
-      tab.id === slotId && tab.path === "" ? { ...tab, cwd } : tab
-    )));
-    replaceUrl("/");
-  }, [replaceUrl]);
+  }, [handleCwdChange]);
 
   useEffect(() => {
     if (!settingsMenuOpen) return;
@@ -504,8 +599,17 @@ export function AppShell() {
     setFocusedChatSlotIndex(slotIndex);
   }, []);
 
+  const getChatDraft = useCallback((slotIndex: number, sessionId: string) => {
+    return chatDraftsRef.current.get(slotIndex, sessionId);
+  }, []);
+
+  const saveChatDraft = useCallback((slotIndex: number, sessionId: string, draft: ChatInputState) => {
+    chatDraftsRef.current.set(slotIndex, sessionId, draft);
+  }, []);
+
   const handleClearChatSlot = useCallback((slotIndex: number) => {
     const removedSessionId = chatSlotIds[slotIndex] ?? null;
+    if (removedSessionId) chatDraftsRef.current.clear(slotIndex, removedSessionId);
     setChatSlotIds((prev) => {
       if (!prev[slotIndex]) return prev;
       const next = [...prev];
@@ -533,12 +637,16 @@ export function AppShell() {
   }, [activeSessionTabId, chatSlotIds, focusedChatSlotIndex, replaceUrl, selectedSession?.id]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    ignoredWorkspaceSessionIdsRef.current.delete(session.id);
     // Do not clear pendingSession here: a newly-created session is not written
     // to disk by DeerHux until the first assistant message exists. If the user
     // switches away while that first response is still running, /api/sessions
     // cannot list it yet, so the sidebar must keep showing the optimistic row.
     // Only placeholder sessions show the new-session UI.
     if (placeholderTabIdsRef.current.has(session.id)) {
+      newSessionCwdRef.current = session.cwd;
+      selectedSessionRef.current = null;
+      activeSessionTabIdRef.current = session.id;
       placeSessionInLeftmostSlot(session.id);
       setNewSessionCwd(session.cwd);
       setSelectedSession(null);
@@ -551,6 +659,9 @@ export function AppShell() {
       return;
     }
     setNewSessionCwd(null);
+    newSessionCwdRef.current = null;
+    selectedSessionRef.current = session;
+    activeSessionTabIdRef.current = session.id;
     // If the session came from the sidebar it may have updated fields (e.g. path,
     // name). Update the tracked session in place so subsequent slot renders have the real data.
     setSessionTabs((prev) => {
@@ -680,6 +791,9 @@ export function AppShell() {
   }, [getTargetChatSlotIndex, hasOpenChatWindowCapacity, placeSessionInFocusedSlot, replaceUrl, showChatWindowLimitMessage, topNewSessionCwd]);
 
   const handleSessionStarted = useCallback((session: SessionInfo | null, slotIndex: number) => {
+    // A ChatWindow can finish starting after its project has been switched
+    // away. Do not recreate optimistic/running state for that old workspace.
+    if (session && activeCwdRef.current && session.cwd !== activeCwdRef.current) return;
     if (!session) {
       const pendingId = pendingSessionIdsBySlotRef.current.get(slotIndex);
       if (pendingId) {
@@ -697,6 +811,9 @@ export function AppShell() {
 
   // Called by ChatWindow when a new session gets its real id from DeerHux
   const handleSessionCreated = useCallback((session: SessionInfo, slotIndex = focusedChatSlotIndex) => {
+    // Ignore a completion from a ChatWindow that was removed by a project
+    // switch while its first request was still in flight.
+    if (activeCwdRef.current && session.cwd !== activeCwdRef.current) return;
     const pendingId = pendingSessionIdsBySlotRef.current.get(slotIndex);
     if (pendingId) setSessionRunning(pendingId, false);
     pendingSessionIdsBySlotRef.current.delete(slotIndex);
@@ -717,6 +834,18 @@ export function AppShell() {
     const mappedTempId = pendingTempTabIdsBySlotRef.current.get(slotIndex) ?? null;
     const slotTempId = chatSlotIdsRef.current[slotIndex] ?? null;
     const tempId = mappedTempId ?? (slotTempId && placeholderTabIdsRef.current.has(slotTempId) ? slotTempId : null);
+    if (tempId) {
+      const placeholderDraft = chatDraftsRef.current.get(slotIndex, tempId);
+      const sessionDraft = chatDraftsRef.current.get(slotIndex, session.id);
+      const promotedDraft = promoteNewSessionDraft(placeholderDraft, sessionDraft, () => ({
+        value: "",
+        attachedImages: [],
+        selectedSkill: null,
+        fileReferences: [],
+      }));
+      chatDraftsRef.current.clear(slotIndex, tempId);
+      if (promotedDraft) chatDraftsRef.current.set(slotIndex, session.id, promotedDraft);
+    }
     pendingTempTabIdsBySlotRef.current.delete(slotIndex);
     // The placeholder is now a real session — remove from placeholder set
     if (tempId) placeholderTabIdsRef.current.delete(tempId);
@@ -901,16 +1030,14 @@ export function AppShell() {
     setActiveFileTabId(tabId);
   }, [activeFileTabId, effectiveProjectCwd, fileTabs, rightPanelOpen]);
 
-  const handleAgentEnd = useCallback((sessionId: string, changedFiles?: string[]) => {
+  const handleAgentEnd = useCallback((sessionId: string, _changedFiles?: string[]) => {
     setSessionRunning(sessionId, false);
     // Keep pendingSession until /api/sessions has actually listed it. The
     // session list is cached and DeerHux may flush the new jsonl slightly after
     // the final event; clearing the optimistic row here makes it disappear.
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
-    const filePath = changedFiles?.filter(shouldAutoOpenFile).at(-1);
-    if (filePath) handleOpenFile(filePath, fileNameFromPath(filePath));
-  }, [handleOpenFile, setSessionRunning]);
+  }, [setSessionRunning]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => {
@@ -1884,6 +2011,8 @@ export function AppShell() {
                 projectOptions={headerProjectOptions}
                 onNewSessionCwdChange={handleNewSessionProjectChange}
                 onOpenSession={handleOpenSessionById}
+                getInputState={getChatDraft}
+                saveInputState={saveChatDraft}
               />
             </>
           ) : showPlaceholder ? (

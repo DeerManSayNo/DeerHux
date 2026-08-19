@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
+import { subscribeToAppNotification, notifyApp } from "@/lib/app-notifications";
 import { SystemPromptConfig } from "./SystemPromptConfig";
 
 interface RoleSetting { id: string; text: string; createdAt: string }
@@ -55,7 +56,7 @@ function cloneBlocks(blocks: Record<string, RoleSetting[]>): Record<string, Role
 }
 
 function notifyRolesUpdated() {
-  window.dispatchEvent(new Event("deerhux.roles-updated"));
+  notifyApp("deerhux.roles-updated");
 }
 
 function ProjectList({ projects, selectedCwd, onSelect }: { projects: { cwd: string; displayName: string }[]; selectedCwd: string; onSelect: (cwd: string) => void }) {
@@ -201,9 +202,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
   useEffect(() => { loadRoles(); }, [loadRoles]);
 
   useEffect(() => {
-    const handler = () => { loadRoles(); };
-    window.addEventListener("deerhux.roles-updated", handler);
-    return () => window.removeEventListener("deerhux.roles-updated", handler);
+    return subscribeToAppNotification("deerhux.roles-updated", () => { loadRoles(); });
   }, [loadRoles]);
 
   useEffect(() => {
@@ -310,7 +309,12 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
     setSaving(true);
     try {
       const requestCwd = roleScope(selectedRole) === "project" ? (roleProjectCwd(selectedRole) || effectiveCwd) : undefined;
-      await fetch(roleApiUrl(selectedRole.id, requestCwd), { method: "DELETE" });
+      const response = await fetch(roleApiUrl(selectedRole.id, requestCwd), { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: string } | null;
+        window.alert(payload?.error ?? `删除失败（HTTP ${response.status}）`);
+        return;
+      }
       setSelectedRoleId("default");
       await loadRoles();
       notifyRolesUpdated();

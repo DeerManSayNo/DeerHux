@@ -31,7 +31,7 @@ npm run dev   # 端口 30141
   │                        │   startRpcSession() ─────────▶│ createAgentSession()
   │                        │   session.send(cmd) ─────────▶│ session.prompt()
   │                        │                               │
-  ├─ SSE 连接 ────────────▶ GET /api/agent/[id]/events    │
+  ├─ SSE 连接 ────────────▶ GET /api/agent/events（全局多路复用）│
   │                        │   session.onEvent() ◀─────────│ session.subscribe()
   │◀── data: {...} ─────────│                               │
 ```
@@ -51,7 +51,7 @@ app/api/
   sessions/new/route.ts           返回 410（已废弃）
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET 获取状态 | POST 发送任意指令
-  agent/[id]/events/route.ts      GET SSE 事件流
+  agent/events/route.ts           GET 全局多路复用 SSE（epoch + 游标重放）
   files/[...path]/route.ts        GET 获取文件内容供查看器使用
   models/route.ts                 GET { models, modelList, defaultModel }
   models-config/route.ts          GET/POST — 读写 ~/.deerhux/agent/models.json
@@ -61,7 +61,6 @@ lib/
   session-reader.ts   解析 .jsonl；getModelNameMap/getModelList/getDefaultModel
   types.ts            共享 TypeScript 类型定义
   normalize.ts        normalizeToolCalls() — 处理文件格式与内部类型间的字段名不匹配
-  system-prompt-off.ts  所有工具禁用时的最小化 system prompt
 
 components/
   AppShell.tsx        布局 + URL 状态 + 标签页管理
@@ -69,7 +68,6 @@ components/
   ChatWindow.tsx      消息 + 流式输出 + SSE + fork/navigate 逻辑
   ChatInput.tsx       输入栏 + 模型/思考/工具/压缩控制
   MessageView.tsx     渲染单条消息（user/assistant/toolCall/toolResult）
-  BranchNavigator.tsx session 内分支切换器
   ChatMinimap.tsx     消息列表旁的滚动缩略图
   ToolPanel.tsx       导出 PRESET_NONE/DEFAULT/FULL + getPresetFromTools
   ModelsConfig.tsx    编辑 models.json 的弹窗（从侧边栏底部打开）
@@ -94,7 +92,7 @@ components/
 
 ### 两种分支 —— 不要混淆
 - **Fork**（用户消息上的 Fork 按钮）：创建新的独立 `.jsonl` 文件。通过 header 中的 `parentSession` 字段在侧边栏树中显示为子节点。
-- **Session 内分支**（Continue 按钮 / BranchNavigator）：在同一个文件内调用 `navigate_tree`。多个条目共享相同的 `parentId`。切换分支时调用 `/api/sessions/[id]/context?leafId=`。
+- **Session 内分支**（Continue 按钮）：在同一个文件内调用 `navigate_tree`。多个条目共享相同的 `parentId`。切换分支时调用 `/api/sessions/[id]/context?leafId=`。
 
 ### Session 文件可以被完整重写
 Header 中的 `parentSession` **仅用于显示元数据** —— 对聊天内容没有任何影响。可以安全地 `writeFileSync` 整个文件（DeerHux 自己迁移时就是这么做的）。用于删除时级联重新挂接子节点。
@@ -103,7 +101,7 @@ Header 中的 `parentSession` **仅用于显示元数据** —— 对聊天内�
 DeerHux 存储 toolCall 块格式为 `{type:"toolCall", id, name, arguments}`，但 `ToolCallContent` 使用的是 `{toolCallId, toolName, input}`。`lib/normalize.ts` 中的 `normalizeToolCalls()` 负责处理这个转换 —— 在 `session-reader.ts`（文件加载）和 `ChatWindow.handleAgentEvent()`（流式输出）中都会调用。
 
 ### 新 session 的工具预设
-工具名称在 session 创建时传入（`POST /api/agent/new` → `toolNames[]`）。对已有 session，挂载时通过 `get_tools` → `getPresetFromTools()` 推断当前的预设。当工具被完全禁用时（`toolNames = []`），`rpc-manager.ts` 会通过 `system-prompt-off.ts` + `DefaultResourceLoader` 注入最小化 system prompt。
+工具名称在 session 创建时传入（`POST /api/agent/new` → `toolNames[]`）。对已有 session，挂载时通过 `get_tools` → `getPresetFromTools()` 推断当前的预设。当工具被完全禁用时（`toolNames = []`），`rpc-manager.ts` 会注入最小化 system prompt。
 
 ### 新 session 的模型默认值
 `GET /api/models` 返回从 `~/.deerhux/agent/settings.json` 读取的 `defaultModel`。`ChatWindow` 在挂载时为新建 session 预选此默认模型。

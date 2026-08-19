@@ -1,36 +1,59 @@
 /**
- * Simple typed event emitter for agent events.
- * Used to decouple the SSE event source from the log panel.
+ * Typed, session-scoped event emitter for agent events.
+ * Used to decouple the SSE event source from session-specific UI effects.
  */
 import type { AgentRuntimeEventBase } from "./agent-runtime/types";
 
 /** 兼容名称；事件基础契约统一由 agent-runtime/types 提供。 */
 export type AgentEvent = AgentRuntimeEventBase;
 
-type Listener = (event: AgentEvent) => void;
+/** 每个 UI 事件都必须保留来源会话，避免多窗口间串扰。 */
+export interface AgentEventEnvelope {
+  sessionId: string;
+  event: AgentEvent;
+}
 
-class AgentEventBus {
-  private listeners: Set<Listener> = new Set();
+type Listener = (envelope: AgentEventEnvelope) => void;
 
-  subscribe(listener: Listener): () => void {
-    this.listeners.add(listener);
-    return () => { this.listeners.delete(listener); };
+export class AgentEventBus {
+  private listenersBySession = new Map<string, Set<Listener>>();
+
+  subscribe(sessionId: string, listener: Listener): () => void {
+    let listeners = this.listenersBySession.get(sessionId);
+    if (!listeners) {
+      listeners = new Set();
+      this.listenersBySession.set(sessionId, listeners);
+    }
+    listeners.add(listener);
+
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.listenersBySession.delete(sessionId);
+    };
   }
 
-  emit(event: AgentEvent): void {
-    for (const listener of this.listeners) {
+  emit(envelope: AgentEventEnvelope): void {
+    const listeners = this.listenersBySession.get(envelope.sessionId);
+    if (!listeners) return;
+
+    for (const listener of listeners) {
       try {
-        listener(event);
+        listener(envelope);
       } catch {
-        // ignore
+        // 一个 UI 副作用失败不能阻断同会话的其他监听器。
       }
     }
   }
 }
 
-const globalForBus = globalThis as unknown as { __deerhuxAgentEventBus?: AgentEventBus };
-if (!globalForBus.__deerhuxAgentEventBus) {
+const BUS_VERSION = 2;
+const globalForBus = globalThis as unknown as {
+  __deerhuxAgentEventBus?: AgentEventBus;
+  __deerhuxAgentEventBusVersion?: number;
+};
+if (globalForBus.__deerhuxAgentEventBusVersion !== BUS_VERSION) {
   globalForBus.__deerhuxAgentEventBus = new AgentEventBus();
+  globalForBus.__deerhuxAgentEventBusVersion = BUS_VERSION;
 }
 
-export const agentEventBus = globalForBus.__deerhuxAgentEventBus;
+export const agentEventBus = globalForBus.__deerhuxAgentEventBus!;

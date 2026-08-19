@@ -15,6 +15,7 @@ import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
+import { subscribeToAppNotification, notifyApp } from "@/lib/app-notifications";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { needsCompaction, type CompactionModelRef } from "@/lib/compaction-ui";
 import { subscribeSubagentRuns } from "@/lib/agent-event-client";
@@ -57,12 +58,25 @@ interface Props {
   projectOptions?: ProjectOption[];
   onNewSessionCwdChange?: (cwd: string) => void;
   onOpenSession?: (sessionId: string) => void;
+  initialInputState?: ChatInputState | null;
+  saveInputState?: (state: ChatInputState) => void;
 }
 
 function getProjectName(cwd: string): string {
   const normalized = cwd.replace(/[\\/]+$/, "");
   const parts = normalized.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? cwd;
+}
+
+/**
+ * 会话快照可在流结束时插入、去重或分页回填消息。绝不能以数组下标作为 key，
+ * 否则 React 会把不同消息复用到同一个 DOM 节点，造成完成态显示异常。
+ */
+function getMessageRenderKey(message: AgentMessage, entryId: string | undefined, index: number): string {
+  if (entryId) return `entry:${entryId}`;
+  if (message.role === "user" && message.clientMessageId) return `client:${message.clientMessageId}`;
+  const timestamp = typeof message.timestamp === "number" ? message.timestamp : "unknown";
+  return `${message.role}:${timestamp}:${index}`;
 }
 
 function mergeCollaborationMuxSnapshot(
@@ -481,7 +495,7 @@ function Typewriter({ phrases, paused = false }: { phrases: string[]; paused?: b
   );
 }
 
-export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession }: Props) {
+export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
@@ -783,13 +797,26 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     if (data.context.roleId) void applyRoleToSession(loadedRoleId);
   }, [data, applyRoleToSession]);
 
+  const refreshRolesAndApply = useCallback(async () => {
+    const rolesUrl = currentCwd ? `/api/roles?cwd=${encodeURIComponent(currentCwd)}` : "/api/roles";
+    const response = await fetch(rolesUrl, { cache: "no-store" }).catch(() => null);
+    if (!response?.ok) return;
+    const payload = await response.json().catch(() => null) as { roles?: AgentRole[] } | null;
+    if (!payload?.roles) return;
+    setRoles(payload.roles);
+    const roleId = payload.roles.some((role) => role.id === currentRoleId) ? currentRoleId : "default";
+    if (roleId !== currentRoleId) {
+      setCurrentRoleId(roleId);
+      localStorage.setItem("deerhux.current-role", roleId);
+    }
+    await applyRoleToSession(roleId);
+  }, [applyRoleToSession, currentCwd, currentRoleId]);
+
   useEffect(() => {
-    const handler = () => {
-      void applyRoleToSession(currentRoleId);
-    };
-    window.addEventListener("deerhux.roles-updated", handler);
-    return () => window.removeEventListener("deerhux.roles-updated", handler);
-  }, [applyRoleToSession, currentRoleId]);
+    return subscribeToAppNotification("deerhux.roles-updated", () => {
+      void refreshRolesAndApply();
+    });
+  }, [refreshRolesAndApply]);
 
   const handleRoleChange = useCallback((roleId: string) => {
     setCurrentRoleId(roleId);
@@ -898,21 +925,31 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const confirmRoleSetting = useCallback(async (mode: "save" | "temporary" | "cancel") => {
     const pending = pendingRoleSetting;
     if (!pending) return;
-    setPendingRoleSetting(null);
+    if (mode === "cancel") {
+      setPendingRoleSetting(null);
+      return;
+    }
     if (mode === "save") {
       const rolesUrl = currentCwd ? `/api/roles?cwd=${encodeURIComponent(currentCwd)}` : "/api/roles";
       const settingsUrl = currentCwd
         ? `/api/roles/${encodeURIComponent(pending.roleId)}/settings?cwd=${encodeURIComponent(currentCwd)}`
         : `/api/roles/${encodeURIComponent(pending.roleId)}/settings`;
-      await fetch(settingsUrl, {
+      const settingsResponse = await fetch(settingsUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ block: pending.block, text: pending.setting }),
       });
-      const data = await fetch(rolesUrl).then((r) => r.json()).catch(() => null) as { roles?: AgentRole[] } | null;
+      if (!settingsResponse.ok) {
+        window.alert(`保存角色设定失败（HTTP ${settingsResponse.status}）`);
+        return;
+      }
+      const data = await fetch(rolesUrl).then((response) => response.ok ? response.json() : null).catch(() => null) as { roles?: AgentRole[] } | null;
       if (data?.roles) setRoles(data.roles);
+      notifyApp("deerhux.roles-updated");
+      setPendingRoleSetting(null);
       if (session?.id) await applyRoleToSession(pending.roleId);
     } else if (mode === "temporary" && session?.id) {
+      setPendingRoleSetting(null);
       const res = await fetch(`/api/agent/${encodeURIComponent(session.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "add_temporary_role_setting", text: pending.setting }) }).catch(() => null);
       if (res?.ok) {
         const json = await res.json().catch(() => null) as { data?: { systemPrompt?: string | null } } | null;
@@ -943,24 +980,21 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
 
-  // Subscribe to the global event bus for sound effects.
+  // Subscribe to the session-scoped event bus for sound effects.
   // This avoids wrapping handleAgentEventRef which has closure/stale-ref issues.
-  const sessionIdRef2 = useRef(session?.id);
-  sessionIdRef2.current = session?.id;
   useEffect(() => {
-    const unsubscribe = agentEventBus.subscribe((event) => {
+    const sessionId = session?.id;
+    if (!sessionId) return;
+
+    return agentEventBus.subscribe(sessionId, ({ event }) => {
       if (event.type === "agent_start") {
-        const id = sessionIdRef2.current;
-        if (id) {
-          setChangedFilesBySession((prev) => ({ ...prev, [id]: [] }));
-        }
+        setChangedFilesBySession((prev) => ({ ...prev, [sessionId]: [] }));
       }
       if (event.type === "agent_end" && soundEnabledRef.current) {
         playDoneSoundRef.current();
       }
     });
-    return unsubscribe;
-  }, []);
+  }, [session?.id]);
 
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
@@ -1063,6 +1097,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const userScrollIntentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevScrollTopRef = useRef(0);
   const scrollDirectionRef = useRef<"content-up" | "content-down" | null>(null);
+  const wasRunningRef = useRef(false);
 
   const markUserScrollIntent = useCallback(() => {
     userScrollIntentRef.current = true;
@@ -1185,6 +1220,29 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   }, [session?.id, isNew, setAutoScroll, scrollContainerRef]);
 
   useEffect(() => {
+    if (wasRunningRef.current && !isRunning && shouldAutoScrollRef.current) {
+      // 流式 bubble 卸载、完成消息插入历史列表发生在同一次提交中。等 DOM 完成
+      // 两帧布局后只更新当前容器的 scrollTop，避免与 liveEnd.scrollIntoView()
+      // 竞争，也避免嵌套 scrollIntoView 导致浏览器合成层漏绘。
+      let secondFrame = 0;
+      const firstFrame = requestAnimationFrame(() => {
+        secondFrame = requestAnimationFrame(() => {
+          const container = scrollContainerRef.current;
+          if (container && shouldAutoScrollRef.current) {
+            container.scrollTop = container.scrollHeight - container.clientHeight;
+          }
+        });
+      });
+      wasRunningRef.current = isRunning;
+      return () => {
+        cancelAnimationFrame(firstFrame);
+        cancelAnimationFrame(secondFrame);
+      };
+    }
+    wasRunningRef.current = isRunning;
+  }, [isRunning, scrollContainerRef]);
+
+  useEffect(() => {
     if (!isRunning) return;
     if (!shouldAutoScrollRef.current) return;
 
@@ -1270,31 +1328,8 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const activeTurnTimerStartedAt = activeTurnTimerRef.current?.startedAt
     ?? (isRunning ? activeTurnStartedAt ?? Date.now() : undefined);
 
-  // Input state cache — preserves text / images / selected skill across tab switches
-  const inputStateCache = useRef<Map<string, ChatInputState>>(new Map());
-  const currentInputKey = session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`;
-  const previousInputKeyRef = useRef(currentInputKey);
-  if (previousInputKeyRef.current !== currentInputKey) {
-    const previousKey = previousInputKeyRef.current;
-    const previousState = inputStateCache.current.get(previousKey);
-    const currentState = inputStateCache.current.get(currentInputKey);
-    if (previousKey.startsWith("new:") && session?.id && previousState?.fileReferences?.length && !currentState?.fileReferences?.length) {
-      inputStateCache.current.set(currentInputKey, {
-        value: currentState?.value ?? "",
-        attachedImages: currentState?.attachedImages ?? [],
-        selectedSkill: currentState?.selectedSkill ?? null,
-        fileReferences: previousState.fileReferences,
-      });
-    }
-    previousInputKeyRef.current = currentInputKey;
-  }
-  const savedInputState = inputStateCache.current.get(currentInputKey) ?? null;
-  const currentInputKeyRef = useRef(currentInputKey);
-  currentInputKeyRef.current = currentInputKey;
-  const saveInputStateRef = useRef<((state: ChatInputState) => void) | null>(null);
-  saveInputStateRef.current = (state: ChatInputState) => {
-    inputStateCache.current.set(currentInputKeyRef.current, state);
-  };
+  const chatInputSaveStateRef = useRef<((state: ChatInputState) => void) | null>(null);
+  chatInputSaveStateRef.current = saveInputState ?? null;
 
   const chatInputElement = (
     <>
@@ -1366,8 +1401,8 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         onAutoRecoveryModeChange={handleAutoRecoveryModeChange}
         subagentEnabled={subagentEnabled}
         onSubagentToggle={handleSubagentToggle}
-        initialInputState={savedInputState}
-        saveInputStateRef={saveInputStateRef}
+        initialInputState={initialInputState}
+        saveInputStateRef={chatInputSaveStateRef}
       />
     </>
   );
@@ -1820,9 +1855,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                 const turnEntryIds = msg.role === "user"
                   ? entryIds.slice(idx, nextUserIndex).filter((id): id is string => Boolean(id))
                   : undefined;
+                const messageRenderKey = getMessageRenderKey(msg, entryIds[idx], idx);
                 const view = (
                   <MessageView
-                    key={idx}
+                    key={messageRenderKey}
                     message={msg}
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
@@ -1848,7 +1884,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                 );
                 if (!isVisible) return view;
                 return (
-                  <div key={idx} ref={(el) => {
+                  <div key={messageRenderKey} ref={(el) => {
                     messageRefs.current[currentRefIdx] = el;
                     if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
                   }}>

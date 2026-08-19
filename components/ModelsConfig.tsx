@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
+import { notifyApp } from "@/lib/app-notifications";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -1505,7 +1506,12 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
       });
       const d = await res.json() as { success?: boolean; error?: string };
       if (!res.ok || d.error) setSaveError(d.error ?? `HTTP ${res.status}`);
-      else { setSavedOk(true); onSaved?.(); setTimeout(() => setSavedOk(false), 2000); }
+      else {
+        setSavedOk(true);
+        notifyApp("deerhux.models-updated");
+        onSaved?.();
+        setTimeout(() => setSavedOk(false), 2000);
+      }
     } catch (e) {
       setSaveError(String(e));
     } finally {

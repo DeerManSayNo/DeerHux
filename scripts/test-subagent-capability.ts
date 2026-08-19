@@ -38,7 +38,7 @@ const promptCase = sliceCase(rpc, "prompt", "set_role");
 assertOrder(promptCase, [
   "pendingPromptAdmissions.get",
   "findAcceptedPrompt",
-  "this.isTurnBusy() || this._stopRequested",
+  "this.isTurnBusy() || this.changedFilesFinalizing || this._stopRequested",
   "this.captureTurnAdmission(command)",
   "this.commitAndTrackPromptTurn(",
 ]);
