@@ -36,19 +36,20 @@
 }
 
 html.dark {
-  --bg: #1a1a1a;
-  --bg-panel: #242424;
-  --bg-hover: #2e2e2e;
-  --bg-selected: #383838;
-  --border: #3a3a3a;
+  color-scheme: dark;
+  --bg: rgb(25, 26, 27);
+  --bg-panel: rgb(31, 32, 34);
+  --bg-hover: rgb(39, 40, 42);
+  --bg-selected: rgb(47, 48, 51);
+  --border: rgb(57, 58, 61);
   --text: #e8e8e8;
-  --text-muted: #9ca3af;
-  --text-dim: #6b7280;
+  --text-muted: #a3a7ae;
+  --text-dim: #747980;
   --accent: #60a5fa;
   --accent-hover: #93c5fd;
-  --user-bg: #1e293b;
-  --assistant-bg: #1a1a1a;
-  --tool-bg: #1f2937;
+  --user-bg: #202b3a;
+  --assistant-bg: rgb(25, 26, 27);
+  --tool-bg: rgb(29, 34, 41);
   --bg-subtle: rgba(255,255,255,0.04);
 }
 

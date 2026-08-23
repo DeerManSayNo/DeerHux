@@ -101,7 +101,11 @@ function pickCode(status: number | undefined, rawType: string | undefined, messa
   if (/timeout|timed out|deadline exceeded|etimedout/.test(text)) {
     return "TIMEOUT";
   }
-  if (/connection.?lost|websocket.?closed|websocket.?error|other side closed|http2|terminated|socket hang up|econnreset|network/.test(text)) {
+  // OpenAI-compatible gateways may hide the underlying transport error behind a
+  // stable stream-level code/message. Keep both the raw gateway identifiers and
+  // their user-facing messages here; otherwise a recoverable broken stream is
+  // classified as UNKNOWN and bypasses the retry policy entirely.
+  if (/connection.?lost|websocket.?closed|websocket.?error|other side closed|http.?2|terminated|socket hang up|econnreset|network|response stream was interrupted|stream usage incomplete|stream ended without finish_reason|upstream[_\s-](?:http2[_\s-])?stream[_\s-](?:error|read[_\s-]error)/.test(text)) {
     return "STREAM_INTERRUPTED";
   }
   if (status === 400 || /invalid.?request|bad request|malformed/.test(text)) {

@@ -21,6 +21,17 @@ assert.match(muxRoute, /subagent_runs_snapshot/);
 assert.match(muxRoute, /toCollaborationMuxSnapshot/);
 assert.doesNotMatch(muxRoute, /sanitizeCollaborationRun/);
 assert.match(muxRoute, /hostEventBus\.subscribe/);
+assert.match(muxRoute, /recordFreshConnection/);
+assert.match(muxRoute, /recordResumedConnection/);
+assert.match(muxRoute, /recordSnapshotRequired\(replay\.reason\)/);
+assert.match(muxRoute, /recordReplay/);
+assert.match(muxRoute, /recordSlowConsumerDrop\(sendPhase\)/);
+assert.match(muxRoute, /recordSlowConsumerDrop\("heartbeat"\)/);
+assert.match(muxRoute, /recordSseFrame/);
+assert.match(muxRoute, /parsedCursor\.kind === "invalid"[\s\S]*?reason: "invalid_cursor"/);
+assert.match(muxRoute, /store\.subscribeAll[\s\S]*?store\.getGlobalSince/);
+assert.match(muxRoute, /connectionId/);
+assert.match(muxRoute, /"X-Accel-Buffering": "no"/);
 
 assert.match(client, /subscribeHostEvents/);
 assert.match(client, /subscribeSessionTransient/);
@@ -32,6 +43,12 @@ assert.match(client, /frame\.authoritative === true[\s\S]*?this\.transientMirror
 assert.match(client, /frame\.authoritative === true[\s\S]*?this\.subagentMirror\.clear/);
 assert.match(client, /backgroundEvents\.clear\(\)/);
 assert.match(client, /recoverBackgroundOverflow/);
+assert.match(client, /getAgentEventClientDiagnostics/);
+assert.match(client, /duplicateEventsDroppedTotal/);
+assert.match(client, /epochMismatchEventsDroppedTotal/);
+assert.match(client, /snapshotRecoverySucceededTotal/);
+assert.match(client, /recoveryBufferOverflowsTotal/);
+assert.match(client, /backgroundEvents\.diagnostics\(\)/);
 
 assert.doesNotMatch(appShell, /setInterval\(loadRunningSessions,\s*2000\)/);
 assert.doesNotMatch(appShell, /setInterval\([\s\S]{0,100}setRefreshKey[\s\S]{0,100}10000\)/);

@@ -12,11 +12,31 @@ assert.equal(buffer.push({ sessionId: "background", epoch: "e", globalSeq: 2, ty
 assert.equal(buffer.push({ sessionId: "foreground", epoch: "e", globalSeq: 3, type: "agent_end" }), true);
 assert.equal(buffer.push({ sessionId: "background", epoch: "e", globalSeq: 1, type: "message_start" }), true);
 assert.equal(buffer.push({ sessionId: "overflow", epoch: "e", globalSeq: 4, type: "lost" }), false);
+assert.deepEqual(buffer.diagnostics(), {
+  size: 3,
+  maximum: 3,
+  sessionCount: 2,
+  largestSessionSize: 2,
+  peakSize: 3,
+  pushedTotal: 3,
+  drainedTotal: 0,
+  overflowsTotal: 1,
+});
 assert.deepEqual(buffer.clear().sort(), ["background", "foreground"]);
 assert.equal(buffer.length, 0);
 assert.equal(buffer.push({ sessionId: "background", epoch: "e", globalSeq: 5, type: "recovered" }), true);
 assert.deepEqual(buffer.drain("background").map((event) => event.globalSeq), [5]);
 assert.equal(buffer.length, 0);
+assert.deepEqual(buffer.diagnostics(), {
+  size: 0,
+  maximum: 3,
+  sessionCount: 0,
+  largestSessionSize: 0,
+  peakSize: 3,
+  pushedTotal: 4,
+  drainedTotal: 1,
+  overflowsTotal: 1,
+});
 
 const state: CollaborationRunState = {
   runId: "run-1",

@@ -25,6 +25,24 @@ const meta = { provider: "openai", modelId: "gpt-test" };
   assert.equal(error.retryable, false);
 }
 
+// OpenAI-compatible gateway stream failures must remain retryable even when an
+// SDK has flattened the structured error into only its public message.
+{
+  for (const input of [
+    { message: "Upstream response stream was interrupted" },
+    { message: "Upstream HTTP/2 stream failed" },
+    { message: "stream usage incomplete: http2: client connection lost" },
+    { message: "Stream ended without finish_reason" },
+    { code: "upstream_stream_read_error", message: "gateway stream failed" },
+    { code: "upstream_http2_stream_error", message: "gateway stream failed" },
+  ]) {
+    const error = classifyLlmError(input, meta);
+    assert.equal(error.code, "STREAM_INTERRUPTED", `expected stream error for ${JSON.stringify(input)}`);
+    assert.equal(error.retryable, true);
+    assert.equal(error.suggestedAction, "wait");
+  }
+}
+
 {
   assert.equal(parseRetryAfterMs("2"), 2_000);
   const delay = calculateBackoffDelayMs({ attempt: 2, baseDelayMs: 5_000, jitterRatio: 0 });

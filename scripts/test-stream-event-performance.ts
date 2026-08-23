@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { EventStore } from "../lib/agent-runtime/event-store.ts";
-import { MessageUpdateCoalescer } from "../lib/agent-runtime/event-coalescer.ts";
+import {
+  getMessageUpdateCoalescerDiagnostics,
+  MessageUpdateCoalescer,
+  resetMessageUpdateCoalescerDiagnosticsForTests,
+} from "../lib/agent-runtime/event-coalescer.ts";
 
 interface TestEvent {
   sessionId: string;
@@ -181,6 +185,7 @@ async function testBarrierAndCancel(): Promise<void> {
   assert.equal(delivered.length, 3, "cancel 后不得发送任何 Session 的延迟事件");
 }
 
+resetMessageUpdateCoalescerDiagnosticsForTests();
 await testStoreReplayCompression();
 await testLargeCumulativeUpdateRetention();
 testSameStreamCoalescing();
@@ -189,4 +194,11 @@ await testAutomaticTimerFlush();
 testSameSessionRunAndTurnIsolation();
 testManyInterleavedSessions();
 await testBarrierAndCancel();
+const coalescerDiagnostics = getMessageUpdateCoalescerDiagnostics();
+assert.ok(coalescerDiagnostics.messageUpdatesReceivedTotal > coalescerDiagnostics.messageUpdatesEmittedTotal);
+assert.ok(coalescerDiagnostics.messageUpdatesCoalescedTotal > 0);
+assert.ok(coalescerDiagnostics.timerFlushesTotal > 0);
+assert.ok(coalescerDiagnostics.barrierFlushesTotal > 0);
+assert.ok(coalescerDiagnostics.pendingStreamsPeak >= 2);
+assert.equal(coalescerDiagnostics.pendingStreams, 0);
 console.log("stream event performance tests passed");

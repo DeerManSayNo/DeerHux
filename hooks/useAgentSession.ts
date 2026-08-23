@@ -14,6 +14,11 @@ import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMo
 import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 import { ensureAgentEventsConnected, prepareAgentEvents, subscribeAgentEvents, subscribeSessionTransient } from "@/lib/agent-event-client";
 import type { SessionTransientSnapshot } from "@/lib/host-event-bus";
+import {
+  deleteSessionHistorySnapshot,
+  getSessionHistorySnapshot,
+  saveSessionHistorySnapshot,
+} from "@/lib/session-history-snapshots";
 
 type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
@@ -606,12 +611,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
+  // This is a client-only render cache. It restores a session immediately if a
+  // layout change temporarily unmounted its ChatWindow; the JSONL snapshot is
+  // still fetched afterwards as the source of truth.
+  // Read once per component lifetime. Store.get promotes LRU order, so it must
+  // not run as an unconditional render-time side effect.
+  const [initialHistorySnapshot] = useState(() => (
+    session?.id ? getSessionHistorySnapshot(session.id) : null
+  ));
 
   const [data, setData] = useState<SessionData | null>(null);
-  const [loading, setLoading] = useState(() => !isNew);
+  const [loading, setLoading] = useState(() => !isNew && !initialHistorySnapshot);
   const [error, setError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [entryIds, setEntryIds] = useState<string[]>([]);
+  const [messages, setMessages] = useState<AgentMessage[]>(() => initialHistorySnapshot?.messages ?? []);
+  const [entryIds, setEntryIds] = useState<string[]>(() => initialHistorySnapshot?.entryIds ?? []);
   // 服务端快照、乐观用户消息和流式 assistant 是三个不同一致性层级。
   // pending 只在持久化快照带回相同 clientMessageId 后确认，不能被 user SSE echo 提前清除。
   const pendingUserMessagesRef = useRef<Map<string, AgentMessage>>(new Map());
@@ -654,8 +667,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // TODO 3 — first-paint pagination. When the recent-messages endpoint
   // reported older messages were truncated, this lets the UI offer a
   // "load full history" affordance.
-  const [hasOlderMessages, setHasOlderMessages] = useState(false);
-  const fullHistoryLoadedRef = useRef(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(() => initialHistorySnapshot?.hasOlderMessages ?? false);
+  const hasOlderMessagesRef = useRef(initialHistorySnapshot?.hasOlderMessages ?? false);
+  const fullHistoryLoadedRef = useRef(initialHistorySnapshot?.fullHistoryLoaded ?? false);
   const [loadingFullHistory, setLoadingFullHistory] = useState(false);
   const loadingFullHistoryRef = useRef(false);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
@@ -720,6 +734,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const changedFilesRef = useRef<Set<string>>(new Set());
   const messagesRef = useRef<AgentMessage[]>([]);
   const entryIdsRef = useRef<string[]>([]);
+  const historySnapshotInvalidRef = useRef(false);
   const lastAgentEventAtRef = useRef(Date.now());
   const lastContentChangedAtRef = useRef(Date.now());
   const lastContentLengthRef = useRef(0);
@@ -996,6 +1011,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       );
       if (res.status === 404) {
         if (showLoading) {
+          historySnapshotInvalidRef.current = true;
+          deleteSessionHistorySnapshot(sid);
           setData(null);
           setMessages([]);
           setError(null);
@@ -2997,8 +3014,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfoRef.current = null;
     setRetryInfo(null);
     setContextUsage(null);
-    fullHistoryLoadedRef.current = false;
-    setHasOlderMessages(false);
+    const cachedHistory = sessionId ? getSessionHistorySnapshot(sessionId) : null;
+    fullHistoryLoadedRef.current = cachedHistory?.fullHistoryLoaded ?? false;
+    setHasOlderMessages(cachedHistory?.hasOlderMessages ?? false);
     setSystemPrompt(null);
     setForkingEntryId(null);
     setIsCompacting(false);
@@ -3024,9 +3042,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
 
     sessionIdRef.current = sessionId;
+    historySnapshotInvalidRef.current = false;
     setData(null);
-    setMessages([]);
-    setEntryIds([]);
+    // A session can be remounted when workspace slots are reordered. Restore
+    // its cached render snapshot before the recent-page request so complete
+    // history never flashes empty or silently regresses to the tail page.
+    setMessages(cachedHistory?.messages ?? []);
+    setEntryIds(cachedHistory?.entryIds ?? []);
+    fullHistoryLoadedRef.current = cachedHistory?.fullHistoryLoaded ?? false;
+    setHasOlderMessages(cachedHistory?.hasOlderMessages ?? false);
+    setLoading(!cachedHistory);
     setCurrentModelOverride(null);
     setPendingModel(null);
     setPlanReady(false);
@@ -3071,6 +3096,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     messagesRef.current = messages;
     entryIdsRef.current = entryIds;
   }, [messages, entryIds]);
+
+  useEffect(() => {
+    hasOlderMessagesRef.current = hasOlderMessages;
+  }, [hasOlderMessages]);
+
+  // Snapshot at the boundary where a session view actually leaves. This avoids
+  // a prop-switch render writing the old session's arrays under the new id.
+  // The referenced data is render-only; subscriptions/timers are cleaned up by
+  // the session effect and are deliberately never retained here.
+  useEffect(() => {
+    const sessionId = activeSessionId;
+    if (!sessionId) return;
+    return () => {
+      if (historySnapshotInvalidRef.current) return;
+      saveSessionHistorySnapshot(sessionId, {
+        messages: messagesRef.current,
+        entryIds: entryIdsRef.current,
+        fullHistoryLoaded: fullHistoryLoadedRef.current,
+        hasOlderMessages: hasOlderMessagesRef.current,
+      });
+    };
+  }, [activeSessionId]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);

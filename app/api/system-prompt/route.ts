@@ -8,7 +8,6 @@ import {
   writeRoleSystemPromptConfig,
 } from "@/lib/system-prompt-decomposer";
 import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { createMcpRuntime } from "@/lib/mcp-runtime";
 
 function roleIdFromUrl(req: Request): string {
   return new URL(req.url).searchParams.get("roleId") || "default";
@@ -37,28 +36,11 @@ export async function GET(req: Request) {
     } catch { /* skills unavailable */ }
   }
 
-  // Load available MCP runtime tools for the current project. This mirrors the
-  // MCP config window's runtime discovery so roles can filter actual tool names.
-  let availableMcpTools: { name: string; label: string; description: string }[] = [];
-  let mcpRuntime: Awaited<ReturnType<typeof createMcpRuntime>> | null = null;
-  if (cwd) {
-    try {
-      mcpRuntime = await createMcpRuntime(cwd);
-      availableMcpTools = mcpRuntime.tools.map((tool) => ({
-        name: tool.name,
-        label: tool.label ?? tool.name,
-        description: tool.description ?? "",
-      }));
-    } catch { /* MCP unavailable */ }
-    finally { mcpRuntime?.close(); }
-  }
-
   return NextResponse.json({
     roleId,
     sections,
     config: { ...config, skillNames: config.skillNames ?? null, mcpToolNames: config.mcpToolNames ?? null },
     availableSkills,
-    availableMcpTools,
     versions: readVersions(roleId),
   });
 }
@@ -81,7 +63,7 @@ export async function PATCH(req: Request) {
     });
 
     return NextResponse.json({ roleId, config });
-  } catch (error) {
+  } catch {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
@@ -118,7 +100,7 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({ roleId, version, config });
-  } catch (error) {
+  } catch {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

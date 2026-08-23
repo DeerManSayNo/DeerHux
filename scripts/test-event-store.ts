@@ -145,6 +145,89 @@ function testOversizedEventStillDeliversLive(): void {
   assert.equal(diagnostics.runRetainedBytes, 0);
 }
 
+function testDiagnosticsCapacityAndEvictionReasons(): void {
+  let now = 10;
+  const countLimited = new EventStore({
+    epoch: "epoch-count",
+    maxGlobalEvents: 2,
+    maxEventsPerSession: 2,
+    maxEventsPerRun: 2,
+    maxGlobalBytes: 1_000_000,
+    maxSessionBytes: 1_000_000,
+    maxRunBytes: 1_000_000,
+    globalTtlMs: 1_000,
+    sessionTtlMs: 1_000,
+    runTtlMs: 1_000,
+    now: () => now,
+  });
+  append(countLimited, "session-a", "message_start", "turn-a", "run-a");
+  now = 20;
+  append(countLimited, "session-a", "tool_start", "turn-a", "run-a");
+  now = 30;
+  append(countLimited, "session-a", "message_end", "turn-a", "run-a");
+  let diagnostics = countLimited.diagnostics();
+  assert.equal(diagnostics.epoch, "epoch-count");
+  assert.equal(diagnostics.earliestGlobalSeq, 2);
+  assert.equal(diagnostics.latestGlobalSeq, 3);
+  assert.equal(diagnostics.oldestGlobalEventAgeMs, 10);
+  assert.equal(diagnostics.newestGlobalEventAgeMs, 0);
+  assert.equal(diagnostics.limits.maxGlobalEvents, 2);
+  assert.equal(diagnostics.utilization.globalEvents, 1);
+  assert.ok(diagnostics.utilization.globalBytes > 0 && diagnostics.utilization.globalBytes <= 1);
+  assert.equal(diagnostics.evictions.global.eventLimit, 1);
+  assert.equal(diagnostics.evictions.session.eventLimit, 1);
+  assert.equal(diagnostics.evictions.run.eventLimit, 1);
+
+  const byteLimited = new EventStore({
+    epoch: "epoch-byte",
+    maxGlobalBytes: 500,
+    maxSessionBytes: 500,
+    maxRunBytes: 500,
+  });
+  byteLimited.append({
+    sessionId: "session-a",
+    runId: "run-a",
+    event: { type: "message_end", payload: "x".repeat(5_000) },
+  });
+  diagnostics = byteLimited.diagnostics();
+  assert.equal(diagnostics.evictions.global.byteLimit, 1);
+  assert.equal(diagnostics.evictions.session.byteLimit, 1);
+  assert.equal(diagnostics.evictions.run.byteLimit, 1);
+
+  let ttlNow = 0;
+  const ttlLimited = new EventStore({ epoch: "epoch-ttl", ttlMs: 10, now: () => ttlNow });
+  append(ttlLimited, "session-a", "message_end", "turn-a", "run-a");
+  ttlNow = 20;
+  diagnostics = ttlLimited.diagnostics();
+  assert.equal(diagnostics.evictions.global.ttl, 1);
+  assert.equal(diagnostics.evictions.session.ttl, 1);
+  assert.equal(diagnostics.evictions.run.ttl, 1);
+  assert.equal(diagnostics.oldestGlobalEventAgeMs, 0);
+
+  const clearable = new EventStore({ epoch: "epoch-clear" });
+  append(clearable, "session-a", "message_end", "turn-a", "run-a");
+  clearable.clearAll();
+  diagnostics = clearable.diagnostics();
+  assert.equal(diagnostics.evictions.global.clear, 1);
+  assert.equal(diagnostics.evictions.session.clear, 1);
+  assert.equal(diagnostics.evictions.run.clear, 1);
+
+  const clearRunStore = new EventStore({ epoch: "epoch-clear-run" });
+  append(clearRunStore, "session-a", "message_end", "turn-a", "run-a");
+  clearRunStore.clearRun("run-a");
+  diagnostics = clearRunStore.diagnostics();
+  assert.equal(diagnostics.evictions.run.clear, 1);
+  assert.equal(diagnostics.globalEvents, 1, "clearRun must not clear the application journal");
+
+  const coalesced = new EventStore({ epoch: "epoch-coalesced" });
+  append(coalesced, "session-a", "message_update", "turn-a", "run-a");
+  append(coalesced, "session-a", "message_update", "turn-a", "run-a");
+  diagnostics = coalesced.diagnostics();
+  assert.equal(diagnostics.evictions.global.total, 0);
+  assert.equal(diagnostics.evictions.session.total, 0);
+  assert.equal(diagnostics.evictions.run.total, 0);
+}
+
 function testResumeDecisionsAndIndependentRetention(): void {
   let now = 0;
   const store = new EventStore({
@@ -203,5 +286,6 @@ testCoalescingPreservesHonestCursorRanges();
 testGlobalOrderingSessionSequencesAndSubscribeAll();
 testByteBudgetsAndCoalescingAccounting();
 testOversizedEventStillDeliversLive();
+testDiagnosticsCapacityAndEvictionReasons();
 testResumeDecisionsAndIndependentRetention();
 console.log("event store tests passed");

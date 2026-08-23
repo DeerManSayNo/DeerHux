@@ -41,6 +41,7 @@
   "exclude": [
     "node_modules",
     ".next",
-    "src-tauri/target"
+    "src-tauri/target",
+    "codeAgent"
   ]
 }

@@ -28,6 +28,21 @@ interface RunEventBucket extends EventBucket {
   listeners: Set<EventListener>;
 }
 
+type EvictionReason = "ttl" | "eventLimit" | "byteLimit" | "clear";
+type BucketScope = "session" | "run";
+
+export interface EvictionCounters {
+  total: number;
+  ttl: number;
+  eventLimit: number;
+  byteLimit: number;
+  clear: number;
+}
+
+function emptyEvictionCounters(): EvictionCounters {
+  return { total: 0, ttl: 0, eventLimit: 0, byteLimit: 0, clear: 0 };
+}
+
 export interface RunReplayResult {
   events: SequencedAgentEvent[];
   snapshotRequired: boolean;
@@ -97,6 +112,9 @@ export class EventStore {
   private nextGlobalSeq = 1;
   private globalEvictedThrough = 0;
   private readonly encodedBytes = new WeakMap<object, number>();
+  private readonly globalEvictions = emptyEvictionCounters();
+  private readonly sessionEvictions = emptyEvictionCounters();
+  private readonly runEvictions = emptyEvictionCounters();
 
   constructor(options: EventStoreOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -165,8 +183,8 @@ export class EventStore {
     this.storeInBucket(session, next, "sessionSeqStart");
     this.storeInGlobal(next);
 
-    this.trimBucket(run, this.maxEventsPerRun, this.maxRunBytes);
-    this.trimBucket(session, this.maxEventsPerSession, this.maxSessionBytes);
+    this.trimBucket(run, this.maxEventsPerRun, this.maxRunBytes, "run");
+    this.trimBucket(session, this.maxEventsPerSession, this.maxSessionBytes, "session");
     this.trimGlobal();
 
     this.notify(run.listeners, next);
@@ -282,19 +300,13 @@ export class EventStore {
     return (this.nextSessionSeq.get(sessionId) ?? 1) - 1;
   }
 
-  diagnostics(): {
-    globalEvents: number;
-    globalRetainedBytes: number;
-    sessionBuckets: number;
-    sessionEvents: number;
-    sessionRetainedBytes: number;
-    runBuckets: number;
-    runEvents: number;
-    runRetainedBytes: number;
-    listeners: number;
-  } {
+  diagnostics() {
+    const now = this.now();
+    this.prune(now);
     const sessionBuckets = [...this.sessions.values()];
     const runBuckets = [...this.runs.values()];
+    const oldest = this.globalEvents[0];
+    const newest = this.globalEvents[this.globalEvents.length - 1];
     return {
       globalEvents: this.globalEvents.length,
       globalRetainedBytes: this.globalRetainedBytes,
@@ -305,15 +317,50 @@ export class EventStore {
       runEvents: runBuckets.reduce((sum, bucket) => sum + bucket.events.length, 0),
       runRetainedBytes: runBuckets.reduce((sum, bucket) => sum + bucket.retainedBytes, 0),
       listeners: this.allListeners.size + runBuckets.reduce((sum, bucket) => sum + bucket.listeners.size, 0),
+      epoch: this.epoch,
+      earliestGlobalSeq: this.globalEvictedThrough + 1,
+      latestGlobalSeq: this.nextGlobalSeq - 1,
+      oldestGlobalEventAgeMs: oldest ? Math.max(0, now - oldest.createdAt) : 0,
+      newestGlobalEventAgeMs: newest ? Math.max(0, now - newest.createdAt) : 0,
+      limits: {
+        maxGlobalEvents: this.maxEvents,
+        maxGlobalBytes: this.maxGlobalBytes,
+        maxEventsPerSession: this.maxEventsPerSession,
+        maxSessionBytes: this.maxSessionBytes,
+        maxEventsPerRun: this.maxEventsPerRun,
+        maxRunBytes: this.maxRunBytes,
+        globalTtlMs: this.globalTtlMs,
+        sessionTtlMs: this.sessionTtlMs,
+        runTtlMs: this.runTtlMs,
+      },
+      utilization: {
+        globalEvents: Math.min(1, this.globalEvents.length / this.maxEvents),
+        globalBytes: Math.min(1, this.globalRetainedBytes / this.maxGlobalBytes),
+      },
+      evictions: {
+        global: { ...this.globalEvictions },
+        session: { ...this.sessionEvictions },
+        run: { ...this.runEvictions },
+      },
     };
   }
 
   clearRun(runId: string): void {
     // The application journal deliberately outlives a run/wrapper bucket.
+    const bucket = this.runs.get(runId);
+    if (!bucket) return;
+    while (bucket.events.length > 0) this.evictBucketOldest(bucket, "run", "clear");
     this.runs.delete(runId);
   }
 
   clearAll(): void {
+    for (const bucket of this.runs.values()) {
+      while (bucket.events.length > 0) this.evictBucketOldest(bucket, "run", "clear");
+    }
+    for (const bucket of this.sessions.values()) {
+      while (bucket.events.length > 0) this.evictBucketOldest(bucket, "session", "clear");
+    }
+    while (this.globalEvents.length > 0) this.evictGlobalOldest("clear");
     this.runs.clear();
     this.sessions.clear();
     this.nextSessionSeq.clear();
@@ -374,11 +421,11 @@ export class EventStore {
   private prune(now: number): void {
     const globalCutoff = now - this.globalTtlMs;
     while (this.globalEvents[0]?.createdAt < globalCutoff) {
-      this.evictGlobalOldest();
+      this.evictGlobalOldest("ttl");
     }
 
-    this.pruneBuckets(this.sessions, now - this.sessionTtlMs);
-    this.pruneBuckets(this.runs, now - this.runTtlMs);
+    this.pruneBuckets(this.sessions, now - this.sessionTtlMs, "session");
+    this.pruneBuckets(this.runs, now - this.runTtlMs, "run");
     const sequenceCutoff = now - Math.max(this.globalTtlMs, this.sessionTtlMs, this.runTtlMs);
     for (const [sessionId, lastActivity] of this.sessionLastActivity) {
       if (lastActivity < sequenceCutoff) {
@@ -391,24 +438,27 @@ export class EventStore {
   private pruneBuckets<T extends EventBucket>(
     buckets: Map<string, T>,
     cutoff: number,
+    scope: BucketScope,
   ): void {
     for (const [id, bucket] of buckets) {
-      while (bucket.events[0]?.createdAt < cutoff) this.evictBucketOldest(bucket);
+      while (bucket.events[0]?.createdAt < cutoff) this.evictBucketOldest(bucket, scope, "ttl");
       const listeners = "listeners" in bucket ? bucket.listeners : undefined;
       const hasListeners = listeners instanceof Set && listeners.size > 0;
       if (bucket.events.length === 0 && !hasListeners) buckets.delete(id);
     }
   }
 
-  private trimBucket(bucket: EventBucket, maxEvents: number, maxBytes: number): void {
+  private trimBucket(bucket: EventBucket, maxEvents: number, maxBytes: number, scope: BucketScope): void {
     while (bucket.events.length > maxEvents || bucket.retainedBytes > maxBytes) {
-      this.evictBucketOldest(bucket);
+      const reason: EvictionReason = bucket.events.length > maxEvents ? "eventLimit" : "byteLimit";
+      this.evictBucketOldest(bucket, scope, reason);
     }
   }
 
   private trimGlobal(): void {
     while (this.globalEvents.length > this.maxEvents || this.globalRetainedBytes > this.maxGlobalBytes) {
-      this.evictGlobalOldest();
+      const reason: EvictionReason = this.globalEvents.length > this.maxEvents ? "eventLimit" : "byteLimit";
+      this.evictGlobalOldest(reason);
     }
   }
 
@@ -441,20 +491,27 @@ export class EventStore {
     return bytes;
   }
 
-  private evictBucketOldest(bucket: EventBucket): void {
+  private evictBucketOldest(bucket: EventBucket, scope: BucketScope, reason: EvictionReason): void {
     const removed = bucket.events.shift();
     if (!removed) return;
     bucket.retainedBytes = Math.max(0, bucket.retainedBytes - this.eventBytes(removed));
+    this.recordEviction(scope === "run" ? this.runEvictions : this.sessionEvictions, reason);
     if (isRunBucket(bucket)) {
       bucket.evictedThrough = Math.max(bucket.evictedThrough, removed.seq);
     }
   }
 
-  private evictGlobalOldest(): void {
+  private evictGlobalOldest(reason: EvictionReason): void {
     const removed = this.globalEvents.shift();
     if (!removed) return;
     this.globalRetainedBytes = Math.max(0, this.globalRetainedBytes - this.eventBytes(removed));
+    this.recordEviction(this.globalEvictions, reason);
     this.recordGlobalEviction(removed);
+  }
+
+  private recordEviction(counters: EvictionCounters, reason: EvictionReason): void {
+    counters.total += 1;
+    counters[reason] += 1;
   }
 
   private recordGlobalEviction(event: SequencedAgentEvent): void {

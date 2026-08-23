@@ -445,33 +445,63 @@ export function AppShell() {
   }, [replaceUrl]);
 
   const handleNewSessionProjectChange = useCallback((cwd: string, slotIndex: number) => {
-    const slotId = chatSlotIdsRef.current[slotIndex] ?? null;
-    if (!slotId || !placeholderTabIdsRef.current.has(slotId)) return;
+    const previousTempId = chatSlotIdsRef.current[slotIndex] ?? null;
+    if (!previousTempId || !placeholderTabIdsRef.current.has(previousTempId)) return;
 
-    // The project picker changes the workspace CWD too. Update this placeholder
-    // synchronously before reusing the normal CWD convergence path, otherwise
-    // all existing tabs remain from the old project while activeCwd points here.
-    const updatedTabs = sessionTabsRef.current.map((tab) => (
-      tab.id === slotId && tab.path === "" ? { ...tab, cwd } : tab
+    // 项目选择属于当前空白聊天槽位，而不是整个工作区。为目标项目创建一个
+    // 全新的会话占位项；不能复用 handleCwdChange，因为后者会按 CWD 过滤所有
+    // 已打开的槽位，导致其他项目的会话看起来被关闭。
+    const nextTempId = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    const previousDraft = chatDraftsRef.current.get(slotIndex, previousTempId);
+    chatDraftsRef.current.clear(slotIndex, previousTempId);
+    if (previousDraft) {
+      // 文本可以作为新会话草稿保留；项目相关资源绝不能跨项目携带。
+      chatDraftsRef.current.set(slotIndex, nextTempId, clearCwdScopedDraftResources(previousDraft));
+    }
+
+    const nextPlaceholder: SessionInfo = {
+      path: "",
+      id: nextTempId,
+      cwd,
+      name: "新会话",
+      created: new Date().toISOString(),
+      modified: new Date().toISOString(),
+      messageCount: 0,
+      firstMessage: "",
+    };
+    const nextTabs = sessionTabsRef.current.map((tab) => (
+      tab.id === previousTempId ? nextPlaceholder : tab
     ));
-    sessionTabsRef.current = updatedTabs;
+    const nextSlotIds = chatSlotIdsRef.current.map((id, index) => (
+      index === slotIndex ? nextTempId : id
+    ));
 
-    // Plain text is safe to carry across an intentional project switch; image
-    // paths, file references and selected skills are CWD-scoped and must not
-    // leak into the newly selected project.
-    const draft = chatDraftsRef.current.get(slotIndex, slotId);
-    if (draft) chatDraftsRef.current.set(slotIndex, slotId, clearCwdScopedDraftResources(draft));
-
-    handleCwdChange(cwd);
+    // 先同步所有 imperative ref，避免旧 ChatWindow 的异步回调把已切换的
+    // 占位项或其他槽位重新写回状态。
+    sessionTabsRef.current = nextTabs;
+    chatSlotIdsRef.current = nextSlotIds;
+    placeholderTabIdsRef.current.delete(previousTempId);
+    placeholderTabIdsRef.current.add(nextTempId);
+    pendingSessionIdsBySlotRef.current.delete(slotIndex);
+    pendingTempTabIdsBySlotRef.current.set(slotIndex, nextTempId);
+    activeCwdRef.current = cwd;
     focusedChatSlotIndexRef.current = slotIndex;
-    activeSessionTabIdRef.current = slotId;
+    activeSessionTabIdRef.current = nextTempId;
     selectedSessionRef.current = null;
     newSessionCwdRef.current = cwd;
+
+    // 仅更新当前项目指向，绝不运行全局 CWD 收敛/清理逻辑。
+    setActiveCwd(cwd);
+    setSessionTabs(nextTabs);
+    setChatSlotIds(nextSlotIds);
     setFocusedChatSlotIndex(slotIndex);
-    setActiveSessionTabId(slotId);
+    setActiveSessionTabId(nextTempId);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
-  }, [handleCwdChange]);
+    replaceUrl("/");
+  }, [replaceUrl]);
 
   useEffect(() => {
     if (!settingsMenuOpen) return;

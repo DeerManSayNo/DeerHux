@@ -49,6 +49,11 @@ const summary = valid.length ? {
   journalBytes: range(valid, (item) => item.journal.globalRetainedBytes),
   sessionCacheBytes: range(valid, (item) => item.sessionCache.estimatedBytes),
   activeSseConnections: range(valid, (item) => item.transport.activeSseConnections),
+  resumedConnections: delta(valid, (item) => item.transport.resumedConnectionsTotal),
+  snapshotRequired: delta(valid, (item) => item.transport.snapshotRequiredTotal),
+  replayEvents: delta(valid, (item) => item.transport.replayEventsTotal),
+  slowConsumerDrops: delta(valid, (item) => item.transport.slowConsumerDrops),
+  journalEvictions: delta(valid, (item) => item.journal.evictions?.global?.total),
   activeMcpProcesses: range(valid, (item) => item.mcp.activeProcesses),
   wrappers: range(valid, (item) => item.sessions.wrappers),
 } : { samples: samples.length, successfulSamples: 0, failedSamples: samples.length, output };
@@ -69,6 +74,17 @@ function range(values, selector) {
   };
 }
 
+function delta(values, selector) {
+  const numbers = values.map(selector).filter(Number.isFinite);
+  let increase = 0;
+  for (let index = 1; index < numbers.length; index += 1) {
+    increase += numbers[index] >= numbers[index - 1]
+      ? numbers[index] - numbers[index - 1]
+      : numbers[index]; // Counter reset after HMR/process restart.
+  }
+  return { ...range(values, selector), delta: increase };
+}
+
 function formatLine(sample) {
   const d = sample.diagnostics;
   const mb = (bytes) => (bytes / 1024 / 1024).toFixed(1);
@@ -81,6 +97,10 @@ function formatLine(sample) {
     `cache=${mb(d.sessionCache.estimatedBytes)}MB`,
     `wrappers=${d.sessions.wrappers}`,
     `sse=${d.transport.activeSseConnections}`,
+    `resume=${d.transport.resumedConnectionsTotal ?? 0}`,
+    `snapshot=${d.transport.snapshotRequiredTotal ?? 0}`,
+    `evicted=${d.journal.evictions?.global?.total ?? 0}`,
+    `slow=${d.transport.slowConsumerDrops ?? 0}`,
     `mcp=${d.mcp.activeProcesses}`,
   ].join(" ");
 }

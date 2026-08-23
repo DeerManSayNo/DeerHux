@@ -47,6 +47,7 @@ __pycache__/
 /.codegraph/daemon.pid
 /.deerhux/.deerhux/
 /.deerhux/legacy-config/
+/codeAgent/
 
 # tauri
 /src-tauri/target/

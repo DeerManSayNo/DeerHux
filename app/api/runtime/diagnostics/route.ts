@@ -5,6 +5,8 @@ import { getRpcRuntimeDiagnostics } from "@/lib/rpc-manager";
 import { getSessionFileCacheDiagnostics } from "@/lib/session-reader";
 import { getMcpProcessDiagnostics } from "@/lib/mcp-runtime";
 import { getEventLoopDiagnostics } from "@/lib/agent-runtime/event-loop-diagnostics";
+import { getMessageUpdateCoalescerDiagnostics } from "@/lib/agent-runtime/event-coalescer";
+import { getRuntimeDiagnosticEvents } from "@/lib/agent-runtime/diagnostic-events";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -27,6 +29,8 @@ export async function GET() {
     journal: getAgentEventStore().diagnostics(),
     sessionCache: getSessionFileCacheDiagnostics(),
     transport: getTransportDiagnostics(),
+    coalescer: getMessageUpdateCoalescerDiagnostics(),
+    recentDiagnosticEvents: getRuntimeDiagnosticEvents(100),
     mcp: getMcpProcessDiagnostics(),
   });
 }

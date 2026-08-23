@@ -1,7 +1,6 @@
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
-import { homedir } from "os";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AnyToolDefinition } from "./tool-registry.ts";
@@ -34,24 +33,6 @@ function textResult(text: string, details: unknown = undefined, changedFiles?: s
     details,
     ...(changedFiles?.length ? { changedFiles } : {}),
   };
-}
-
-/**
- * GUI 应用由 launchd 启动时 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin，
- * bash/grep/find 工具会找不到 rg、fd、brew 等命令。
- * 统一补齐：DeerHux 自带工具目录 + 常见包管理器目录。
- */
-function buildProcessEnv(): NodeJS.ProcessEnv {
-  const extraDirs = [
-    path.join(homedir(), ".deerhux", "agent", "bin"),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-  ];
-  const parts = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-  for (const dir of extraDirs) {
-    if (!parts.includes(dir)) parts.push(dir);
-  }
-  return { ...process.env, PATH: parts.join(path.delimiter) };
 }
 
 function activeSignal(signal: AbortSignal | undefined): AbortSignal {
@@ -235,7 +216,7 @@ function runProcess(
     const child = spawn(command, args, {
       cwd: opts.cwd,
       shell: opts.shell ?? false,
-      env: buildProcessEnv(),
+      env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,

@@ -285,6 +285,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         fileReferences: [],
       });
       if (textareaRef.current) {
+        textareaRef.current.value = "";
         textareaRef.current.style.height = "auto";
       }
     },
@@ -346,6 +347,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, []);
 
+  const clearSubmittedInput = useCallback(() => {
+    // React state updates are batched, while onSend can synchronously replace this
+    // ChatInput (notably when a new-session placeholder adopts its real id). Clear
+    // every source of input truth before handing control to the parent so neither
+    // the current DOM nor a remount can restore the submitted text.
+    if (textareaRef.current) {
+      textareaRef.current.value = "";
+      textareaRef.current.style.height = "auto";
+    }
+    setValue("");
+    setSelectedSkill(null);
+    clearImages();
+    saveInputStateRef?.current?.({
+      value: "",
+      attachedImages: [],
+      selectedSkill: null,
+      fileReferences,
+    });
+  }, [clearImages, fileReferences, saveInputStateRef]);
+
   const removeFileReference = useCallback((path: string) => {
     setFileReferences((prev) => prev.filter((ref) => ref.path !== path));
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -394,36 +415,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
       return;
     }
-    // Clear cached input state BEFORE onSend because onSend may trigger a
-    // ChatInput unmount/remount (e.g. new-session intro → chat view transition).
-    // The remount reads from the cache via initialInputState — if we clear first,
-    // the fresh mount sees empty input.
-    saveInputStateRef?.current?.({ value: "", attachedImages: [], selectedSkill: null, fileReferences });
+    clearSubmittedInput();
     onSend(msg, images, references, skill);
-    setValue("");
-    setSelectedSkill(null);
-    clearImages();
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
-  }, [value, selectedSkill, attachedImages, fileReferences, onSend, onBeforeSend, clearImages, saveInputStateRef]);
+  }, [value, selectedSkill, attachedImages, fileReferences, onSend, onBeforeSend, clearSubmittedInput]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
-    const msg = value.trim();
+    const currentValue = textareaRef.current?.value ?? value;
+    const msg = currentValue.trim();
     const references = fileReferences.length ? [...fileReferences] : undefined;
     const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
     if (!msg && !attachedImages.length && !skill) return;
-    saveInputStateRef?.current?.({ value: "", attachedImages: [], selectedSkill: null, fileReferences });
+    const images = attachedImages.length ? attachedImages : undefined;
+    clearSubmittedInput();
     if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined, references, skill);
+      onSteer(msg, images, references, skill);
     } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined, references, skill);
+      onFollowUp(msg, images, references, skill);
     }
-    setValue("");
-    setSelectedSkill(null);
-    clearImages();
-    if (textareaRef.current) textareaRef.current.style.height = "auto";
-  }, [value, selectedSkill, attachedImages, fileReferences, onSteer, onFollowUp, clearImages, saveInputStateRef]);
+  }, [value, selectedSkill, attachedImages, fileReferences, onSteer, onFollowUp, clearSubmittedInput]);
 
   const fetchSkills = useCallback(async (cwd: string) => {
     if (skillsFetchRef.current) {

@@ -22,12 +22,18 @@ const root = path.join(__dirname, "..");
 const buildHome = path.join(root, ".deerhux-build-home");
 fs.mkdirSync(buildHome, { recursive: true });
 
+const nodeOptions = process.env.NODE_OPTIONS || "";
+const buildNodeOptions = nodeOptions.includes("--max-old-space-size")
+  ? nodeOptions
+  : `${nodeOptions} --max-old-space-size=8192`.trim();
+
 const child = spawn(command, args, {
   cwd: root,
   env: {
     ...process.env,
     HOME: buildHome,
     USERPROFILE: buildHome,
+    NODE_OPTIONS: buildNodeOptions,
   },
   shell: process.platform === "win32",
   stdio: "inherit",
