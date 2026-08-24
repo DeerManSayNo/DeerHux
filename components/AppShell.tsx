@@ -37,16 +37,78 @@ declare global {
   }
 }
 
-// These settings panels are only mounted after an explicit user action. Keep their
-// named exports behind dynamic imports so they do not inflate the initial app shell.
-const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig));
-const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig));
-const SchedulerPanel = dynamic(() => import("./SchedulerPanel").then((module) => module.SchedulerPanel));
-const RoleConfig = dynamic(() => import("./RoleConfig").then((module) => module.RoleConfig));
-const MemoryConfig = dynamic(() => import("./MemoryConfig").then((module) => module.MemoryConfig));
-const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig));
-const ExtensionsConfig = dynamic(() => import("./ExtensionsConfig").then((module) => module.ExtensionsConfig));
-const WeChatConfig = dynamic(() => import("./WeChatConfig").then((module) => module.WeChatConfig));
+function ConfigurationPanelLoading() {
+  return (
+    <div
+      aria-label="正在打开配置窗口"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 999,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(0,0,0,0.28)",
+      }}
+    >
+      <div
+        style={{
+          padding: "12px 18px",
+          border: "1px solid var(--border)",
+          borderRadius: 10,
+          background: "var(--bg-panel)",
+          color: "var(--text-muted)",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
+          fontSize: 13,
+        }}
+      >
+        正在打开…
+      </div>
+    </div>
+  );
+}
+
+// Keep configuration panels split from the initial shell. AppShell preloads these
+// chunks after its first paint, while the themed fallback prevents a white flash if
+// a panel is opened before its chunk has arrived. Next.js requires each dynamic()
+// options argument to be an inline object literal so it can be statically analyzed.
+const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), {
+  loading: ConfigurationPanelLoading,
+});
+const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig), {
+  loading: ConfigurationPanelLoading,
+});
+const SchedulerPanel = dynamic(() => import("./SchedulerPanel").then((module) => module.SchedulerPanel), {
+  loading: ConfigurationPanelLoading,
+});
+const RoleConfig = dynamic(() => import("./RoleConfig").then((module) => module.RoleConfig), {
+  loading: ConfigurationPanelLoading,
+});
+const MemoryConfig = dynamic(() => import("./MemoryConfig").then((module) => module.MemoryConfig), {
+  loading: ConfigurationPanelLoading,
+});
+const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), {
+  loading: ConfigurationPanelLoading,
+});
+const ExtensionsConfig = dynamic(() => import("./ExtensionsConfig").then((module) => module.ExtensionsConfig), {
+  loading: ConfigurationPanelLoading,
+});
+const WeChatConfig = dynamic(() => import("./WeChatConfig").then((module) => module.WeChatConfig), {
+  loading: ConfigurationPanelLoading,
+});
+
+function preloadConfigurationPanels() {
+  void Promise.allSettled([
+    import("./ModelsConfig"),
+    import("./SkillsConfig"),
+    import("./SchedulerPanel"),
+    import("./RoleConfig"),
+    import("./MemoryConfig"),
+    import("./McpConfig"),
+    import("./ExtensionsConfig"),
+    import("./WeChatConfig"),
+  ]);
+}
 
 const WINDOW_DRAG_HEIGHT = 32;
 const WINDOW_DRAG_EXCLUDE_SELECTOR = [
@@ -171,6 +233,11 @@ export function AppShell() {
   const wechatAutoStartAttemptedRef = useRef(false);
   const [chatWindowLimitNotice, setChatWindowLimitNotice] = useState<string | null>(null);
   const chatWindowLimitNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(preloadConfigurationPanels, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const replaceUrl = useCallback((url: string) => {
     window.history.replaceState(null, "", url);

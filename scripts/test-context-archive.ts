@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   appendHistoryArchiveFooter,
   deleteContextArchive,
@@ -106,7 +107,8 @@ async function testCodingToolsCanReadArchive(): Promise<void> {
     toolName: "bash",
     content: "recoverable-detail-42\n",
   });
-  const tools = createStandardCodingTools(os.tmpdir(), { sessionId: SESSION_ID });
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "deerhux-readable-workspace-"));
+  const tools = createStandardCodingTools(workspaceDir, { sessionId: SESSION_ID });
   const read = tools.find((t) => t.name === "read");
   assert.ok(read);
   const result = await read!.execute(
@@ -119,9 +121,61 @@ async function testCodingToolsCanReadArchive(): Promise<void> {
   const text = (result.content[0] as { text: string }).text;
   assert.ok(text.includes("recoverable-detail-42"), "read must access session context archive");
 
-  // 写操作不得写入 context archive
+  const externalFile = path.join(os.tmpdir(), `deerhux-readable-external-${Date.now()}.txt`);
+  fs.writeFileSync(externalFile, "outside-workspace-readable\n", "utf8");
+  try {
+    const externalResult = await read!.execute(
+      "read-external-test",
+      { filePath: externalFile },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    assert.ok(
+      (externalResult.content[0] as { text: string }).text.includes("outside-workspace-readable"),
+      "read must access files outside the workspace",
+    );
+  } finally {
+    fs.rmSync(externalFile, { force: true });
+  }
+
+  // 被动 Skill 的绝对路径来自 system prompt，标准文件工具必须能直接维护全局 Skill。
+  const skillDir = path.join(getAgentDir(), "skills", `test-readable-${Date.now()}`);
+  const skillFile = path.join(skillDir, "SKILL.md");
   const write = tools.find((t) => t.name === "write");
-  assert.ok(write);
+  const edit = tools.find((t) => t.name === "edit");
+  assert.ok(write && edit);
+  try {
+    await write!.execute(
+      "write-skill-test",
+      { filePath: skillFile, content: "# passive-skill-readable\n" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    const skillResult = await read!.execute(
+      "read-skill-test",
+      { filePath: skillFile },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    const skillText = (skillResult.content[0] as { text: string }).text;
+    assert.ok(skillText.includes("passive-skill-readable"), "read/write must access global Skill files");
+
+    await edit!.execute(
+      "edit-skill-test",
+      { filePath: skillFile, oldString: "readable", newString: "editable" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    assert.ok(fs.readFileSync(skillFile, "utf8").includes("passive-skill-editable"), "edit must update global Skill files");
+  } finally {
+    fs.rmSync(skillDir, { recursive: true, force: true });
+  }
+
+  // context archive 保持只读。
   await assert.rejects(
     () => write!.execute(
       "write-test",
@@ -130,8 +184,39 @@ async function testCodingToolsCanReadArchive(): Promise<void> {
       undefined,
       undefined as never,
     ),
-    /cwd or session context archive|must be inside cwd/,
+    /allowed resource root/,
   );
+  fs.rmSync(workspaceDir, { recursive: true, force: true });
+}
+
+async function testDefaultCwdHasUnrestrictedWriteAccess(): Promise<void> {
+  const defaultCwd = path.join(os.homedir(), "deerhux-cwd");
+  fs.mkdirSync(defaultCwd, { recursive: true });
+  const externalDir = fs.mkdtempSync(path.join(os.tmpdir(), "deerhux-unrestricted-write-"));
+  const externalFile = path.join(externalDir, "outside.txt");
+  const tools = createStandardCodingTools(defaultCwd);
+  const write = tools.find((t) => t.name === "write");
+  const edit = tools.find((t) => t.name === "edit");
+  assert.ok(write && edit);
+  try {
+    await write!.execute(
+      "default-cwd-write-test",
+      { filePath: externalFile, content: "outside-before\n" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    await edit!.execute(
+      "default-cwd-edit-test",
+      { filePath: externalFile, oldString: "before", newString: "after" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    assert.equal(fs.readFileSync(externalFile, "utf8"), "outside-after\n");
+  } finally {
+    fs.rmSync(externalDir, { recursive: true, force: true });
+  }
 }
 
 async function testToolExecutorSpill(): Promise<void> {
@@ -172,6 +257,7 @@ async function main(): Promise<void> {
     await testHistoryTranscript();
     await testSpillLargeText();
     await testCodingToolsCanReadArchive();
+    await testDefaultCwdHasUnrestrictedWriteAccess();
     await testToolExecutorSpill();
     await testDeleteCascade();
     console.log("context-archive tests passed");

@@ -33,7 +33,7 @@ export type SubagentWorkflow = "parallel" | "sequential" | "pipeline" | "dag";
 
 export interface WorkerToolActivity {
   toolName: string;
-  /** 从工具 input 里提取的关键信息：bash→命令、edit/write/read→文件路径、grep/find→pattern、code_search/codegraph_*→query、subagent→message。其他工具可为空串。 */
+  /** 从工具 input 里提取的关键信息：bash→命令、edit/write/read→文件路径、grep/find→pattern、code_search→query、codegraph→action + query/symbol、subagent→message。其他工具可为空串。 */
   summary: string;
   status: "running" | "done" | "error";
   /** ISO 时间戳 */

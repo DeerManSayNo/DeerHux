@@ -50,9 +50,10 @@ const doneStream = (message: AssistantMessage) => {
   return stream;
 };
 
-const snapshot = (turnId: string, activeToolNames: string[], prompt: string): TurnContextSnapshot => Object.freeze({
+const snapshot = (turnId: string, activeToolNames: string[], prompt: string, skillUserPrompt?: string): TurnContextSnapshot => Object.freeze({
   turnId,
   effectiveSystemPrompt: prompt,
+  ...(skillUserPrompt ? { skillUserPrompt } : {}),
   activeToolNames: Object.freeze([...activeToolNames]),
   roleId: null,
   agentMode: "agent",
@@ -82,7 +83,7 @@ const snapshot = (turnId: string, activeToolNames: string[], prompt: string): Tu
   const engine = new DeerLoopEngine({ model, cwd: process.cwd(), tools: [tool], activeToolNames: ["subagent"], streamFn });
   const run = engine.prompt({ text: "root", context: snapshot("root", ["subagent"], "root prompt") });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  await engine.followUp({ text: "next", context: snapshot("follow", [], "follow prompt") });
+  await engine.followUp({ text: "next", context: snapshot("follow", [], "follow prompt", "FOLLOW-UP SKILL BODY") });
   assert.equal(engine.followUpQueueLength, 1);
   firstCall.resolve();
   await run;
@@ -93,6 +94,25 @@ const snapshot = (turnId: string, activeToolNames: string[], prompt: string): Tu
   assert.deepEqual(contexts[0]?.tools?.map((item) => item.name), ["subagent"]);
   assert.equal(contexts[1]?.systemPrompt, "follow prompt");
   assert.equal(contexts[1]?.tools, undefined);
+  const followUpUserMessage = contexts[1]?.messages.filter((message) => message.role === "user").at(-1);
+  assert.equal(followUpUserMessage?.content, "next\n\nFOLLOW-UP SKILL BODY");
+}
+
+// An explicitly selected skill is injected into the root user message, not the system prompt.
+{
+  const contexts: Context[] = [];
+  const engine = new DeerLoopEngine({
+    model,
+    cwd: process.cwd(),
+    streamFn: (_model, context) => {
+      contexts.push(context);
+      return doneStream(assistant());
+    },
+  });
+  await engine.prompt({ text: "do work", context: snapshot("skill", [], "base prompt", "ACTIVE SKILL BODY") });
+  assert.equal(contexts[0]?.systemPrompt, "base prompt");
+  const userMessage = contexts[0]?.messages.find((message) => message.role === "user");
+  assert.equal(userMessage?.content, "do work\n\nACTIVE SKILL BODY");
 }
 
 // A queued steer applies its own execution environment to the next LLM round.

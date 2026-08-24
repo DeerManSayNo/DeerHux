@@ -360,15 +360,22 @@ export function composeRolePrompt(roleId?: string | null, temporarySettings: str
   return lines.join("\n");
 }
 
-const ROLE_START = "\n\n<!-- PI_ROLE_PROFILE_START -->\n";
-const ROLE_END = "\n<!-- PI_ROLE_PROFILE_END -->";
+const ROLE_START = "\n\n<!-- DEERHUX_ROLE_PROFILE_START -->\n";
+const ROLE_END = "\n<!-- DEERHUX_ROLE_PROFILE_END -->";
+const LEGACY_ROLE_START = "\n\n<!-- PI_ROLE_PROFILE_START -->\n";
+const LEGACY_ROLE_END = "\n<!-- PI_ROLE_PROFILE_END -->";
 
 export function applyRolePromptToSystemPrompt(systemPrompt: string | undefined, roleId?: string | null, temporarySettings: string[] = [], cwd?: string | null): string {
   let base = systemPrompt ?? "";
-  const start = base.indexOf(ROLE_START);
-  const end = base.indexOf(ROLE_END, start >= 0 ? start : 0);
-  if (start >= 0 && end >= start) {
-    base = `${base.slice(0, start)}${base.slice(end + ROLE_END.length)}`;
+  for (const [startMarker, endMarker] of [
+    [ROLE_START, ROLE_END],
+    [LEGACY_ROLE_START, LEGACY_ROLE_END],
+  ] as const) {
+    const start = base.indexOf(startMarker);
+    const end = base.indexOf(endMarker, start >= 0 ? start : 0);
+    if (start >= 0 && end >= start) {
+      base = `${base.slice(0, start)}${base.slice(end + endMarker.length)}`;
+    }
   }
   base = base.trimEnd();
   return `${base}${ROLE_START}${composeRolePrompt(roleId, temporarySettings, cwd)}${ROLE_END}`.trimStart();

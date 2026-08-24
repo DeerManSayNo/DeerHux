@@ -7,6 +7,7 @@ import type { AgentSessionPort } from "./session/port";
 import type { ModelCatalogPort, RuntimeModel } from "./model/port";
 import type { ProjectResourcePort } from "./project-resource/port";
 import { composeDeerLoopEngine } from "./engine/deer-loop-composition";
+import { normalizeCodeGraphToolNames } from "./codegraph/tools";
 import type { TurnContextSnapshot } from "./engine/turn-context";
 import { classifyLlmError } from "./llm-gateway";
 import type { LlmRequestKind } from "./llm-gateway";
@@ -53,6 +54,7 @@ interface PreparedTurnContext {
   references: FileReference[];
   skill?: SkillReference;
   systemPromptBlock: string;
+  userPromptBlock: string;
 }
 
 interface TurnAdmissionSnapshot {
@@ -327,7 +329,7 @@ function includesMcpTool(toolNames: string[]): boolean {
   return toolNames.some((name) => name.startsWith("mcp__"));
 }
 
-const TOOLS_SECTION_RE = /(^|\n)Available tools:\n[\s\S]*?(?=\n\n(?:In addition to the tools above|Guidelines:|<deerhux_mode>|<project_context>|<available_skills>|MCP runtime tools:|Current date:|<!-- PI_ROLE|# Global Memory)|$)/;
+const TOOLS_SECTION_RE = /(^|\n)Available tools:\n[\s\S]*?(?=\n\n(?:In addition to the tools above|Guidelines:|<deerhux_mode>|<project_context>|<available_skills>|MCP runtime tools:|Current date:|<!-- (?:DEERHUX|PI)_ROLE|# Global Memory)|$)/;
 const TOOL_SECTION_INSERT_MARKERS = [
   "\n\nGuidelines:",
   "\n\n<deerhux_mode>",
@@ -335,6 +337,7 @@ const TOOL_SECTION_INSERT_MARKERS = [
   "\n\n<available_skills>",
   "\n\nMCP runtime tools:",
   "\n\nCurrent date:",
+  "\n\n<!-- DEERHUX_ROLE",
   "\n\n<!-- PI_ROLE",
   "\n\n# Global Memory",
 ];
@@ -628,27 +631,27 @@ export class AgentSessionWrapper {
     return await this.projectResources.resolveSkill(cwd, skillName) ?? { name: skillName };
   }
 
-  private buildTurnSystemPromptBlock(ctx: { references: FileReference[]; skill?: SkillInvocation; agentMode: AgentMode }): string {
-    const lines = ["<turn_context>"];
-    lines.push(`Current turn mode: ${ctx.agentMode}`);
-    if (ctx.references.length > 0) {
-      lines.push("");
-      lines.push("User-selected references for this turn:");
-      lines.push("Use these files or folders only if the user's request requires them. Do not summarize or analyze them just because they are listed.");
-      for (const ref of ctx.references) lines.push(`- ${escapeTurnContextText(ref.path)}`);
-    }
-    if (ctx.skill) {
-      lines.push("");
-      lines.push(`Selected skill for this turn: ${ctx.skill.name}`);
-      if (ctx.skill.content?.trim()) {
-        lines.push("<selected_skill>");
-        lines.push(ctx.skill.content.trim());
-        lines.push("</selected_skill>");
-      } else {
-        lines.push("The selected skill content could not be loaded; proceed using the skill name as metadata only.");
-      }
-    }
+  private buildTurnSystemPromptBlock(references: FileReference[]): string {
+    if (references.length === 0) return "";
+    const lines = [
+      "<turn_context>",
+      "User-selected references for this turn:",
+      "Use these files or folders only if the user's request requires them. Do not summarize or analyze them just because they are listed.",
+    ];
+    for (const ref of references) lines.push(`- ${escapeTurnContextText(ref.path)}`);
     lines.push("</turn_context>");
+    return lines.join("\n");
+  }
+
+  private buildSkillUserPromptBlock(skill?: SkillInvocation): string {
+    if (!skill) return "";
+    const lines = [`The user explicitly invoked the skill \`${skill.name}\` for this turn.`];
+    if (skill.content?.trim()) {
+      lines.push("Follow the skill instructions below while completing the user's request:");
+      lines.push("<selected_skill>", skill.content.trim(), "</selected_skill>");
+    } else {
+      lines.push("The selected skill content could not be loaded; proceed using the skill name as metadata only.");
+    }
     return lines.join("\n");
   }
 
@@ -656,7 +659,7 @@ export class AgentSessionWrapper {
     rawMessage: string,
     rawReferences: unknown,
     rawSkillName: unknown,
-    agentMode: AgentMode,
+    _agentMode: AgentMode,
   ): Promise<PreparedTurnContext> {
     const references = normalizeReferences(rawReferences);
     const parsedSkill = parseSkillCommand(rawMessage);
@@ -671,7 +674,8 @@ export class AgentSessionWrapper {
       displayMessage,
       references,
       skill,
-      systemPromptBlock: this.buildTurnSystemPromptBlock({ references, skill: skillInvocation, agentMode }),
+      systemPromptBlock: this.buildTurnSystemPromptBlock(references),
+      userPromptBlock: this.buildSkillUserPromptBlock(skillInvocation),
     };
   }
 
@@ -730,6 +734,7 @@ export class AgentSessionWrapper {
     admission: TurnAdmissionSnapshot,
   ): TurnContextSnapshot {
     const instructionContext = turnContext.systemPromptBlock.trim();
+    const skillUserPrompt = turnContext.userPromptBlock.trim();
     const effectiveSystemPrompt = instructionContext
       ? `${admission.systemPrompt}\n\n${instructionContext}`
       : admission.systemPrompt;
@@ -737,6 +742,7 @@ export class AgentSessionWrapper {
       turnId,
       effectiveSystemPrompt,
       ...(instructionContext ? { instructionContext } : {}),
+      ...(skillUserPrompt ? { skillUserPrompt } : {}),
       activeToolNames: admission.activeToolNames,
       roleId: admission.roleId,
       agentMode: admission.agentMode,
@@ -2041,7 +2047,9 @@ export class AgentSessionWrapper {
       }
 
       case "set_tools": {
-        const requested = Array.isArray(command.toolNames) ? command.toolNames.filter((name): name is string => typeof name === "string") : [];
+        const requested = normalizeCodeGraphToolNames(
+          Array.isArray(command.toolNames) ? command.toolNames.filter((name): name is string => typeof name === "string") : [],
+        );
         if (isReadOnlyAgentMode(this.agentMode)) {
           this.inner.setActiveToolsByName(getToolNamesForAgentMode(this.agentMode));
           this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.systemPrompt));

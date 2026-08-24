@@ -14,7 +14,7 @@ import { Type } from "typebox";
 import { getToolNamesForAgentMode, normalizeAgentMode, type AgentMode } from "../agent-modes";
 import { indexExists } from "../code-index/database";
 import { searchIndex } from "../code-index/search";
-import { createCodeGraphTools } from "../codegraph/tools";
+import { createCodeGraphTools, normalizeCodeGraphToolNames } from "../codegraph/tools";
 import type { LlmRequestKind } from "../llm-gateway";
 import type { McpRuntimeLease } from "../mcp-runtime";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../parallel-agent/subagent-tool";
@@ -236,8 +236,9 @@ export async function composeDeerLoopEngine(
 
   const hasExplicitMode = options.agentMode !== undefined && options.agentMode !== null;
   const effectiveMode = normalizeAgentMode(options.agentMode);
-  const requestedToolNames = options.toolNames
-    ?? (hasExplicitMode ? getToolNamesForAgentMode(effectiveMode) : []);
+  const requestedToolNames = normalizeCodeGraphToolNames(
+    options.toolNames ?? (hasExplicitMode ? getToolNamesForAgentMode(effectiveMode) : []),
+  );
   const shouldLoadMcp = shouldLoadMcpRuntime(requestedToolNames, hasExplicitMode);
   const mcpRuntimeLease = shouldLoadMcp
     ? await dependencies.acquireMcpRuntime(options.cwd)

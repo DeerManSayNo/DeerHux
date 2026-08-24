@@ -768,8 +768,9 @@ export class DeerLoopEngine implements AgentEnginePort {
       // 后续构造 LLM context 时不再重复发送；本轮新图片仍正常发送。
       const currentTurnStartIndex = this._messages.length;
 
-      // 1. 把用户输入包成 UserMessage，追加到 transcript。
-      const userContent = this.buildUserContent(text, options?.images);
+      // 1. 把用户输入包成 UserMessage，追加到 transcript。显式引用的主动 Skill
+      // 作为 user-role 内容随本轮输入注入，不能提升到 system prompt。
+      const userContent = this.buildUserContent(this.buildTurnUserText(text, turnContext), options?.images);
       const userMessage: UserMessage = {
         role: "user",
         content: userContent,
@@ -2747,8 +2748,14 @@ export class DeerLoopEngine implements AgentEnginePort {
 
   private buildQueuedUserText(entry: QueueEntry): string {
     const instruction = entry.context?.instructionContext?.trim();
-    if (!instruction) return entry.text;
-    return `${entry.text}\n\n${instruction}`;
+    const text = instruction ? `${entry.text}\n\n${instruction}` : entry.text;
+    return this.buildTurnUserText(text, entry.context);
+  }
+
+  private buildTurnUserText(text: string, context?: TurnContextSnapshot): string {
+    const skillUserPrompt = context?.skillUserPrompt?.trim();
+    if (!skillUserPrompt) return text;
+    return `${text}\n\n${skillUserPrompt}`;
   }
 
   /** 构造 user message 的 content（文本 + 可选图片）。 */

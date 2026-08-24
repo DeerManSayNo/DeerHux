@@ -86,52 +86,61 @@ const labelMap: Record<string, string> = {
   builtin: "内置",
 };
 
-function Toggle({
-  enabled,
+function SkillModeSwitch({
+  mode,
   loading,
-  onToggle,
+  onChange,
 }: {
-  enabled: boolean;
+  mode: "active" | "passive";
   loading: boolean;
-  onToggle: () => void;
+  onChange: (mode: "active" | "passive") => void;
 }) {
+  const options = [
+    { value: "passive" as const, label: "被动", title: "模型可根据任务语义自动匹配" },
+    { value: "active" as const, label: "主动", title: "仅在用户明确引用时加载" },
+  ];
   return (
-    <button
-      onClick={onToggle}
-      disabled={loading}
-      title={
-        enabled
-          ? "在模型提示词中可见 — 点击禁用"
-          : "在模型提示词中隐藏 — 点击启用"
-      }
+    <div
+      role="group"
+      aria-label="技能调用方式"
       style={{
+        display: "inline-flex",
         flexShrink: 0,
-        width: 40,
-        height: 22,
-        borderRadius: 11,
-        border: "none",
-        padding: 0,
-        cursor: loading ? "wait" : "pointer",
-        background: enabled ? "var(--accent)" : "var(--border)",
-        position: "relative",
-        transition: "background 0.18s",
-        outline: "none",
+        padding: 2,
+        borderRadius: 6,
+        border: "1px solid var(--border)",
+        background: "var(--bg)",
+        opacity: loading ? 0.6 : 1,
       }}
     >
-      <span
-        style={{
-          position: "absolute",
-          top: 3,
-          left: enabled ? 21 : 3,
-          width: 16,
-          height: 16,
-          borderRadius: "50%",
-          background: "var(--bg)",
-          boxShadow: "0 1px 4px rgba(0,0,0,0.22)",
-          transition: "left 0.18s cubic-bezier(.4,0,.2,1)",
-        }}
-      />
-    </button>
+      {options.map((option) => {
+        const selected = mode === option.value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={selected}
+            title={option.title}
+            disabled={loading}
+            onClick={() => onChange(option.value)}
+            style={{
+              minWidth: 42,
+              padding: "3px 8px",
+              border: "none",
+              borderRadius: 4,
+              background: selected ? "var(--accent)" : "transparent",
+              color: selected ? "var(--bg)" : "var(--text-dim)",
+              fontSize: 11,
+              fontWeight: selected ? 600 : 400,
+              cursor: loading ? "wait" : "pointer",
+              transition: "background 0.15s, color 0.15s",
+            }}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -426,7 +435,7 @@ function SkillDetail({
   projects,
   moveProjectCwd,
   onMoveProjectCwdChange,
-  onToggle,
+  onModeChange,
   onDelete,
   onMove,
   toggling,
@@ -439,7 +448,7 @@ function SkillDetail({
   projects: ProjectOption[];
   moveProjectCwd: string;
   onMoveProjectCwdChange: (cwd: string) => void;
-  onToggle: (skill: Skill) => void;
+  onModeChange: (skill: Skill, mode: "active" | "passive") => void;
   onDelete: (skill: Skill) => void;
   onMove: (skill: Skill, targetScope: "global" | "project", targetCwd?: string) => void;
   toggling: boolean;
@@ -450,7 +459,7 @@ function SkillDetail({
   const label = sourceLabel(skill);
   const sgKey = subGroupKey(skill);
   const sgDisplay = subGroupDisplay(sgKey);
-  const enabled = !skill.disableModelInvocation;
+  const mode = skill.disableModelInvocation ? "active" : "passive";
   const targetScope = label === "global" ? "project" : "global";
   const canMove = skill.canDelete && (label === "global" || label === "project");
   const needsProjectTarget = canMove && targetScope === "project";
@@ -519,10 +528,10 @@ function SkillDetail({
         >
           {displayPath(skill.filePath)}
         </span>
-        <Toggle
-          enabled={enabled}
+        <SkillModeSwitch
+          mode={mode}
           loading={toggling || moving}
-          onToggle={() => onToggle(skill)}
+          onChange={(nextMode) => onModeChange(skill, nextMode)}
         />
         {needsProjectTarget && (
           <select
@@ -614,6 +623,19 @@ function SkillDetail({
             {saveError}
           </span>
         )}
+      </div>
+
+      <div
+        style={{
+          marginTop: -12,
+          fontSize: 11,
+          color: "var(--text-dim)",
+          lineHeight: 1.5,
+        }}
+      >
+        {mode === "passive"
+          ? "被动技能会出现在模型提示词中，可根据任务语义自动匹配。"
+          : "主动技能不会进入模型提示词，只在用户明确引用时加载。"}
       </div>
 
       {/* Delete confirmation bar */}
@@ -1082,9 +1104,48 @@ export function SkillsConfig({
   const [moving, setMoving] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{
+    skill: Skill;
+    x: number;
+    y: number;
+  } | null>(null);
 
   useEscapeClose(() => setAddMode(false), addMode);
-  useEscapeClose(onClose, !addMode);
+  useEscapeClose(onClose, !addMode && !contextMenu);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [contextMenu]);
+
+  const revealSkillInFinder = useCallback(async () => {
+    if (!contextMenu) return;
+    try {
+      const response = await fetch("/api/files/reveal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: contextMenu.skill.baseDir }),
+      });
+      if (!response.ok) {
+        const data = (await response.json()) as { error?: string };
+        setSaveError(data.error ?? `HTTP ${response.status}`);
+      }
+    } catch (error) {
+      setSaveError(String(error));
+    }
+    setContextMenu(null);
+  }, [contextMenu]);
 
   const projectChoices = useMemo(
     () => projects.filter((project) => project.cwd),
@@ -1126,8 +1187,9 @@ export function SkillsConfig({
     }
   }, [moveProjectCwd, projectChoices]);
 
-  const toggle = useCallback(async (skill: Skill) => {
-    const next = !skill.disableModelInvocation;
+  const changeMode = useCallback(async (skill: Skill, mode: "active" | "passive") => {
+    const next = mode === "active";
+    if (next === skill.disableModelInvocation) return;
     setToggling((s) => new Set(s).add(skill.filePath));
     setSaveError(null);
     try {
@@ -1472,13 +1534,24 @@ export function SkillsConfig({
                             {sgSkills.map((skill) => {
                               const isSelected =
                                 !addMode && selected === skill.filePath;
-                              const disabled = skill.disableModelInvocation;
+                              const mode = skill.disableModelInvocation ? "主动" : "被动";
                               return (
                                 <div
                                   key={skill.filePath}
                                   onClick={() => {
                                     setSelected(skill.filePath);
                                     setAddMode(false);
+                                  }}
+                                  onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setSelected(skill.filePath);
+                                    setAddMode(false);
+                                    setContextMenu({
+                                      skill,
+                                      x: Math.min(event.clientX, window.innerWidth - 216),
+                                      y: Math.min(event.clientY, window.innerHeight - 92),
+                                    });
                                   }}
                                   style={{
                                     display: "flex",
@@ -1507,10 +1580,10 @@ export function SkillsConfig({
                                       width: 7,
                                       height: 7,
                                       borderRadius: "50%",
-                                      background: disabled
-                                        ? "var(--border)"
+                                      background: skill.disableModelInvocation
+                                        ? "rgba(139,92,246,0.85)"
                                         : "var(--accent)",
-                                      boxShadow: disabled
+                                      boxShadow: skill.disableModelInvocation
                                         ? "none"
                                         : "0 0 4px var(--accent)",
                                       transition:
@@ -1521,9 +1594,7 @@ export function SkillsConfig({
                                     style={{
                                       fontSize: 12,
                                       fontWeight: isSelected ? 600 : 400,
-                                      color: disabled
-                                        ? "var(--text-dim)"
-                                        : "var(--text)",
+                                      color: "var(--text)",
                                       fontFamily: "var(--font-mono)",
                                       flex: 1,
                                       overflow: "hidden",
@@ -1532,6 +1603,17 @@ export function SkillsConfig({
                                     }}
                                   >
                                     {skill.name}
+                                  </span>
+                                  <span
+                                    style={{
+                                      flexShrink: 0,
+                                      fontSize: 9,
+                                      color: skill.disableModelInvocation
+                                        ? "rgba(139,92,246,0.9)"
+                                        : "var(--text-dim)",
+                                    }}
+                                  >
+                                    {mode}
                                   </span>
                                 </div>
                               );
@@ -1609,7 +1691,7 @@ export function SkillsConfig({
                   projects={projectChoices}
                   moveProjectCwd={moveProjectCwd}
                   onMoveProjectCwdChange={setMoveProjectCwd}
-                  onToggle={toggle}
+                  onModeChange={changeMode}
                   onDelete={deleteSkill}
                   onMove={moveSkill}
                   toggling={toggling.has(selectedSkill.filePath)}
@@ -1663,6 +1745,83 @@ export function SkillsConfig({
           </button>
         </div>
       </div>
+
+      {contextMenu && (
+        <div
+          role="menu"
+          style={{
+            position: "fixed",
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 1100,
+            width: 200,
+            padding: 6,
+            background: "var(--bg-panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
+          }}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <div
+            style={{
+              padding: "5px 8px 7px",
+              color: "var(--text-dim)",
+              fontSize: 10,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={contextMenu.skill.baseDir}
+          >
+            {contextMenu.skill.name}
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={revealSkillInFinder}
+            style={{
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              gap: 9,
+              padding: "7px 8px",
+              border: "none",
+              borderRadius: 6,
+              background: "transparent",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              textAlign: "left",
+              fontSize: 12,
+            }}
+            onMouseEnter={(event) => {
+              event.currentTarget.style.background = "var(--bg-hover)";
+              event.currentTarget.style.color = "var(--text)";
+            }}
+            onMouseLeave={(event) => {
+              event.currentTarget.style.background = "transparent";
+              event.currentTarget.style.color = "var(--text-muted)";
+            }}
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+              <path d="m9 12 3 3 3-3" />
+            </svg>
+            在 Finder 中显示
+          </button>
+        </div>
+      )}
     </div>
   );
 }

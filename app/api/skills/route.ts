@@ -5,6 +5,7 @@ import path from "path";
 import { readdirSync } from "fs";
 import { migrateProjectAgentsDir } from "@/lib/legacy-migration";
 import { deerhuxManagedSkillDirs, isManagedDeerHuxSkillFile, isPathInside } from "@/lib/extensions/config";
+import { addAllowedRoot } from "@/lib/file-access";
 
 export const dynamic = "force-dynamic";
 
@@ -44,20 +45,30 @@ const BUILTIN_SKILLS: SkillWithMeta[] = [
   },
 ];
 
+function builtinSkillWithCurrentMode(skill: SkillWithMeta): SkillWithMeta {
+  try {
+    const { frontmatter } = parseFrontmatter<Record<string, unknown>>(readFileSync(skill.filePath, "utf8"));
+    return { ...skill, disableModelInvocation: frontmatter["disable-model-invocation"] === true };
+  } catch {
+    return skill;
+  }
+}
+
 function injectBuiltinSkills(skills: SkillWithMeta[]): SkillWithMeta[] {
-  const builtinNames = new Set(BUILTIN_SKILLS.map((s) => s.name));
+  const builtins = BUILTIN_SKILLS.map(builtinSkillWithCurrentMode);
+  const builtinNames = new Set(builtins.map((s) => s.name));
   const overridden = new Set<string>();
   const result = skills.map((s) => {
     if (builtinNames.has(s.name)) {
       overridden.add(s.name);
       // Override existing skill's managed properties with builtin defaults
-      const builtin = BUILTIN_SKILLS.find((b) => b.name === s.name)!;
+      const builtin = builtins.find((b) => b.name === s.name)!;
       return { ...s, canDelete: false, sourceInfo: builtin.sourceInfo };
     }
     return s;
   });
   // Add builtin skills that had no existing counterpart
-  for (const builtin of BUILTIN_SKILLS) {
+  for (const builtin of builtins) {
     if (!overridden.has(builtin.name)) {
       result.unshift(builtin);
     }
@@ -97,15 +108,30 @@ export async function GET(req: Request) {
         canDelete: isManagedDeerHuxSkillFile(skill.filePath, cwd),
       };
     });
+    const visibleSkills = injectBuiltinSkills(skillsWithMeta);
+    visibleSkills.forEach((skill) => addAllowedRoot(skill.baseDir));
 
-    return NextResponse.json({ skills: injectBuiltinSkills(skillsWithMeta), diagnostics });
-  } catch (e) {
+    return NextResponse.json({ skills: visibleSkills, diagnostics });
+  } catch (_e) {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
 function isBuiltinSkill(filePath: string): boolean {
-  return BUILTIN_SKILLS.some((s) => s.filePath === filePath);
+  const resolved = path.resolve(filePath);
+  return BUILTIN_SKILLS.some((s) => path.resolve(s.filePath) === resolved);
+}
+
+async function isVisibleSkillFile(filePath: string, cwd?: string | null): Promise<boolean> {
+  const resolved = path.resolve(filePath);
+  if (path.basename(resolved) !== "SKILL.md") return false;
+  if (isBuiltinSkill(resolved)) return true;
+
+  const agentDir = getAgentDir();
+  const loaderCwd = cwd?.trim() || path.parse(agentDir).root;
+  const loader = new DefaultResourceLoader({ cwd: loaderCwd, agentDir });
+  await loader.reload();
+  return loader.getSkills().skills.some((skill) => path.resolve(skill.filePath) === resolved);
 }
 
 function targetSkillRoot(scope: "global" | "project", cwd?: string | null): string {
@@ -182,12 +208,12 @@ export async function DELETE(req: Request) {
     }
 
     return NextResponse.json({ success: true });
-  } catch (e) {
+  } catch (_e) {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
-// PATCH /api/skills — toggle disable-model-invocation or move a SKILL.md file between scopes
+// PATCH /api/skills — change active/passive invocation mode or move a SKILL.md file between scopes
 export async function PATCH(req: Request) {
   try {
     const body = await req.json() as {
@@ -198,12 +224,12 @@ export async function PATCH(req: Request) {
     };
     const { filePath, disableModelInvocation, targetScope, cwd } = body;
     if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
-    if (isBuiltinSkill(filePath)) {
-      return NextResponse.json({ error: "built-in skills cannot be modified through this API" }, { status: 400 });
-    }
     if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
 
     if (targetScope) {
+      if (isBuiltinSkill(filePath)) {
+        return NextResponse.json({ error: "built-in skills cannot be moved" }, { status: 400 });
+      }
       if (targetScope !== "global" && targetScope !== "project") {
         return NextResponse.json({ error: "targetScope must be global or project" }, { status: 400 });
       }
@@ -211,11 +237,11 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ success: true, filePath: nextFilePath });
     }
 
-    if (!isManagedDeerHuxSkillFile(filePath, cwd)) {
-      return NextResponse.json({ error: "only DeerHux-managed SKILL.md files can be modified" }, { status: 400 });
-    }
     if (typeof disableModelInvocation !== "boolean") {
       return NextResponse.json({ error: "disableModelInvocation required" }, { status: 400 });
+    }
+    if (!await isVisibleSkillFile(filePath, cwd)) {
+      return NextResponse.json({ error: "only currently visible SKILL.md files can be modified" }, { status: 400 });
     }
 
     const content = readFileSync(filePath, "utf8");
@@ -239,7 +265,7 @@ export async function PATCH(req: Request) {
 
     writeFileSync(filePath, updated, "utf8");
     return NextResponse.json({ success: true });
-  } catch (e) {
+  } catch (_e) {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

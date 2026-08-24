@@ -120,13 +120,13 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
 const DEFAULT_SECTION_CONTENT: Record<string, string> = {
   identity: "You are an expert coding assistant operating inside DeerHux, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
   tools: "Available tools:\n[自动生成：根据当前会话启用的工具生成工具列表]",
-  guidelines: "Guidelines:\n- 回答和思考过程（thinking）全部使用中文；言简意赅，不要啰嗦\n- 处理文件时清晰显示文件路径\n- Dynamic Context Discovery：会话压缩后摘要可能不够细；完整历史在 `~/.deerhux/agent/context/<sessionId>/history/`，长工具输出在同目录 `tool-outputs/`。摘要含 Full transcript / Full output 路径时，用 grep/read/bash（如 tail）按需取回细节，不要猜测",
+  guidelines: "Guidelines:\n- 回答和思考过程（thinking）全部使用中文；言简意赅，不要啰嗦\n- 处理文件时清晰显示文件路径\n- 先说明对用户请求的理解，再直接执行。\n- Dynamic Context Discovery：会话压缩后摘要可能不够细；完整历史在 `~/.deerhux/agent/context/<sessionId>/history/`，长工具输出在同目录 `tool-outputs/`。摘要含 Full transcript / Full output 路径时，用 grep/read/bash（如 tail）按需取回细节，不要猜测",
   mode_control: getDefaultModePromptSectionContent(),
   project_context: "<project_context>\n[自动生成：来自 AGENTS.md 等项目上下文文件]\n</project_context>",
   skills: "<available_skills>\n[自动生成：当前可用 skills 列表]\n</available_skills>",
   mcp_tools: "MCP runtime tools:\n[自动生成：来自 MCP 配置窗口；会话启动/重载时动态发现具体工具]",
   date_cwd: "Current date: [自动生成]\nCurrent working directory: [自动生成]",
-  role_profile: "<!-- PI_ROLE_PROFILE_START -->\n[自动生成：当前角色设定]\n<!-- PI_ROLE_PROFILE_END -->",
+  role_profile: "<!-- DEERHUX_ROLE_PROFILE_START -->\n[自动生成：当前角色设定]\n<!-- DEERHUX_ROLE_PROFILE_END -->",
 };
 
 function buildToolsSectionContent(_cwd?: string | null): string {
@@ -190,8 +190,13 @@ function extractBetweenTags(text: string, tag: string): string | null {
 /**
  * Check if text contains the DeerHux role profile markers.
  */
-function hasRoleProfile(text: string): boolean {
-  return text.includes("<!-- PI_ROLE_PROFILE_START -->");
+const ROLE_PROFILE_MARKERS = [
+  ["<!-- DEERHUX_ROLE_PROFILE_START -->", "<!-- DEERHUX_ROLE_PROFILE_END -->"],
+  ["<!-- PI_ROLE_PROFILE_START -->", "<!-- PI_ROLE_PROFILE_END -->"],
+] as const;
+
+function findRoleProfileMarkers(text: string): typeof ROLE_PROFILE_MARKERS[number] | null {
+  return ROLE_PROFILE_MARKERS.find(([startMarker]) => text.includes(startMarker)) ?? null;
 }
 
 // ── Main API ───────────────────────────────────────────────────────────────
@@ -251,7 +256,7 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
 
       case "guidelines": {
         // Guidelines section: "Guidelines:" to next major section
-        const glMatch = remaining.match(/Guidelines:\n([\s\S]*?)(?=\n\n<deerhux_mode>|\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- PI_ROLE|$)/);
+        const glMatch = remaining.match(/Guidelines:\n([\s\S]*?)(?=\n\n<deerhux_mode>|\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- (?:DEERHUX|PI)_ROLE|$)/);
         if (glMatch) {
           content = `Guidelines:\n${glMatch[1].trim()}`;
           remaining = remaining.slice(glMatch[0].length);
@@ -304,7 +309,7 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
       }
 
       case "mcp_tools": {
-        const mcpMatch = remaining.match(/(MCP runtime tools:\n[\s\S]*?)(?=\n\nCurrent date:|\n\n<!-- PI_ROLE|\n\n# Global Memory|$)/);
+        const mcpMatch = remaining.match(/(MCP runtime tools:\n[\s\S]*?)(?=\n\nCurrent date:|\n\n<!-- (?:DEERHUX|PI)_ROLE|\n\n# Global Memory|$)/);
         if (mcpMatch) {
           content = mcpMatch[1].trim();
           remaining = remaining.slice(mcpMatch[0].length);
@@ -315,7 +320,7 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
 
       case "date_cwd": {
         // Date and CWD: at the very end
-        const dateMatch = remaining.match(/(Current date:.*?)(?:\nCurrent working directory:.*?)?(?=\n\n<!-- PI_ROLE|$)/);
+        const dateMatch = remaining.match(/(Current date:.*?)(?:\nCurrent working directory:.*?)?(?=\n\n<!-- (?:DEERHUX|PI)_ROLE|$)/);
         if (dateMatch) {
           content = dateMatch[0].trim();
           remaining = remaining.slice(dateMatch[0].length);
@@ -325,12 +330,12 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
       }
 
       case "role_profile": {
-        if (hasRoleProfile(remaining)) {
-          const startMarker = "<!-- PI_ROLE_PROFILE_START -->";
-          const endMarker = "<!-- PI_ROLE_PROFILE_END -->";
+        const markers = findRoleProfileMarkers(remaining);
+        if (markers) {
+          const [startMarker, endMarker] = markers;
           const roleContent = extractBetween(remaining, startMarker, endMarker);
           if (roleContent !== null) {
-            content = `${startMarker}\n${roleContent}\n${endMarker}`;
+            content = `<!-- DEERHUX_ROLE_PROFILE_START -->\n${roleContent}\n<!-- DEERHUX_ROLE_PROFILE_END -->`;
             const endIdx = remaining.indexOf(endMarker);
             if (endIdx !== -1) {
               remaining = remaining.slice(endIdx + endMarker.length);
@@ -342,7 +347,7 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
       }
 
       case "global_memory": {
-        const gmMatch = remaining.match(/(# Global Memory \/ 全局记忆[\s\S]*?)(?=\n# |\n<!-- PI_ROLE|\n<project_context>|\n<available_skills>|$)/);
+        const gmMatch = remaining.match(/(# Global Memory \/ 全局记忆[\s\S]*?)(?=\n# |\n<!-- (?:DEERHUX|PI)_ROLE|\n<project_context>|\n<available_skills>|$)/);
         if (gmMatch) {
           content = gmMatch[1].trimEnd();
           remaining = remaining.slice(gmMatch[0].length);
@@ -670,7 +675,7 @@ export function applyRolePromptConfigToPrompt(prompt: string, roleId?: string | 
   const config = readRoleSystemPromptConfig(roleId);
   // Strip DeerHux's internal documentation section from the raw prompt permanently.
   // This section tells the LLM where DeerHux's docs are — unnecessary token waste for users.
-  let result = prompt.replace(/\n\nPi documentation[\s\S]*?(?=\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- PI_ROLE|$)/, "");
+  let result = prompt.replace(/\n\nPi documentation[\s\S]*?(?=\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- (?:DEERHUX|PI)_ROLE|$)/, "");
   if (config.sections.length > 0) {
     const live = decomposeSystemPrompt(prompt);
     const merged = applySectionOverrides(live, config.sections);
@@ -697,7 +702,7 @@ export function applyRolePromptConfigToPrompt(prompt: string, roleId?: string | 
 function ensureChineseGuidelines(prompt: string): string {
   return prompt
     .replace(/- Be concise in your responses/g, "- 回答和思考过程（thinking）全部使用中文；言简意赅，不要啰嗦")
-    .replace(/- Show file paths clearly when working with files/g, "- 处理文件时清晰显示文件路径");
+    .replace(/- Show file paths clearly when working with files/g, "- 处理文件时清晰显示文件路径\n- 先说明对用户请求的理解，再直接执行。");
 }
 
 export function isGlobalSystemPromptSectionEnabled(sectionId: string): boolean {

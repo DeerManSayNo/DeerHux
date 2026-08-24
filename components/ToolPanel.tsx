@@ -11,8 +11,8 @@ export interface ToolEntry {
 
 export type ToolPreset = "none" | "default" | "full" | "custom";
 export const PRESET_NONE: string[] = [];
-export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write", "codegraph_status", "codegraph_search", "codegraph_callers", "codegraph_callees", "codegraph_impact"];
-export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls", "code_search", "codegraph_status", "codegraph_search", "codegraph_callers", "codegraph_callees", "codegraph_impact"];
+export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write", "codegraph"];
+export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls", "code_search", "codegraph"];
 
 export function getPresetFromTools(tools: ToolEntry[]): ToolPreset {
   const active = tools.filter(t => t.active).map(t => t.name).sort().join(",");

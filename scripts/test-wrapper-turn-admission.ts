@@ -99,6 +99,9 @@ await prompt;
 assert.equal(promptInputs.length, 1);
 assert.deepEqual(promptInputs[0]?.context?.activeToolNames, ["read", "subagent"]);
 assert.match(promptInputs[0]?.context?.effectiveSystemPrompt ?? "", /subagent/);
+assert.doesNotMatch(promptInputs[0]?.context?.effectiveSystemPrompt ?? "", /slow-skill/);
+assert.match(promptInputs[0]?.context?.skillUserPrompt ?? "", /slow-skill/);
+assert.match(promptInputs[0]?.context?.skillUserPrompt ?? "", /slow/);
 assert.equal(activeToolNames.includes("subagent"), false, "later control command should still update future turns");
 
 // Recover reserves fresh-turn admission before awaiting old-turn settlement.
@@ -138,7 +141,8 @@ assert.equal(steerInputs.length, 0, "settled root turn must not receive a queued
 assert.equal(promptInputs.length, 3, "prepared steer should be promoted to a fresh prompt");
 assert.equal(promptInputs[2]?.text, "promote me");
 assert.deepEqual(promptInputs[2]?.context?.activeToolNames, ["read"]);
-assert.match(promptInputs[2]?.context?.effectiveSystemPrompt ?? "", /slow-skill/);
+assert.doesNotMatch(promptInputs[2]?.context?.effectiveSystemPrompt ?? "", /slow-skill/);
+assert.match(promptInputs[2]?.context?.skillUserPrompt ?? "", /slow-skill/);
 
 await assert.rejects(
   wrapper.send({ type: "steer", message: "idle steer" }),

@@ -50,8 +50,8 @@ export async function createSubagentWorkerSession(
   if (existingSessionId && !sessionFile) throw new Error("Worker session file was not found");
   const tempKey = existingSessionId ?? `__collab__${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const tools = mode === "analysis"
-    ? ["read", "grep", "find", "ls", "code_search", "codegraph_status", "codegraph_search", "codegraph_callers", "codegraph_callees", "codegraph_impact"]
-    : ["read", "bash", "edit", "write", "grep", "find", "ls", "code_search", "codegraph_status", "codegraph_search", "codegraph_callers", "codegraph_callees", "codegraph_impact"];
+    ? ["read", "grep", "find", "ls", "code_search", "codegraph"]
+    : ["read", "bash", "edit", "write", "grep", "find", "ls", "code_search", "codegraph"];
   const { session, realSessionId } = await startRpcSession(
     tempKey,
     sessionFile || "",

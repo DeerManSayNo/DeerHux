@@ -11,8 +11,10 @@ import type { AgentImageInput } from "./port";
 export interface TurnContextSnapshot {
   turnId: string;
   effectiveSystemPrompt: string;
-  /** 仅与该条用户指令相关的文件引用 / Skill 块；队列 drain 时写回这条消息。 */
+  /** 仅与该条用户指令相关的文件引用 system 块。 */
   instructionContext?: string;
+  /** 用户显式引用的主动 Skill 正文；作为 user-role 内容注入，不进入 system prompt。 */
+  skillUserPrompt?: string;
   activeToolNames: readonly string[];
   roleId: string | null;
   agentMode: AgentMode;

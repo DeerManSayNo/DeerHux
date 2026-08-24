@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { homedir } from "os";
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import { defineTool, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AnyToolDefinition } from "./tool-registry.ts";
 import { ensureContextDir, getContextDir, previewForExistingSpill, spillLargeText } from "./context-archive.ts";
@@ -143,10 +143,7 @@ function isInsideRoot(candidateParent: string, root: string): boolean {
   return candidateParent === root || candidateParent.startsWith(rootWithSep);
 }
 
-/**
- * 解析路径：必须落在 cwd 或 extraRoots（当前 session 的 context archive）内。
- * 写操作应只传 cwd，避免 Agent 改写归档目录。
- */
+/** 解析受限路径：必须落在 cwd 或调用方提供的资源根目录内。 */
 function resolveAllowedPath(
   cwd: string,
   input: string | null,
@@ -160,7 +157,18 @@ function resolveAllowedPath(
   const parent = fs.existsSync(candidate) ? candidate : path.dirname(candidate);
   const realParent = fs.existsSync(parent) ? fs.realpathSync.native(parent) : path.resolve(parent);
   if (roots.some((root) => isInsideRoot(realParent, root))) return candidate;
-  throw new Error(`${label} must be inside cwd or session context archive`);
+  throw new Error(extraRoots.length
+    ? `${label} must be inside cwd or an allowed resource root`
+    : `${label} must be inside cwd`);
+}
+
+function resolveUnrestrictedPath(cwd: string, input: string | null, label = "path"): string {
+  if (!input) throw new Error(`${label} is required`);
+  return path.isAbsolute(input) ? path.resolve(input) : path.resolve(cwd, input);
+}
+
+function isDefaultDeerHuxCwd(cwd: string): boolean {
+  return normalizeRoot(cwd) === normalizeRoot(path.join(homedir(), "deerhux-cwd"));
 }
 
 function lineSlice(content: string, offset: number, limit: number): string {
@@ -333,13 +341,19 @@ export function createStandardCodingTools(
 ): AnyToolDefinition[] {
   const sessionId = options?.sessionId;
   const contextDir = sessionId ? getContextDir(sessionId) : null;
-  // 读/搜允许访问本 session 的 context archive；写/编辑仍仅限 cwd。
-  const readRoots = contextDir ? [contextDir] : [];
+  const globalSkillDirs = [
+    path.join(getAgentDir(), "skills"),
+    path.join(homedir(), ".pi", "agent", "skills"),
+  ];
+  // 本机文件系统默认可读。默认 ~/deerhux-cwd 代表非项目沙箱模式，读写均不限制路径；
+  // 实际项目 cwd 的写权限仍限定为项目本身和全局 Skill。
+  const unrestricted = isDefaultDeerHuxCwd(cwd);
+  const writeRoots = globalSkillDirs;
   const resolveReadPath = (input: string | null, label = "path") =>
-    resolveAllowedPath(cwd, input, label, readRoots);
-  const resolveWritePath = (input: string | null, label = "path") =>
-    resolveAllowedPath(cwd, input, label, []);
-
+    resolveUnrestrictedPath(cwd, input, label);
+  const resolveWritePath = (input: string | null, label = "path") => unrestricted
+    ? resolveUnrestrictedPath(cwd, input, label)
+    : resolveAllowedPath(cwd, input, label, writeRoots);
   const contextHint = contextDir
     ? ` Also readable: session context archive at ${contextDir} (compacted history + spilled tool outputs).`
     : "";
@@ -348,10 +362,10 @@ export function createStandardCodingTools(
     defineTool({
       name: "read",
       label: "Read File",
-      description: `Read a text file under the current workspace${contextHint ? " or this session's context archive" : ""}. Supports optional 1-based offset and line limit.`,
-      promptSnippet: `read: Read a text file by path (cwd${contextDir ? " or context archive" : ""}). Use filePath/path, optional offset and limit.`,
+      description: "Read a text file anywhere on the local filesystem. Relative paths resolve from the current workspace. Supports optional 1-based offset and line limit.",
+      promptSnippet: "read: Read any local text file by path. Relative paths resolve from cwd. Use filePath/path, optional offset and limit.",
       parameters: Type.Object({
-        filePath: Type.Optional(Type.String({ description: "File path to read, relative to cwd or absolute under cwd/context archive" })),
+        filePath: Type.Optional(Type.String({ description: "Local file path; relative paths resolve from cwd and absolute paths may point anywhere" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
         offset: Type.Optional(Type.Number({ description: "1-based line offset" })),
         limit: Type.Optional(Type.Number({ description: "Maximum number of lines" })),
@@ -373,10 +387,16 @@ export function createStandardCodingTools(
     defineTool({
       name: "write",
       label: "Write File",
-      description: "Create or overwrite a text file under the current workspace.",
-      promptSnippet: "write: Create or overwrite a file. Use filePath/path and content.",
+      description: unrestricted
+        ? "Create or overwrite a text file anywhere on the local filesystem. Relative paths resolve from the default DeerHux workspace."
+        : "Create or overwrite a text file under the current workspace or a global Skill directory.",
+      promptSnippet: unrestricted
+        ? "write: Create or overwrite any local file. Relative paths resolve from the default DeerHux cwd. Use filePath/path and content."
+        : "write: Create or overwrite a file in cwd or a global Skill directory. Use filePath/path and content.",
       parameters: Type.Object({
-        filePath: Type.Optional(Type.String({ description: "File path to write, relative to cwd or absolute under cwd" })),
+        filePath: Type.Optional(Type.String({ description: unrestricted
+          ? "Local file path; relative paths resolve from cwd and absolute paths may point anywhere"
+          : "File path to write, relative to cwd or absolute under cwd/global Skill directories" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
         content: Type.String({ description: "Complete file content" }),
       }),
@@ -394,10 +414,16 @@ export function createStandardCodingTools(
     defineTool({
       name: "edit",
       label: "Edit File",
-      description: "Replace text in a file under the current workspace.",
-      promptSnippet: "edit: Replace text in a file. Use filePath/path, oldString, newString, optional replaceAll.",
+      description: unrestricted
+        ? "Replace text in a file anywhere on the local filesystem. Relative paths resolve from the default DeerHux workspace."
+        : "Replace text in a file under the current workspace or a global Skill directory.",
+      promptSnippet: unrestricted
+        ? "edit: Replace text in any local file. Relative paths resolve from the default DeerHux cwd. Use filePath/path, oldString, newString, optional replaceAll."
+        : "edit: Replace text in a file in cwd or a global Skill directory. Use filePath/path, oldString, newString, optional replaceAll.",
       parameters: Type.Object({
-        filePath: Type.Optional(Type.String({ description: "File path to edit, relative to cwd or absolute under cwd" })),
+        filePath: Type.Optional(Type.String({ description: unrestricted
+          ? "Local file path; relative paths resolve from cwd and absolute paths may point anywhere"
+          : "File path to edit, relative to cwd or absolute under cwd/global Skill directories" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
         oldString: Type.Optional(Type.String({ description: "Text to replace" })),
         newString: Type.Optional(Type.String({ description: "Replacement text" })),
@@ -488,11 +514,11 @@ export function createStandardCodingTools(
     defineTool({
       name: "grep",
       label: "Search Text",
-      description: `Search file contents under the current workspace${contextDir ? " or this session's context archive" : ""} using ripgrep.`,
-      promptSnippet: `grep: Search text with ripgrep (cwd${contextDir ? " or context archive" : ""}). Use pattern, optional path/glob/limit/ignoreCase.`,
+      description: "Search file contents anywhere on the local filesystem using ripgrep. Relative paths resolve from the current workspace.",
+      promptSnippet: "grep: Search text with ripgrep in any local path. Relative paths resolve from cwd. Use pattern, optional path/glob/limit/ignoreCase.",
       parameters: Type.Object({
         pattern: Type.String({ description: "Regex or text pattern to search for" }),
-        path: Type.Optional(Type.String({ description: "Directory or file under cwd or context archive" })),
+        path: Type.Optional(Type.String({ description: "Local directory or file path; defaults to cwd" })),
         glob: Type.Optional(Type.String({ description: "Optional glob filter" })),
         limit: Type.Optional(Type.Number({ description: "Maximum matches" })),
         ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search" })),
@@ -519,10 +545,10 @@ export function createStandardCodingTools(
     defineTool({
       name: "find",
       label: "Find Files",
-      description: "Find files by name or glob under the current workspace.",
-      promptSnippet: "find: Find files. Use optional path, pattern, maxDepth, limit.",
+      description: "Find files by name or glob anywhere on the local filesystem. Relative paths resolve from the current workspace.",
+      promptSnippet: "find: Find files in any local directory. Relative paths resolve from cwd. Use optional path, pattern, maxDepth, limit.",
       parameters: Type.Object({
-        path: Type.Optional(Type.String({ description: "Directory under cwd" })),
+        path: Type.Optional(Type.String({ description: "Local directory path; defaults to cwd" })),
         pattern: Type.Optional(Type.String({ description: "File name or glob pattern, e.g. *.ts or **/*.tsx" })),
         maxDepth: Type.Optional(Type.Number({ description: "Maximum directory depth" })),
         limit: Type.Optional(Type.Number({ description: "Maximum files to return" })),
@@ -530,7 +556,7 @@ export function createStandardCodingTools(
       executionMode: "parallel" as const,
       execute: async (_toolCallId, raw) => {
         const params = raw as Record<string, unknown>;
-        const root = resolveWritePath(stringParam(params, ["path", "dir", "directory"]) ?? ".", "path");
+        const root = resolveReadPath(stringParam(params, ["path", "dir", "directory"]) ?? ".", "path");
         const stat = await fs.promises.stat(root);
         if (!stat.isDirectory()) throw new Error(`Not a directory: ${root}`);
         const pattern = stringParam(params, ["pattern", "name", "glob"]);
@@ -546,10 +572,10 @@ export function createStandardCodingTools(
     defineTool({
       name: "ls",
       label: "List Directory",
-      description: `List directory entries under the current workspace${contextDir ? " or this session's context archive" : ""}.`,
-      promptSnippet: `ls: List a directory (cwd${contextDir ? " or context archive" : ""}). Use optional path.`,
+      description: "List directory entries anywhere on the local filesystem. Relative paths resolve from the current workspace.",
+      promptSnippet: "ls: List any local directory. Relative paths resolve from cwd. Use optional path.",
       parameters: Type.Object({
-        path: Type.Optional(Type.String({ description: "Directory under cwd or context archive" })),
+        path: Type.Optional(Type.String({ description: "Local directory path; defaults to cwd" })),
       }),
       executionMode: "parallel" as const,
       execute: async (_toolCallId, raw) => {

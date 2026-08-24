@@ -93,14 +93,14 @@ function summarizeToolEvent(event: AgentEvent): { toolName: string; summary: str
       summary = pick("path", "pattern", "glob", "name");
       break;
     case "code_search":
-    case "codegraph_search":
       summary = pick("query", "text", "q");
       break;
-    case "codegraph_callers":
-    case "codegraph_callees":
-    case "codegraph_impact":
-      summary = pick("symbol", "query");
+    case "codegraph": {
+      const action = pick("action");
+      const target = pick("query", "symbol");
+      summary = [action, target].filter(Boolean).join(": ");
       break;
+    }
     case "subagent":
       summary = pick("message", "task", "prompt");
       break;

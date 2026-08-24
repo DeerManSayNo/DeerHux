@@ -37,17 +37,11 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
   return defineTool({
     name: SUBAGENT_TOOL_NAME,
     label: "Subagent",
-    description: [
-      "Delegate a self-contained sub-task to one or more isolated sub-agents (a 'subagent task').",
-      "Each worker runs its own agent session in parallel and returns a result.",
-      "Use this when: (1) you want multiple independent attempts/solutions to compare, (2) a sub-task benefits from focused isolated coding with a diff to review, (3) you want a dedicated review/research pass.",
-      "Do NOT use this for simple lookups (use read/grep/code_search) or single quick edits — do those yourself.",
-      "Omit `mode` to auto-infer from the message (keywords like 并行/parallel/review/审查/实现/修复).",
-    ].join(" "),
-    promptSnippet: "subagent: Delegate a sub-task to isolated sub-agents (parallel attempts / isolated coding / review).",
+    description: "Delegate a focused, self-contained task to isolated subagents for parallel alternatives, scoped coding, or review/research. Use direct tools for simple lookups or quick edits. Workers do not share this conversation; include all required context.",
+    promptSnippet: "subagent: Delegate a focused task to isolated subagents for parallel alternatives, scoped coding, or review/research.",
     parameters: Type.Object({
       message: Type.String({
-        description: "The sub-task to delegate. Be specific and self-contained — workers do NOT share your current conversation context.",
+        description: "Complete, self-contained instructions for the workers. Include the goal, relevant context, constraints, and expected output; workers do not share this conversation.",
       }),
       mode: Type.Optional(Type.Union(
         [
