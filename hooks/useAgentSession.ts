@@ -19,6 +19,7 @@ import {
   getSessionHistorySnapshot,
   saveSessionHistorySnapshot,
 } from "@/lib/session-history-snapshots";
+import { mergeFullSessionHistory } from "@/lib/session-history-merge";
 
 type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
@@ -1092,20 +1093,72 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * "load full history" affordance. Clears {@link hasOlderMessages} on
    * success.
    */
-  const loadFullHistory = useCallback(async (sid: string) => {
+  const loadFullHistory = useCallback(async (sid: string): Promise<boolean> => {
+    if (loadingFullHistoryRef.current) return false;
     loadingFullHistoryRef.current = true;
     setLoadingFullHistory(true);
-    try {
-      const result = await loadSession(sid, false, false);
-      if (result?.messagesApplied) {
-        fullHistoryLoadedRef.current = true;
-        setHasOlderMessages(false);
-      }
-    } finally {
-      loadingFullHistoryRef.current = false;
-      setLoadingFullHistory(false);
+    const snapshotRequestSeq = ++messageSnapshotRequestSeqRef.current;
+    const controller = new AbortController();
+    const sessionSignal = sessionAbortRef.current?.signal;
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const onSessionAbort = () => controller.abort();
+    if (sessionSignal) {
+      if (sessionSignal.aborted) controller.abort();
+      else sessionSignal.addEventListener("abort", onSessionAbort, { once: true });
     }
-  }, [loadSession]);
+
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, {
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json() as SessionDataWithAgentState;
+      if (sid !== sessionIdRef.current || snapshotRequestSeq !== messageSnapshotRequestSeqRef.current) {
+        return false;
+      }
+
+      // Full history may be requested while a worker is still producing durable
+      // messages. Keep anything that arrived after the server snapshot at the tail.
+      const loaded = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
+      // 先让持久化快照认领对应的乐观 user 消息，再保留请求期间新增的实时尾部。
+      // 若反过来先 merge，本地副本会被追加到末尾；随后它又会凭自己的
+      // clientMessageId 清掉 pending，最终留下一个位置错误的重复气泡。
+      const reconciledLoaded = reconcilePendingUserMessages(
+        loaded.messages,
+        loaded.entryIds,
+        pendingUserMessagesRef.current,
+      );
+      const merged = mergeFullSessionHistory(
+        reconciledLoaded.messages,
+        reconciledLoaded.entryIds,
+        messagesRef.current,
+        entryIdsRef.current,
+      );
+      applySessionSnapshot({
+        ...d,
+        context: {
+          ...d.context,
+          messages: merged.messages,
+          entryIds: merged.entryIds,
+        },
+      }, true);
+      fullHistoryLoadedRef.current = true;
+      setHasOlderMessages(false);
+      return true;
+    } catch (e) {
+      if (sid === sessionIdRef.current) {
+        const isAbort = e instanceof DOMException && e.name === "AbortError";
+        setError(isAbort ? "加载完整历史超时" : String(e));
+      }
+      return false;
+    } finally {
+      clearTimeout(timeout);
+      if (sessionSignal) sessionSignal.removeEventListener("abort", onSessionAbort);
+      loadingFullHistoryRef.current = false;
+      if (sid === sessionIdRef.current) setLoadingFullHistory(false);
+    }
+  }, [applySessionSnapshot]);
 
   const loadTools = useCallback(async (sid: string) => {
     try {

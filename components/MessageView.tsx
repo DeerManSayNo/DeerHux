@@ -1121,6 +1121,7 @@ function BlockView({ block, toolResults, streamingDuration, toolCallDurations, i
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} />;
   }
   if (block.type === "thinking") {
+    if (!isStreaming && !(block as ThinkingContent).thinking?.trim()) return null;
     return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={isStreaming} />;
   }
   if (block.type === "toolCall") {

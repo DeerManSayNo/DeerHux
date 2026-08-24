@@ -1132,6 +1132,23 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     return container.scrollHeight - container.scrollTop - container.clientHeight < AUTO_SCROLL_THRESHOLD;
   }, [isRunning, scrollContainerRef]);
 
+  const loadOlderHistory = useCallback(async () => {
+    const sid = session?.id;
+    const container = scrollContainerRef.current;
+    if (!sid || !container || !hasOlderMessages || loadingFullHistory) return;
+
+    const previousHeight = container.scrollHeight;
+    const previousTop = container.scrollTop;
+    const loaded = await loadFullHistory(sid);
+    if (!loaded) return;
+
+    requestAnimationFrame(() => {
+      const current = scrollContainerRef.current;
+      if (!current || current !== container) return;
+      current.scrollTop = previousTop + Math.max(0, current.scrollHeight - previousHeight);
+    });
+  }, [hasOlderMessages, loadFullHistory, loadingFullHistory, scrollContainerRef, session?.id]);
+
   const scrollToLiveBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -1148,6 +1165,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
+
+    if (container.scrollTop <= 80 && hasOlderMessages && !loadingFullHistory) {
+      void loadOlderHistory();
+    }
 
     const currentScrollTop = container.scrollTop;
     const scrollDelta = currentScrollTop - prevScrollTopRef.current;
@@ -1206,7 +1227,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       }
     }
     // 所有 user 消息都已滚出顶部，保持不变（"如果没有就不变"）
-  }, [isNearBottom, setAutoScroll, userMsgIndices, userMsgIdxToRefIdx, messageRefs, scrollContainerRef]);
+  }, [hasOlderMessages, isNearBottom, loadOlderHistory, loadingFullHistory, setAutoScroll, userMsgIndices, userMsgIdxToRefIdx, messageRefs, scrollContainerRef]);
 
   const handleResumeAutoScroll = useCallback(() => {
     setAutoScroll(true);
@@ -1762,7 +1783,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               <div style={{ display: "flex", justifyContent: "center", padding: "8px 0 4px" }}>
                 <button
                   type="button"
-                  onClick={() => loadFullHistory(session.id)}
+                  onClick={() => void loadOlderHistory()}
                   disabled={loadingFullHistory}
                   style={{
                     fontSize: 12,

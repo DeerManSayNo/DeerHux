@@ -27,14 +27,22 @@ const buildNodeOptions = nodeOptions.includes("--max-old-space-size")
   ? nodeOptions
   : `${nodeOptions} --max-old-space-size=8192`.trim();
 
+const buildEnv = {
+  ...process.env,
+  HOME: buildHome,
+  USERPROFILE: buildHome,
+  NODE_OPTIONS: buildNodeOptions,
+};
+
+// A build launched from the packaged standalone app can inherit these runtime-only
+// variables. The serialized config omits functions such as generateBuildId, which
+// makes a nested Next production build fail before compilation starts.
+delete buildEnv.__NEXT_PRIVATE_STANDALONE_CONFIG;
+delete buildEnv.__NEXT_PRIVATE_ORIGIN;
+
 const child = spawn(command, args, {
   cwd: root,
-  env: {
-    ...process.env,
-    HOME: buildHome,
-    USERPROFILE: buildHome,
-    NODE_OPTIONS: buildNodeOptions,
-  },
+  env: buildEnv,
   shell: process.platform === "win32",
   stdio: "inherit",
 });

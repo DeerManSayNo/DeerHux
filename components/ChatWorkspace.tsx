@@ -28,10 +28,10 @@ interface ChatWorkspaceProps {
   onFocusSlot: (slotIndex: number) => void;
   onClearSlot: (slotIndex: number) => void;
   onAgentEnd?: (sessionId: string, changedFiles?: string[]) => void;
-  onSessionCreated?: (session: SessionInfo, slotIndex: number) => void;
-  onSessionStarted?: (session: SessionInfo | null, slotIndex: number) => void;
+  onSessionCreated?: (session: SessionInfo, slotIndex: number, sourceSessionId: string | null) => void;
+  onSessionStarted?: (session: SessionInfo | null, slotIndex: number, sourceSessionId: string | null) => void;
   onAgentRunningChange?: (sessionId: string | null | undefined, running: boolean) => void;
-  onSessionForked?: (newSessionId: string, slotIndex: number) => void;
+  onSessionForked?: (newSessionId: string, slotIndex: number, sourceSessionId: string | null) => void;
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
@@ -41,6 +41,7 @@ interface ChatWorkspaceProps {
   projectOptions?: { cwd: string; displayName: string }[];
   onNewSessionCwdChange?: (cwd: string, slotIndex: number) => void;
   onOpenSession?: (sessionId: string) => void;
+  getSessionRenderKey: (sessionId: string) => string;
   getInputState: (slotIndex: number, sessionId: string) => ChatInputState | null;
   saveInputState: (slotIndex: number, sessionId: string, state: ChatInputState) => void;
 }
@@ -99,6 +100,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
     projectOptions,
     onNewSessionCwdChange,
     onOpenSession,
+    getSessionRenderKey,
     getInputState,
     saveInputState,
   } = props;
@@ -147,7 +149,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
 
           return (
             <section
-              key={index}
+              key={slotId ? getSessionRenderKey(slotId) : `empty-slot-${index}`}
               onMouseDown={() => onFocusSlot(index)}
               style={{
                 minWidth: 0,
@@ -295,11 +297,11 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                       session={activeSession}
                       newSessionCwd={newSessionCwd}
                       onAgentEnd={onAgentEnd}
-                      onSessionCreated={(created) => onSessionCreated?.(created, index)}
-                      onSessionStarted={(started) => onSessionStarted?.(started, index)}
+                      onSessionCreated={(created) => onSessionCreated?.(created, index, slotId)}
+                      onSessionStarted={(started) => onSessionStarted?.(started, index, slotId)}
                       onAgentRunningChange={onAgentRunningChange}
                       isSessionRunning={isRunning}
-                      onSessionForked={(newSessionId) => onSessionForked?.(newSessionId, index)}
+                      onSessionForked={(newSessionId) => onSessionForked?.(newSessionId, index, slotId)}
                       modelsRefreshKey={modelsRefreshKey}
                       chatInputRef={isFocused ? chatInputRef : undefined}
                       onSessionStatsChange={isFocused ? onSessionStatsChange : undefined}

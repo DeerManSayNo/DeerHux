@@ -27,6 +27,7 @@ import type { SessionInfo } from "@/lib/types";
 import { subscribeHostEvents } from "@/lib/agent-event-client";
 import type { ChatInputHandle, ChatInputState } from "./ChatInput";
 import { ChatDraftStore, clearCwdScopedDraftResources, promoteNewSessionDraft } from "@/lib/chat-drafts";
+import { getChatRenderKey, promoteChatRenderKey } from "@/lib/chat-render-keys";
 
 type SidebarMode = "open" | "closed";
 
@@ -127,6 +128,7 @@ export function AppShell() {
   const activeSessionTabIdRef = useRef<string | null>(null);
   const [chatSlotIds, setChatSlotIds] = useState<(string | null)[]>(() => Array(MAX_CHAT_WINDOWS).fill(null));
   const chatSlotIdsRef = useRef<(string | null)[]>(Array(MAX_CHAT_WINDOWS).fill(null));
+  const chatRenderKeysRef = useRef(new Map<string, string>());
   const chatDraftsRef = useRef(new ChatDraftStore<ChatInputState>());
   const [focusedChatSlotIndex, setFocusedChatSlotIndex] = useState(0);
   const focusedChatSlotIndexRef = useRef(0);
@@ -477,6 +479,9 @@ export function AppShell() {
     const nextSlotIds = chatSlotIdsRef.current.map((id, index) => (
       index === slotIndex ? nextTempId : id
     ));
+    // 项目变化意味着一个新的逻辑聊天。不要继承旧占位窗口的 React 身份，
+    // 否则旧项目的 Hook 状态、历史和迟到异步结果会进入新项目。
+    chatRenderKeysRef.current.delete(previousTempId);
 
     // 先同步所有 imperative ref，避免旧 ChatWindow 的异步回调把已切换的
     // 占位项或其他槽位重新写回状态。
@@ -629,6 +634,10 @@ export function AppShell() {
     setFocusedChatSlotIndex(slotIndex);
   }, []);
 
+  const getSessionRenderKey = useCallback((sessionId: string) => {
+    return getChatRenderKey(chatRenderKeysRef.current, sessionId);
+  }, []);
+
   const getChatDraft = useCallback((slotIndex: number, sessionId: string) => {
     return chatDraftsRef.current.get(slotIndex, sessionId);
   }, []);
@@ -648,6 +657,7 @@ export function AppShell() {
       return next;
     });
     if (removedSessionId) {
+      chatRenderKeysRef.current.delete(removedSessionId);
       const pendingId = pendingSessionIdsBySlotRef.current.get(slotIndex);
       if (pendingId) setSessionRunning(pendingId, false);
       pendingSessionIdsBySlotRef.current.delete(slotIndex);
@@ -820,10 +830,14 @@ export function AppShell() {
     replaceUrl("/");
   }, [getTargetChatSlotIndex, hasOpenChatWindowCapacity, placeSessionInFocusedSlot, replaceUrl, showChatWindowLimitMessage, topNewSessionCwd]);
 
-  const handleSessionStarted = useCallback((session: SessionInfo | null, slotIndex: number) => {
-    // A ChatWindow can finish starting after its project has been switched
-    // away. Do not recreate optimistic/running state for that old workspace.
-    if (session && activeCwdRef.current && session.cwd !== activeCwdRef.current) return;
+  const handleSessionStarted = useCallback((session: SessionInfo | null, slotIndex: number, sourceSessionId?: string | null) => {
+    // A ChatWindow can finish starting after its slot has switched to another
+    // session. Ignore every late callback from the old logical window.
+    if (sourceSessionId && chatSlotIdsRef.current[slotIndex] !== sourceSessionId) return;
+    const sourceSession = sourceSessionId
+      ? sessionTabsRef.current.find((candidate) => candidate.id === sourceSessionId)
+      : null;
+    if (session && sourceSession?.cwd && session.cwd !== sourceSession.cwd) return;
     if (!session) {
       const pendingId = pendingSessionIdsBySlotRef.current.get(slotIndex);
       if (pendingId) {
@@ -840,10 +854,15 @@ export function AppShell() {
   }, [setSessionRunning]);
 
   // Called by ChatWindow when a new session gets its real id from DeerHux
-  const handleSessionCreated = useCallback((session: SessionInfo, slotIndex = focusedChatSlotIndex) => {
-    // Ignore a completion from a ChatWindow that was removed by a project
-    // switch while its first request was still in flight.
-    if (activeCwdRef.current && session.cwd !== activeCwdRef.current) return;
+  const handleSessionCreated = useCallback((session: SessionInfo, slotIndex = focusedChatSlotIndex, sourceSessionId?: string | null) => {
+    // 回调必须仍属于发起它的槽位身份。仅凭 cwd 不够：同一项目内也可能在
+    // 请求期间换了 session；迟到的创建结果绝不能覆盖新窗口。
+    const currentSlotId = chatSlotIdsRef.current[slotIndex] ?? null;
+    if (sourceSessionId && currentSlotId !== sourceSessionId) return;
+    const sourceSession = sourceSessionId
+      ? sessionTabsRef.current.find((candidate) => candidate.id === sourceSessionId)
+      : null;
+    if (sourceSession?.cwd && session.cwd !== sourceSession.cwd) return;
     const pendingId = pendingSessionIdsBySlotRef.current.get(slotIndex);
     if (pendingId) setSessionRunning(pendingId, false);
     pendingSessionIdsBySlotRef.current.delete(slotIndex);
@@ -877,8 +896,10 @@ export function AppShell() {
       if (promotedDraft) chatDraftsRef.current.set(slotIndex, session.id, promotedDraft);
     }
     pendingTempTabIdsBySlotRef.current.delete(slotIndex);
-    // The placeholder is now a real session — remove from placeholder set
+    // The placeholder is now a real session. Preserve the ChatWindow identity
+    // so its optimistic user message and live stream survive id promotion.
     if (tempId) placeholderTabIdsRef.current.delete(tempId);
+    promoteChatRenderKey(chatRenderKeysRef.current, tempId, session.id);
     setChatSlotIds((prev) => {
       const next = prev.map((id) => (id === session.id || (tempId && id === tempId) ? null : id));
       next[slotIndex] = session.id;
@@ -909,14 +930,19 @@ export function AppShell() {
     }
   }, [focusedChatSlotIndex, replaceUrl, setSessionRunning]);
 
-  const handleSessionForked = useCallback((newSessionId: string, slotIndex = focusedChatSlotIndex) => {
+  const handleSessionForked = useCallback((newSessionId: string, slotIndex = focusedChatSlotIndex, sourceSessionId?: string | null) => {
+    const currentSlotId = chatSlotIdsRef.current[slotIndex] ?? null;
+    if (sourceSessionId && currentSlotId !== sourceSessionId) return;
     setRefreshKey((k) => k + 1);
-    const previousSessionId = chatSlotIds[slotIndex] ?? null;
+    const previousSessionId = currentSlotId;
     const previousSession = previousSessionId ? sessionTabs.find((tab) => tab.id === previousSessionId) ?? null : null;
     const forkedSession: SessionInfo = {
       ...(previousSession ?? selectedSession ?? { path: "", cwd: activeCwd ?? defaultCwd ?? "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
       id: newSessionId,
     };
+    // Fork 是新的独立 session，不是 id 升级。必须让旧 ChatWindow 卸载，
+    // 避免原 session 的消息缓存、订阅与异步请求跟进 fork 后的窗口。
+    if (previousSessionId) chatRenderKeysRef.current.delete(previousSessionId);
     setChatSlotIds((prev) => {
       const next = prev.map((id) => (id === newSessionId ? null : id));
       next[slotIndex] = newSessionId;
@@ -2041,6 +2067,7 @@ export function AppShell() {
                 projectOptions={headerProjectOptions}
                 onNewSessionCwdChange={handleNewSessionProjectChange}
                 onOpenSession={handleOpenSessionById}
+                getSessionRenderKey={getSessionRenderKey}
                 getInputState={getChatDraft}
                 saveInputState={saveChatDraft}
               />

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createSessionHistorySnapshotStore } from "../lib/session-history-snapshots.ts";
+import { getChatRenderKey, promoteChatRenderKey } from "../lib/chat-render-keys.ts";
+import { mergeFullSessionHistory } from "../lib/session-history-merge.ts";
 
 const message = (text: string) => ({ role: "user" as const, content: text });
 const snapshot = (text: string, fullHistoryLoaded = false) => ({
@@ -15,8 +17,62 @@ const snapshot = (text: string, fullHistoryLoaded = false) => ({
 // rather than reusing it for the worker and resetting its Hook state.
 {
   const workspace = readFileSync(new URL("../components/ChatWorkspace.tsx", import.meta.url), "utf8");
-  assert.match(workspace, /key=\{slotId \?\? `empty-slot-\$\{index\}`\}/);
+  assert.match(workspace, /key=\{slotId \? getSessionRenderKey\(slotId\) : `empty-slot-\$\{index\}`\}/);
   assert.doesNotMatch(workspace, /<section\s+key=\{index\}/);
+}
+
+// A placeholder adopting its durable session id is still the same ChatWindow.
+// Its render key must survive so optimistic messages and streaming state remain mounted.
+{
+  const renderKeys = new Map<string, string>();
+  assert.equal(getChatRenderKey(renderKeys, "temporary"), "temporary");
+  promoteChatRenderKey(renderKeys, "temporary", "durable");
+  assert.equal(getChatRenderKey(renderKeys, "durable"), "temporary");
+  assert.equal(renderKeys.has("temporary"), false);
+
+  // Fork/project switches are different logical chats and must not call promote.
+  renderKeys.delete("durable");
+  assert.equal(getChatRenderKey(renderKeys, "forked"), "forked");
+}
+
+// Loading full worker history while it is running must retain durable and
+// optimistic messages that arrived after the full-history snapshot was read.
+{
+  const merged = mergeFullSessionHistory(
+    [message("old"), message("overlap")],
+    ["entry-old", "entry-overlap"],
+    [message("overlap"), message("live"), { ...message("pending"), clientMessageId: "client-1" }],
+    ["entry-overlap", "entry-live", ""],
+  );
+  assert.deepEqual(merged.messages.map((item) => item.content), ["old", "overlap", "live", "pending"]);
+  assert.deepEqual(merged.entryIds, ["entry-old", "entry-overlap", "entry-live", ""]);
+}
+
+// Full-history loading must reconcile the durable snapshot before merging the
+// live tail. Reversing this order lets an appended optimistic copy confirm
+// itself and remain below the assistant response.
+{
+  const hook = readFileSync(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8");
+  const fullHistoryBlock = hook.slice(hook.indexOf("const loadFullHistory"), hook.indexOf("const loadTools"));
+  assert.match(
+    fullHistoryBlock,
+    /const reconciledLoaded = reconcilePendingUserMessages\([\s\S]*?const merged = mergeFullSessionHistory\(\s*reconciledLoaded\.messages/,
+  );
+}
+
+// A durable user message and its optimistic local copy are the same logical
+// message. Full-history loading must keep the durable position instead of
+// appending the local copy below the assistant response.
+{
+  const persistedUser = { ...message("question"), clientMessageId: "client-question" };
+  const merged = mergeFullSessionHistory(
+    [message("old"), persistedUser, { role: "assistant" as const, content: "answer" }],
+    ["entry-old", "entry-question", "entry-answer"],
+    [persistedUser],
+    [""],
+  );
+  assert.deepEqual(merged.messages.map((item) => item.content), ["old", "question", "answer"]);
+  assert.deepEqual(merged.entryIds, ["entry-old", "entry-question", "entry-answer"]);
 }
 
 // Snapshot identity is the session id, not the workspace slot. Moving the same
