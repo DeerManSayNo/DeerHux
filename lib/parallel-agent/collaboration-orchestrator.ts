@@ -508,18 +508,15 @@ async function executeCollaborationRun(runId: string, workerReservation?: Subage
         workerName: worker.name,
       }, current.model);
       workerSessions.push(workerSession);
-      updateCollaborationRun(runId, (run) => {
-        const target = run.workers[index];
-        if (target) {
-          target.status = "running";
-          target.sessionId = workerSession.sessionId;
-          target.workerSessionState = "running";
-          target.canContinue = false;
-          target.continueUnavailableReason = "Worker is still running.";
-        }
-      });
-      emitCollaborationRunEvent({ type: "worker_start", runId, workerId: worker.name });
-
+      // abort 可能发生在异步创建 Session 期间；创建完成后必须重新检查，
+      // 否则已中止的 run 仍会继续发送 prompt、执行工具并泄漏 runtime。
+      if (aborted) {
+        await workerSession.abort().catch(() => {});
+        workerSession.destroy();
+        return undefined;
+      }
+      // Session 此时只是创建完成，prompt 尚未通过准入。不要提前暴露 sessionId，
+      // 否则用户会打开一个 (no messages) 窗口，甚至与 worker 的启动链路竞争。
       unsubscribeWorkerEvents = workerSession.listen((event) => {
         emitCollaborationRunEvent({ type: "worker_event", runId, workerId: worker.name, event });
         updateWorkerToolActivity(runId, index, event);
@@ -545,6 +542,20 @@ async function executeCollaborationRun(runId: string, workerReservation?: Subage
               errorMessage: message,
             },
           });
+        },
+        () => {
+          // worker 已发出 agent_start：prompt 已完成准入并进入实际执行链路。
+          // 这是卡片允许打开 worker 会话的安全边界。
+          updateCollaborationRun(runId, (run) => {
+            const target = run.workers[index];
+            if (!target) return;
+            target.status = "running";
+            target.sessionId = workerSession.sessionId;
+            target.workerSessionState = "running";
+            target.canContinue = false;
+            target.continueUnavailableReason = "Worker is still running.";
+          });
+          emitCollaborationRunEvent({ type: "worker_start", runId, workerId: worker.name });
         },
       );
       unsubscribeWorkerEvents();

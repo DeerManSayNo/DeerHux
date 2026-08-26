@@ -237,9 +237,14 @@ export async function GET(
     const filePath = filePathFromSegments(segments);
     const type = request.nextUrl.searchParams.get("type") ?? "list";
 
-    const allowedRoots = await getAllowedRootsSafe();
+    let allowedRoots = await getAllowedRootsSafe();
     if (!isPathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      // The fast path intentionally uses cached session roots. Retry once with
+      // a fresh scan so a newly discovered historical project still works.
+      allowedRoots = await getAllowedRoots(true);
+      if (!isPathAllowed(filePath, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
     }
 
     let stat: fs.Stats;
@@ -333,28 +338,20 @@ export async function GET(
       return NextResponse.json({ error: "Not a directory" }, { status: 400 });
     }
 
-    const names = fs.readdirSync(filePath);
-    const entries = names
-      .filter((name) => !IGNORED_NAMES.has(name) && !IGNORED_SUFFIXES.some((s) => name.endsWith(s)))
-      .map((name) => {
-        const full = path.join(filePath, name);
+    const entries = fs.readdirSync(filePath, { withFileTypes: true })
+      .filter((entry) => !IGNORED_NAMES.has(entry.name) && !IGNORED_SUFFIXES.some((s) => entry.name.endsWith(s)))
+      .flatMap((entry) => {
+        if (!entry.isSymbolicLink()) return [{ name: entry.name, isDir: entry.isDirectory() }];
         try {
-          const s = fs.statSync(full);
-          return {
-            name,
-            isDir: s.isDirectory(),
-            size: s.isFile() ? s.size : 0,
-            modified: s.mtime.toISOString(),
-          };
+          return [{ name: entry.name, isDir: fs.statSync(path.join(filePath, entry.name)).isDirectory() }];
         } catch {
-          return null;
+          return [];
         }
       })
-      .filter(Boolean)
       .sort((a, b) => {
         // Dirs first, then files, both alphabetically
-        if (a!.isDir !== b!.isDir) return a!.isDir ? -1 : 1;
-        return a!.name.localeCompare(b!.name);
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
       });
 
     return NextResponse.json({ entries, path: filePath });

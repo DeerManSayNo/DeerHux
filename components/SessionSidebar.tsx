@@ -21,6 +21,7 @@ type RunningSessionStatus = {
   eventRate: number;
   eventIdleMs: number | null;
   contentIdleMs: number | null;
+  updatedAt?: number;
 };
 
 interface Props {
@@ -64,10 +65,13 @@ function formatSecondsFromMs(ms: number | null | undefined): string {
   return `${Math.max(0, Math.floor(ms / 1000))}s`;
 }
 
-function formatRunningStatus(status: RunningSessionStatus): string {
+function formatRunningStatus(status: RunningSessionStatus, now: number): string {
   const eventName = status.isCompacting ? "compacting" : status.lastEventType || "running";
   const rate = Number.isFinite(status.eventRate) ? status.eventRate : 0;
-  return `${eventName} · ${rate.toFixed(1)}/s · 事件 ${formatSecondsFromMs(status.eventIdleMs)} · 内容 ${formatSecondsFromMs(status.contentIdleMs)}`;
+  const elapsedSinceSnapshot = status.updatedAt ? Math.max(0, now - status.updatedAt) : 0;
+  const eventIdleMs = status.eventIdleMs == null ? null : status.eventIdleMs + elapsedSinceSnapshot;
+  const contentIdleMs = status.contentIdleMs == null ? null : status.contentIdleMs + elapsedSinceSnapshot;
+  return `${eventName} · ${rate.toFixed(1)}/s · 事件 ${formatSecondsFromMs(eventIdleMs)} · 内容 ${formatSecondsFromMs(contentIdleMs)}`;
 }
 
 interface ProjectGroup {
@@ -1843,15 +1847,23 @@ function SessionItem({
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [statusClock, setStatusClock] = useState(() => Date.now());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; copied: boolean } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const contextMenuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   const sessionInitial = getInitial(title);
+  const hasRunningStatus = Boolean(runningStatus);
   const isRunning = Boolean(runningStatus?.isStreaming || runningStatus?.isCompacting);
-  const runningText = runningStatus ? formatRunningStatus(runningStatus) : null;
+  const runningText = runningStatus ? formatRunningStatus(runningStatus, statusClock) : null;
   const projectName = getProjectName(session.cwd);
+
+  useEffect(() => {
+    if (!hasRunningStatus) return;
+    const timer = window.setInterval(() => setStatusClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [hasRunningStatus]);
 
   const startRename = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();

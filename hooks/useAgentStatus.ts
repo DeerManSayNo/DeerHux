@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import type { WatchdogInfo } from "./useAgentSession";
 
 /** 服务端 getStatus() 返回的数据 */
@@ -36,6 +36,14 @@ export function useAgentStatus(
   const POLL_INTERVAL_MS = 2000;
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollingGenerationRef = useRef(0);
+
+  // 新回合或会话切换时，必须在浏览器绘制前清掉上一轮的空闲计时，
+  // 避免旧 eventIdleMs/contentIdleMs 以强调色状态胶囊闪现一帧。
+  useLayoutEffect(() => {
+    pollingGenerationRef.current += 1;
+    setServerStatus(null);
+  }, [sessionId, agentRunning, paused]);
 
   useEffect(() => {
     // Clear any existing timer
@@ -50,6 +58,7 @@ export function useAgentStatus(
     }
 
     const abortController = new AbortController();
+    const pollingGeneration = pollingGenerationRef.current;
 
     const poll = () => {
       fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
@@ -58,7 +67,7 @@ export function useAgentStatus(
       })
         .then((r) => r.json())
         .then((d: { running?: boolean; status?: ServerStatus }) => {
-          if (d.status) {
+          if (d.status && pollingGenerationRef.current === pollingGeneration) {
             setServerStatus(d.status);
           }
         })

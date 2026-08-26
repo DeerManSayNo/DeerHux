@@ -7,15 +7,12 @@ import { encodeFilePathForApi, getRelativeFilePath, joinFilePath } from "@/lib/f
 interface FileEntry {
   name: string;
   isDir: boolean;
-  size: number;
-  modified: string;
 }
 
 interface FileNode {
   name: string;
   fullPath: string;
   isDir: boolean;
-  size: number;
   children?: FileNode[];
   loaded?: boolean;
 }
@@ -30,19 +27,40 @@ interface Props {
   onExplorerStateChange?: (state: { expandedPaths: string[]; activePath: string | null }) => void;
 }
 
-async function fetchEntries(dirPath: string): Promise<FileNode[]> {
-  const encoded = encodeFilePathForApi(dirPath);
-  const res = await fetch(`/api/files/${encoded}?type=list`);
-  if (!res.ok) return [];
-  const data = await res.json() as { entries?: FileEntry[] };
-  return (data.entries ?? []).map((e) => ({
-    name: e.name,
-    fullPath: joinFilePath(dirPath, e.name),
-    isDir: e.isDir,
-    size: e.size,
-    children: e.isDir ? [] : undefined,
-    loaded: !e.isDir,
-  }));
+const DIRECTORY_CACHE_TTL_MS = 30_000;
+const directoryCache = new Map<string, { entries: FileNode[]; expiresAt: number }>();
+const directoryRequests = new Map<string, Promise<FileNode[]>>();
+
+async function fetchEntries(dirPath: string, force = false): Promise<FileNode[]> {
+  if (!force) {
+    const cached = directoryCache.get(dirPath);
+    if (cached && cached.expiresAt > Date.now()) return cached.entries;
+    const pending = directoryRequests.get(dirPath);
+    if (pending) return pending;
+  }
+
+  const request = (async () => {
+    const encoded = encodeFilePathForApi(dirPath);
+    const res = await fetch(`/api/files/${encoded}?type=list`);
+    if (!res.ok) throw new Error(`加载目录失败 (${res.status})`);
+    const data = await res.json() as { entries?: FileEntry[] };
+    const entries = (data.entries ?? []).map((entry) => ({
+      name: entry.name,
+      fullPath: joinFilePath(dirPath, entry.name),
+      isDir: entry.isDir,
+      children: entry.isDir ? [] : undefined,
+      loaded: !entry.isDir,
+    }));
+    directoryCache.set(dirPath, { entries, expiresAt: Date.now() + DIRECTORY_CACHE_TTL_MS });
+    return entries;
+  })();
+
+  directoryRequests.set(dirPath, request);
+  try {
+    return await request;
+  } finally {
+    if (directoryRequests.get(dirPath) === request) directoryRequests.delete(dirPath);
+  }
 }
 
 function TreeNode({
@@ -79,7 +97,7 @@ function TreeNode({
     if (loaded && !force) return;
     setLoading(true);
     try {
-      const entries = await fetchEntries(node.fullPath);
+      const entries = await fetchEntries(node.fullPath, force);
       setChildren(entries);
       setLoaded(true);
     } catch {
@@ -340,7 +358,7 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, initial
 
     setLoading(cwdChanged);
     setError(null);
-    fetchEntries(cwd)
+    fetchEntries(cwd, !cwdChanged)
       .then((entries) => setRoots(entries))
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));

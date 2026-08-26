@@ -88,7 +88,7 @@ function composeBaseSystemPrompt(resources: BaseSystemPromptResources): string {
   const basePrompt = resources.customPrompt?.trim() || [
     "You are an expert coding assistant operating inside DeerHux, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
     "Available tools:\n(none)",
-    "Guidelines:\n- Be concise in your responses\n- Show file paths clearly when working with files",
+    "Guidelines:\n- 默认使用中文回复。\n- 执行前先简要复述对用户目标和关键约束的理解，再执行。\n- 输出从第一性原理出发，客观理性，拒绝鼓励式言论，拒绝“不是，而是”句式",
   ].join("\n\n");
   const parts = [basePrompt];
   const appendPrompt = resources.appendSystemPrompt

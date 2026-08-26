@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import type { CollaborationMuxSnapshot } from "@/lib/parallel-agent/collaboration-mux";
@@ -674,6 +674,20 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       removedCollaborationRunIdsRef.current.delete(snapshot.runId);
       if (liveCollaborationRunsRef.current.has(snapshot.runId)) {
         knownSnapshots.push(snapshot);
+        // Mux 不携带 sessionId；当 worker 发出 agent_start 后，用 sessionReady
+        // 触发一次详情水合，让卡片立即在安全边界解锁。
+        const previous = liveCollaborationRunsRef.current.get(snapshot.runId);
+        const becameReady = snapshot.workers.some((worker) => {
+          if (!worker.sessionReady) return false;
+          const oldWorker = previous?.workers.find((candidate) =>
+            (worker.workerId && candidate.workerId === worker.workerId) || candidate.name === worker.name
+          );
+          return !oldWorker?.sessionId;
+        });
+        if (becameReady) {
+          pendingRunMuxSnapshotsRef.current.set(snapshot.runId, snapshot);
+          void hydrateCollaborationRun(snapshot.runId);
+        }
         continue;
       }
 
@@ -1153,14 +1167,14 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    const liveEnd = liveStreamEndRef.current;
-    if (isRunning && liveEnd) {
-      liveEnd.scrollIntoView({ block: "end", behavior });
-      return;
-    }
-
-    container.scrollTo({ top: container.scrollHeight - container.clientHeight, behavior });
-  }, [isRunning, scrollContainerRef]);
+    // 只滚动聊天容器。scrollIntoView() 会连带调整外层可滚动祖先，并在流式
+    // DOM 高频增长时与浏览器 scroll anchoring 竞争，表现为先跳到消息统计行、
+    // 下一帧再回到底部。
+    container.scrollTo({
+      top: Math.max(0, container.scrollHeight - container.clientHeight),
+      behavior,
+    });
+  }, [scrollContainerRef]);
 
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -1263,17 +1277,14 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     wasRunningRef.current = isRunning;
   }, [isRunning, scrollContainerRef]);
 
-  useEffect(() => {
-    if (!isRunning) return;
-    if (!shouldAutoScrollRef.current) return;
+  useLayoutEffect(() => {
+    if (!isRunning || !shouldAutoScrollRef.current) return;
 
-    const frame = requestAnimationFrame(() => {
-      if (shouldAutoScrollRef.current) {
-        scrollToLiveBottom("auto");
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [isRunning, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom, scrollContainerRef]);
+    // 流式 Markdown 会在一次 React 提交中重建并重排块级 DOM。必须在浏览器
+    // 绘制前同步追底；若放到 useEffect + requestAnimationFrame，浏览器会先画出
+    // “新 DOM + 旧 scrollTop”的中间帧（视口落在模型统计行），下一帧才回到底部。
+    scrollToLiveBottom("auto");
+  }, [isRunning, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !isRunning;
   const contentMaxWidth = compact ? 640 : 820;
@@ -1774,7 +1785,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
           onWheel={markUserScrollIntent}
           onTouchStart={markUserScrollIntent}
           className={`${compact ? "pt-3" : "pt-4"} flex-1 overflow-y-auto scrollbar-none [scrollbar-width:none]`}
-          style={{ overflowX: "hidden" }}
+          style={{ overflowX: "hidden", overflowAnchor: "none" }}
         >
           <div className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingBottom: compact ? 12 : 18 }}>
 
@@ -1959,9 +1970,9 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               <ChangedFilesList
                 files={changedFiles}
                 cwd={session?.cwd ?? newSessionCwd ?? null}
-                onOpenFile={onOpenFile ? (fp) => {
-                  const name = fp.split(/[\\/]/).filter(Boolean).pop() ?? fp;
-                  onOpenFile(fp, name);
+                onOpenFile={onOpenFile ? (filePath) => {
+                  const fileName = filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
+                  onOpenFile(filePath, fileName);
                 } : undefined}
               />
             )}

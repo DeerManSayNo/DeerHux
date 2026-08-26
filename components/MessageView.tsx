@@ -72,7 +72,7 @@ function formatTime(ts?: number): string | null {
   const isToday = d.getFullYear() === now.getFullYear() &&
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate();
-  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   if (isToday) return time;
   const date = d.toLocaleDateString([], { month: "short", day: "numeric", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
   return `${date} ${time}`;
@@ -469,7 +469,8 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
     );
   };
 
-  const hasSideMeta = systemPrompt !== undefined || displayReferences.length > 0;
+  const time = formatTime(message.timestamp);
+  const hasSideMeta = systemPrompt !== undefined || displayReferences.length > 0 || time !== null;
 
   return (
     <div style={{ marginBottom: 24, display: "flex", justifyContent: "center", width: "100%" }}>
@@ -490,7 +491,12 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
           }}
         >
           <div style={{ flexShrink: 0 }}>{renderSystemPromptChip()}</div>
-          <div style={{ minWidth: 0 }}>{renderReferenceChips()}</div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, minWidth: 0 }}>
+            {renderReferenceChips()}
+            {time && (
+              <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{time}</span>
+            )}
+          </div>
         </div>
       )}
       {!expanded ? (
@@ -662,7 +668,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
             </button>
         </div>
       )}
-      {message.deliveryState && message.deliveryState !== "accepted" && (
+      {(message.deliveryState === "unknown" || message.deliveryState === "failed") && (
         <div
           role="status"
           style={{
@@ -683,24 +689,21 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
           title={message.deliveryError}
         >
           <span>
-            {message.deliveryState === "submitting" && "正在确认服务端接收…"}
             {message.deliveryState === "unknown" && "暂时无法确认是否已接收，安全重试不会重复执行"}
             {message.deliveryState === "failed" && `发送失败${message.deliveryError ? `：${message.deliveryError}` : ""}`}
           </span>
-          {(message.deliveryState === "unknown" || message.deliveryState === "failed") && (
-            <span style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-              {onRestoreToInput && (
-                <button type="button" onClick={() => onRestoreToInput(message)} style={{ border: "none", background: "transparent", color: "inherit", cursor: "pointer", padding: "2px 4px", fontWeight: 600 }}>
-                  恢复到输入框
-                </button>
-              )}
-              {onRetryDelivery && (
-                <button type="button" onClick={() => onRetryDelivery(message)} style={{ border: "1px solid currentColor", borderRadius: 6, background: "transparent", color: "inherit", cursor: "pointer", padding: "3px 7px", fontWeight: 600 }}>
-                  安全重试
-                </button>
-              )}
-            </span>
-          )}
+          <span style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {onRestoreToInput && (
+              <button type="button" onClick={() => onRestoreToInput(message)} style={{ border: "none", background: "transparent", color: "inherit", cursor: "pointer", padding: "2px 4px", fontWeight: 600 }}>
+                恢复到输入框
+              </button>
+            )}
+            {onRetryDelivery && (
+              <button type="button" onClick={() => onRetryDelivery(message)} style={{ border: "1px solid currentColor", borderRadius: 6, background: "transparent", color: "inherit", cursor: "pointer", padding: "3px 7px", fontWeight: 600 }}>
+                安全重试
+              </button>
+            )}
+          </span>
         </div>
       )}
       {showSystemPromptModal && systemPrompt && (

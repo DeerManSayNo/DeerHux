@@ -291,7 +291,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     },
   }));
 
-  const processImageFiles = useCallback(async (files: File[]) => {
+  const processImageFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((f) => f.type.startsWith("image/"));
     if (!imageFiles.length) return;
     if (!cwd) {
@@ -300,35 +300,42 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
 
     setImageUploadError(null);
-    try {
-      const newImages = await Promise.all(
-        imageFiles.map(async (file) => {
-          // Upload image to server, save as file in project assets/chats/
-          const formData = new FormData();
-          formData.append("image", file);
-          formData.append("cwd", cwd);
-          const res = await fetch("/api/chat-image-upload", {
-            method: "POST",
-            body: formData,
-          });
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: "图片上传失败" }));
-            throw new Error(err.error || "图片上传失败");
-          }
-          const result = await res.json() as { path: string; url: string; mimeType: string };
-          return {
-            data: "",
-            mimeType: result.mimeType,
-            previewUrl: URL.createObjectURL(file),
-            filePath: result.path,
-            fileUrl: result.url,
-          };
-        })
-      );
-      setAttachedImages((prev) => [...prev, ...newImages]);
-    } catch (error) {
-      setImageUploadError(error instanceof Error ? error.message : "图片上传失败");
-    }
+    const pendingImages = imageFiles.map((file) => ({
+      data: "",
+      mimeType: file.type,
+      previewUrl: URL.createObjectURL(file),
+    }));
+
+    // 先用本地 Object URL 立即展示，文件上传和落盘在后台完成。
+    setAttachedImages((prev) => [...prev, ...pendingImages]);
+
+    imageFiles.forEach(async (file, index) => {
+      const pendingImage = pendingImages[index];
+      try {
+        const formData = new FormData();
+        formData.append("image", file);
+        formData.append("cwd", cwd);
+        const res = await fetch("/api/chat-image-upload", {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "图片上传失败" }));
+          throw new Error(err.error || "图片上传失败");
+        }
+        const result = await res.json() as { path: string; url: string; mimeType: string };
+        setAttachedImages((prev) => prev.map((image) => image.previewUrl === pendingImage.previewUrl
+          ? { ...image, mimeType: result.mimeType, filePath: result.path, fileUrl: result.url }
+          : image));
+      } catch (error) {
+        setAttachedImages((prev) => {
+          if (!prev.some((image) => image.previewUrl === pendingImage.previewUrl)) return prev;
+          URL.revokeObjectURL(pendingImage.previewUrl);
+          return prev.filter((image) => image.previewUrl !== pendingImage.previewUrl);
+        });
+        setImageUploadError(error instanceof Error ? error.message : "图片上传失败");
+      }
+    });
   }, [cwd]);
 
   const removeImage = useCallback((index: number) => {
@@ -398,6 +405,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const references = fileReferences.length ? [...fileReferences] : undefined;
     const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
     if (!msg && !attachedImages.length && !skill) return;
+    if (attachedImages.some((image) => !image.fileUrl && !image.data)) return;
     if (isStreamingRef.current) return;
     if (sendInFlightRef.current) return;
     sendInFlightRef.current = true;
@@ -425,6 +433,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const references = fileReferences.length ? [...fileReferences] : undefined;
     const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
     if (!msg && !attachedImages.length && !skill) return;
+    if (attachedImages.some((image) => !image.fileUrl && !image.data)) return;
     const images = attachedImages.length ? attachedImages : undefined;
     clearSubmittedInput();
     if (mode === "steer" && onSteer) {
@@ -797,7 +806,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const selectedRole = roles.find((r) => r.id === currentRoleId) ?? roles.find((r) => r.id === "default");
   const roleSettingCount = selectedRole ? Object.values(selectedRole.blocks ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0) : 0;
-  const hasSendableContent = Boolean(value.trim() || attachedImages.length || selectedSkill);
+  const isUploadingImages = attachedImages.some((image) => !image.fileUrl && !image.data);
+  const hasSendableContent = Boolean(value.trim() || attachedImages.length || selectedSkill) && !isUploadingImages;
   const hasFileReferences = fileReferences.length > 0;
   const retryNoticeKey = retryInfo
     ? [
@@ -973,8 +983,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <img
                   src={img.previewUrl}
                   alt=""
-                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
+                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block", opacity: img.fileUrl || img.data ? 1 : 0.65 }}
                 />
+                {!img.fileUrl && !img.data && (
+                  <span
+                    role="status"
+                    aria-label="图片上传中"
+                    title="图片上传中"
+                    style={{
+                      position: "absolute", inset: 0,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      color: "#fff", background: "rgba(0,0,0,0.18)", borderRadius: 6,
+                    }}
+                  >
+                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+                      <path d="M21 12a9 9 0 1 1-6.2-8.6" />
+                    </svg>
+                  </span>
+                )}
                 <button
                   onClick={() => removeImage(i)}
                   style={{
@@ -1508,7 +1534,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               type="button"
               onClick={handleSend}
               disabled={!hasSendableContent}
-              title={agentMode === "plan" ? "生成计划" : agentMode === "ask" ? "发送 Ask" : "发送 Agent"}
+              title={isUploadingImages ? "图片上传中" : agentMode === "plan" ? "生成计划" : agentMode === "ask" ? "发送 Ask" : "发送 Agent"}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",

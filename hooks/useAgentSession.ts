@@ -251,6 +251,7 @@ interface StreamingState {
 
 type StreamAction =
   | { type: "start" }
+  | { type: "resume" }
   | { type: "update"; message: Partial<AgentMessage> }
   | { type: "end" }
   | { type: "reset" };
@@ -259,6 +260,11 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
   switch (action.type) {
     case "start":
       return { isStreaming: true, streamingMessage: null };
+    case "resume":
+      // 运行态快照只负责校正 streaming 标志，不能清空已渲染的流式消息。
+      // 后端流事件期间约每秒广播一次快照；若复用 start，会让 bubble 周期性
+      // 卸载、容器高度骤降，再在下一条 message_update 到来时恢复，造成闪跳。
+      return state.isStreaming ? state : { ...state, isStreaming: true };
     case "update":
       return { isStreaming: true, streamingMessage: action.message };
     case "end":
@@ -1030,28 +1036,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         model: { provider: string; modelId: string } | null;
         roleId?: string | null;
         agentMode?: AgentMode;
-        page: { limit: number; returned: number; hasMoreBefore: boolean };
+        page: { limit: number; returned: number; hasMoreBefore: boolean; preservedFirst?: boolean; preservedPrefixCount?: number };
       };
       if (sid !== sessionIdRef.current) return;
       const requestIsLatest = snapshotRequestSeq === messageSnapshotRequestSeqRef.current;
       if (!requestIsLatest) return;
       const messagesAreCurrent = (
         messageEpochAtStart === messageMutationEpochRef.current
-        && !agentRunningRef.current
+        // 首次前台打开一个正在运行的 session 时，SSE transient 基线会先把
+        // running 置为 true。前台打开时仍须应用初始 JSONL 快照，否则订阅前
+        // 已落盘的 user prompt（尤其是 subagent 任务设定）会永久缺失；这也能
+        // 修复此前缓存过的不完整 worker 窗口。请求期间若收到
+        // message_end，messageMutationEpoch 会变化，仍能阻止旧快照覆盖实时消息。
+        && (!agentRunningRef.current || showLoading)
       );
-      // 已加载完整历史时，以 recent 窗口首个 entryId 为锚点替换尾部，
+      // 已加载完整历史时，以 recent 连续窗口的首个 entryId 为锚点替换尾部，
       // 保留旧消息又同步最终 Assistant/ToolResult；锚点缺失时仅更新元数据。
-      const recentAnchor = d.entryIds[0];
-      const anchorIndex = fullHistoryLoadedRef.current && recentAnchor
-        ? entryIdsRef.current.indexOf(recentAnchor)
+      // 分页页可能是「额外保留的回合边界 + 最新连续窗口」。已加载完整历史时
+      // 不能把这些前缀当连续窗口锚点，否则会误删中间历史。
+      const recentWindowStart = Math.max(0, d.page?.preservedPrefixCount ?? (d.page?.preservedFirst ? 1 : 0));
+      const mergeAnchor = d.entryIds[recentWindowStart];
+      const mergeAnchorIndex = fullHistoryLoadedRef.current && mergeAnchor
+        ? entryIdsRef.current.indexOf(mergeAnchor)
         : -1;
-      const mergedMessages = fullHistoryLoadedRef.current && anchorIndex >= 0
-        ? [...messagesRef.current.slice(0, anchorIndex), ...d.messages]
-        : d.messages;
-      const mergedEntryIds = fullHistoryLoadedRef.current && anchorIndex >= 0
-        ? [...entryIdsRef.current.slice(0, anchorIndex), ...d.entryIds]
-        : d.entryIds;
-      const historyWasRebased = fullHistoryLoadedRef.current && anchorIndex < 0;
+      const preservedPrefixMessages = d.messages.slice(0, recentWindowStart);
+      const preservedPrefixEntryIds = d.entryIds.slice(0, recentWindowStart);
+      const mergedMessages = fullHistoryLoadedRef.current && mergeAnchorIndex >= 0
+        ? [...messagesRef.current.slice(0, mergeAnchorIndex), ...d.messages.slice(recentWindowStart)]
+        : [...preservedPrefixMessages, ...d.messages.slice(recentWindowStart)];
+      const mergedEntryIds = fullHistoryLoadedRef.current && mergeAnchorIndex >= 0
+        ? [...entryIdsRef.current.slice(0, mergeAnchorIndex), ...d.entryIds.slice(recentWindowStart)]
+        : [...preservedPrefixEntryIds, ...d.entryIds.slice(recentWindowStart)];
+      const historyWasRebased = fullHistoryLoadedRef.current && mergeAnchorIndex < 0;
       const applyRecentMessages = messagesAreCurrent;
       if (applyRecentMessages && historyWasRebased) fullHistoryLoadedRef.current = false;
       // Shape into SessionData so applySessionSnapshot handles normalization
@@ -1312,7 +1328,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(snapshot.running);
     setIsCompacting(snapshot.isCompacting);
     if (snapshot.thinkingLevel) setThinkingLevel(snapshot.thinkingLevel as ThinkingLevelOption);
-    if (snapshot.isStreaming) dispatch({ type: "start" });
+    if (snapshot.isStreaming) dispatch({ type: "resume" });
     else if (!snapshot.running) dispatch({ type: "end" });
     if (snapshot.running) {
       setAgentPhase((phase) => phase ?? { kind: "waiting_model", reason: "restored" });

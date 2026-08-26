@@ -13,7 +13,7 @@
 import { readSessionFileCached } from "../session-reader";
 import { normalizeAgentMode, type AgentMode } from "../agent-modes";
 import type { AgentMessage } from "../types";
-import { isSessionPagingEnabled } from "./paging-policy";
+import { getRecentMessageIndexes, isSessionPagingEnabled } from "./paging-policy";
 
 /**
  * Response shape for GET /api/sessions/:id/messages.
@@ -35,6 +35,10 @@ export interface SessionMessagesResult {
     returned: number;
     /** Whether there are older messages not included in this page. */
     hasMoreBefore: boolean;
+    /** subagent 长会话是否额外保留了首条任务设定。 */
+    preservedFirst?: boolean;
+    /** 最近连续窗口之前额外保留的消息数（例如当前回合的 user 起点）。 */
+    preservedPrefixCount?: number;
   };
 }
 
@@ -67,11 +71,38 @@ export function readRecentMessages(
   const allEntryIds = context.entryIds;
   const total = all.length;
 
-  // The most recent N messages sit at the tail of the array. entryIds is
-  // parallel to messages, so we slice the same window.
-  const start = Math.max(0, total - effectiveLimit);
-  const messages = all.slice(start);
-  const entryIds = allEntryIds.slice(start);
+  // Worker 的首条 user message 保存了完整 subagent 设定。工具密集型任务超过
+  // 分页上限后仍须保留它，否则点击 worker 卡片只能看到后半段执行记录。
+  // registry 可能被旧版本/手工清理，因此同时兼容稳定的 worker prompt 标记。
+  const first = all[0];
+  const firstText = first?.role === "user" && typeof first.content === "string" ? first.content : "";
+  const preserveFirst = firstText.includes("## 用户总体问题") && firstText.includes("## 你负责的子任务");
+
+  // 最近 N 条可能落在一个工具密集回合的中部。若该回合的 user 起点在窗口外，
+  // 前端发送时保留的 pending user 无法与快照对账，最终会被错误追加到会话底部。
+  // 为当前尾部回合的 user 消息保留一个名额，使首屏既有正确的回合边界，也能
+  // 通过 clientMessageId 消除 pending 气泡。
+  const rawTailStart = Math.max(0, total - effectiveLimit);
+  let tailTurnStart = -1;
+  for (let index = rawTailStart; index >= 0; index--) {
+    if (all[index]?.role === "user") {
+      tailTurnStart = index;
+      break;
+    }
+  }
+  const preserveTailTurnStart = tailTurnStart >= 0 && tailTurnStart < rawTailStart;
+  const preservedPrefixCount = new Set([
+    ...(preserveFirst && total > effectiveLimit ? [0] : []),
+    ...(preserveTailTurnStart ? [tailTurnStart] : []),
+  ]).size;
+  const indexes = getRecentMessageIndexes(
+    total,
+    effectiveLimit,
+    preserveFirst,
+    preserveTailTurnStart ? [tailTurnStart] : [],
+  );
+  const messages = indexes.map((index) => all[index]);
+  const entryIds = indexes.map((index) => allEntryIds[index]);
 
   return {
     sessionId,
@@ -85,7 +116,9 @@ export function readRecentMessages(
     page: {
       limit: effectiveLimit,
       returned: messages.length,
-      hasMoreBefore: start > 0,
+      hasMoreBefore: total > messages.length,
+      ...(preserveFirst && total > effectiveLimit ? { preservedFirst: true } : {}),
+      ...(preservedPrefixCount > 0 ? { preservedPrefixCount } : {}),
     },
   };
 }

@@ -12,7 +12,7 @@ const SUBAGENT_MAX_TOOL_ROUNDS = 100;
 
 export type WorkerSession = {
   sessionId: string;
-  sendPrompt: (message: string) => Promise<string>;
+  sendPrompt: (message: string, onStarted?: () => void) => Promise<string>;
   setModel: (model: RecoveryModel) => Promise<void>;
   listen: (listener: (event: AgentEvent) => void) => () => void;
   abort: () => Promise<void>;
@@ -80,7 +80,7 @@ export async function createSubagentWorkerSession(
 
   const workerSession: WorkerSession = {
     sessionId: realSessionId,
-    sendPrompt: (message: string) => new Promise((resolve, reject) => {
+    sendPrompt: (message: string, onStarted?: () => void) => new Promise((resolve, reject) => {
       let settled = false;
       let timeout: ReturnType<typeof setTimeout> | null = null;
       const settle = (fn: () => void) => {
@@ -101,6 +101,10 @@ export async function createSubagentWorkerSession(
       resetTimeout();
       unsubscribe = session.onEvent((event: AgentEvent) => {
         resetTimeout();
+        if (event.type === "agent_start") {
+          try { onStarted?.(); } catch { /* UI readiness must not fail a started worker turn */ }
+          return;
+        }
         if (event.type === "message_end") {
           const completed = event.message as typeof lastAssistant;
           if (completed?.role === "assistant") lastAssistant = completed;
@@ -142,8 +146,15 @@ export async function runWorkerPromptWithRecovery(
   prompt: string,
   recoveryModels: RecoveryModel[],
   onRetry: (model: RecoveryModel, attempt: number, error: unknown) => void,
+  onStarted?: () => void,
 ): Promise<string> {
   let lastError: unknown;
+  let startedNotified = false;
+  const notifyStarted = () => {
+    if (startedNotified) return;
+    startedNotified = true;
+    onStarted?.();
+  };
   for (let attempt = 0; attempt <= recoveryModels.length; attempt += 1) {
     const fallbackModel = attempt > 0 ? recoveryModels[attempt - 1] : null;
     try {
@@ -158,7 +169,7 @@ export async function runWorkerPromptWithRecovery(
       const retryPrefix = fallbackModel
         ? `上一轮子 Agent 请求失败，已切换到自动恢复模型 ${fallbackModel.provider}/${fallbackModel.modelId}。请重新完成同一个子任务，不要依赖上一轮失败输出。\n\n`
         : "";
-      return await workerSession.sendPrompt(`${retryPrefix}${prompt}`);
+      return await workerSession.sendPrompt(`${retryPrefix}${prompt}`, notifyStarted);
     } catch (error) {
       lastError = error;
       if (!isRecoverableModelError(error) || attempt >= recoveryModels.length) break;

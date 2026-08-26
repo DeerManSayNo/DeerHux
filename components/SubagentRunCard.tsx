@@ -126,7 +126,8 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
           overflowX: "auto",
           overflowY: "hidden",
           flexWrap: "nowrap",
-          paddingBottom: 2,
+          // 横向滚动容器会裁切纵向溢出；为 hover 上浮和阴影预留空间。
+          padding: "8px 0",
           WebkitMaskImage: cardsMaskImage,
           maskImage: cardsMaskImage,
         }}
@@ -193,13 +194,17 @@ const WORKFLOW_LABELS: Record<SubagentWorkflow, string> = {
 };
 
 /** 单个 subagent 卡牌：竖向卡牌布局，实时展示状态 + 任务 + 工具调用 + 输出 */
-function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerState; onOpenSession?: (sessionId: string) => void }) {
+function WorkerCard({ worker, onOpenSession }: {
+  worker: CollaborationWorkerState;
+  onOpenSession?: (sessionId: string) => void;
+}) {
   const color = statusColor(worker.status);
   const label = worker.title ?? worker.name;
   const isRunning = worker.status === "running";
   const isTerminal = worker.status === "complete" || worker.status === "error" || worker.status === "aborted";
-  // 运行中始终可点击（即使 sessionId 尚未同步到快照），终结态需要有 sessionId
-  const canClick = Boolean(onOpenSession && (worker.sessionId || isRunning));
+  // sessionId 只会在服务端确认 prompt 已 accepted、设定消息已持久化后暴露。
+  // 在此之前必须阻断点击，避免打开 (no messages) 的空 worker 会话。
+  const canClick = Boolean(onOpenSession && worker.sessionId);
   const modeLabel = worker.agentType ? MODE_LABELS[worker.agentType] : undefined;
   const [hovered, setHovered] = useState(false);
 
@@ -216,7 +221,7 @@ function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerStat
 
   return (
     <div
-      onClick={canClick ? () => { if (worker.sessionId) onOpenSession!(worker.sessionId); } : undefined}
+      onClick={canClick ? () => onOpenSession!(worker.sessionId!) : undefined}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
@@ -322,9 +327,9 @@ function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerStat
       </div>
 
       {/* footer：跳转提示 */}
-      {Boolean(worker.sessionId && onOpenSession) && (
+      {Boolean(onOpenSession && (canClick || worker.status === "pending" || isRunning)) && (
         <span style={{ fontSize: 10.5, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 3, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
-          ↗ 点击查看完整会话
+          {canClick ? "↗ 点击查看完整会话" : "正在整理并发送任务…"}
         </span>
       )}
     </div>

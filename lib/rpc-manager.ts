@@ -413,6 +413,7 @@ export class AgentSessionWrapper {
   private lastContentAt = 0;
   private eventCount = 0;
   private runStartedAt = 0;
+  private lastHostStatusEmitAt = 0;
   private lastContentLength = 0;
   /** Tracks whether an agent turn is actively running (agent_start → agent_end).
    *  Unlike isStreaming, this stays true during gaps between tool execution
@@ -1038,6 +1039,7 @@ export class AgentSessionWrapper {
   }
 
   private emitHostState(updatedAt = Date.now()): void {
+    this.lastHostStatusEmitAt = updatedAt;
     const status = this.getStatus();
     hostEventBus.emit({
       type: "host_running_snapshot",
@@ -1118,6 +1120,9 @@ export class AgentSessionWrapper {
       || event.type === "compaction_end"
       || event.type === "auto_compaction_start"
       || event.type === "auto_compaction_end"
+      // 普通流事件也要刷新侧栏状态，但限制为每秒最多一次，避免每个 token
+      // 都广播完整的运行会话快照。
+      || now - this.lastHostStatusEmitAt >= 1_000
     ) {
       this.emitHostState(now);
     }

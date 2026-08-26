@@ -2,7 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-const ALLOWED_ROOTS_TTL_MS = 5_000;
+const ALLOWED_ROOTS_TTL_MS = 30_000;
 const WINDOWS_ABSOLUTE_RE = /^[a-zA-Z]:[\\/]/;
 
 declare global {
@@ -50,12 +50,13 @@ export function addAllowedRoot(root: string | null | undefined): void {
   globalThis.__deerhuxAllowedRootsCache?.roots.add(normalized);
 }
 
-async function buildAllowedRoots(): Promise<Set<string>> {
+async function buildAllowedRoots(fresh = false): Promise<Set<string>> {
   const { listAllSessions } = await import("@/lib/session-reader");
-  // Access control must not rely on the stale-while-revalidate UI cache.
-  // A just-opened historical session can otherwise be rejected before its cwd
-  // reaches the cache.
-  const sessions = await listAllSessions(true);
+  // Reuse the session reader's stale-while-revalidate cache. A forced scan here
+  // makes every file-tree request walk all session JSONL files before it can
+  // even read the requested directory. Callers can explicitly request a fresh
+  // rebuild after an access miss when they need to discover a just-added root.
+  const sessions = await listAllSessions(fresh);
   const roots = new Set<string>();
   for (const s of sessions) {
     if (s.cwd) roots.add(normalizeRoot(s.cwd));
@@ -92,7 +93,7 @@ export async function getAllowedRoots(fresh = false): Promise<Set<string>> {
   if (!fresh && cached && cached.expiresAt > now) return cached.roots;
   if (!fresh && cached?.inflight) return cached.inflight;
 
-  const inflight = buildAllowedRoots().then((roots) => {
+  const inflight = buildAllowedRoots(fresh).then((roots) => {
     globalThis.__deerhuxAllowedRootsCache = {
       roots,
       expiresAt: Date.now() + ALLOWED_ROOTS_TTL_MS,

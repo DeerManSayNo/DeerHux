@@ -11,6 +11,8 @@ export type CollaborationMuxWorker = {
   name: string;
   title?: string;
   status: CollaborationWorkerStatus;
+  /** prompt 已准入并持久化，详情接口此时可安全返回可打开的 sessionId。 */
+  sessionReady?: true;
   activeTool?: Pick<WorkerToolActivity, "toolName" | "summary" | "status" | "ts">;
   recentTools?: Array<Pick<WorkerToolActivity, "toolName" | "summary" | "status" | "ts">>;
 };
@@ -42,6 +44,7 @@ export function toCollaborationMuxSnapshot(state: CollaborationRunState): Collab
       name: worker.name,
       ...(worker.title ? { title: worker.title } : {}),
       status: worker.status,
+      ...(worker.sessionId ? { sessionReady: true as const } : {}),
       ...(worker.activeTool ? { activeTool: { ...worker.activeTool } } : {}),
       ...(worker.recentTools ? { recentTools: worker.recentTools.map((tool) => ({ ...tool })) } : {}),
     })),
