@@ -12,6 +12,7 @@ import { getLocalStorageItem } from "@/lib/client-storage";
 import { normalizeExternalHref, openExternalLink } from "@/lib/external-links";
 import { getRelativeFilePath } from "@/lib/file-paths";
 import { retainCwdWorkspaceState } from "@/lib/workspace-cwd-state";
+import { getProjectDisplayName } from "@/lib/project-name";
 import {
   FILE_PREVIEW_CHANNEL_NAME,
   FILE_PREVIEW_STATE_STORAGE_KEY,
@@ -146,12 +147,6 @@ type RunningSessionStatus = {
 
 const MAX_CHAT_WINDOWS = 6;
 const CHAT_WINDOW_LIMIT_MESSAGE = "请先关闭一个窗口";
-
-function getProjectName(cwd: string): string {
-  const normalized = cwd.replace(/[\\/]+$/, "");
-  const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? cwd;
-}
 
 function layoutModeForSlotCount(count: number): ChatLayoutMode {
   if (count <= 1) return "single";
@@ -1411,9 +1406,9 @@ export function AppShell() {
   const headerProjectOptions = useMemo(() => {
     const byCwd = new Map<string, string>();
     for (const project of projectOptions) byCwd.set(project.cwd, project.displayName);
-    for (const cwd of customCwds) if (!byCwd.has(cwd)) byCwd.set(cwd, getProjectName(cwd));
+    for (const cwd of customCwds) if (!byCwd.has(cwd)) byCwd.set(cwd, getProjectDisplayName(cwd));
     if (defaultCwd && !byCwd.has(defaultCwd)) byCwd.set(defaultCwd, "默认");
-    if (effectiveProjectCwd && !byCwd.has(effectiveProjectCwd)) byCwd.set(effectiveProjectCwd, getProjectName(effectiveProjectCwd));
+    if (effectiveProjectCwd && !byCwd.has(effectiveProjectCwd)) byCwd.set(effectiveProjectCwd, getProjectDisplayName(effectiveProjectCwd));
     return [...byCwd.entries()].map(([cwd, displayName]) => ({ cwd, displayName }));
   }, [customCwds, defaultCwd, effectiveProjectCwd, projectOptions]);
 
@@ -2070,7 +2065,7 @@ export function AppShell() {
                       color: "var(--text-muted)",
                     }}
                   >
-                    {topNewSessionCwd ? `在 ${getProjectName(topNewSessionCwd)} 中开始` : "请先选择项目目录"}
+                    {topNewSessionCwd ? `在 ${getProjectDisplayName(topNewSessionCwd)} 中开始` : "请先选择项目目录"}
                   </span>
                 </span>
                 <span

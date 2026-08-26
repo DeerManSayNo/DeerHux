@@ -19,6 +19,7 @@ import { subscribeToAppNotification, notifyApp } from "@/lib/app-notifications";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { needsCompaction, type CompactionModelRef } from "@/lib/compaction-ui";
 import { subscribeSubagentRuns } from "@/lib/agent-event-client";
+import { getProjectDisplayName } from "@/lib/project-name";
 
 interface AgentRole {
   id: string;
@@ -60,12 +61,6 @@ interface Props {
   onOpenSession?: (sessionId: string) => void;
   initialInputState?: ChatInputState | null;
   saveInputState?: (state: ChatInputState) => void;
-}
-
-function getProjectName(cwd: string): string {
-  const normalized = cwd.replace(/[\\/]+$/, "");
-  const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? cwd;
 }
 
 /**
@@ -771,7 +766,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const selectableProjectOptions = useMemo(() => {
     const byCwd = new Map<string, string>();
     for (const project of projectOptions) byCwd.set(project.cwd, project.displayName);
-    if (currentCwd && !byCwd.has(currentCwd)) byCwd.set(currentCwd, getProjectName(currentCwd));
+    if (currentCwd && !byCwd.has(currentCwd)) byCwd.set(currentCwd, getProjectDisplayName(currentCwd));
     return [...byCwd.entries()].map(([cwd, displayName]) => ({ cwd, displayName }));
   }, [currentCwd, projectOptions]);
 
@@ -1292,7 +1287,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const messagePaddingClass = compact ? "px-3" : "px-4";
   const canSwitchEmptyProject = isEmptyNew && Boolean(onNewSessionCwdChange) && selectableProjectOptions.length > 1;
   const currentProjectLabel = currentCwd
-    ? selectableProjectOptions.find((project) => project.cwd === currentCwd)?.displayName ?? getProjectName(currentCwd)
+    ? selectableProjectOptions.find((project) => project.cwd === currentCwd)?.displayName ?? getProjectDisplayName(currentCwd)
     : "";
 
   const availableThinkingLevels = displayModelValue

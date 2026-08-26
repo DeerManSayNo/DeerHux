@@ -5,6 +5,7 @@ import type { ChatInputHandle, ChatInputState } from "./ChatInput";
 import { ChatWindow } from "./ChatWindow";
 import { ChatFileExplorerButton } from "./ChatFileExplorerButton";
 import type { SessionInfo } from "@/lib/types";
+import { getProjectDisplayName } from "@/lib/project-name";
 
 export type ChatLayoutMode = "single" | "double" | "triple" | "quad" | "six";
 
@@ -50,12 +51,6 @@ function sessionTitle(session: SessionInfo | null, index: number): string {
   if (!session) return `空窗口 ${index + 1}`;
   const raw = session.name || session.firstMessage?.slice(0, 80) || (session.path ? session.id.slice(0, 8) : "新会话");
   return raw.length > 24 ? `${raw.slice(0, 22)}...` : raw;
-}
-
-function getProjectName(cwd: string): string {
-  const normalized = cwd.replace(/[\\/]+$/, "");
-  const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? cwd;
 }
 
 function gridTemplate(mode: ChatLayoutMode): { columns: string; rows: string; minWidth: number } {
@@ -142,7 +137,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
           const activeSession = isPlaceholder ? null : session;
           const newSessionCwd = isPlaceholder ? session?.cwd ?? null : null;
           const projectCwd = session?.cwd ?? newSessionCwd;
-          const projectWatermark = projectCwd ? getProjectName(projectCwd) : "";
+          const projectWatermark = projectCwd ? getProjectDisplayName(projectCwd) : "";
           const title = sessionTitle(session, index);
           const isRunning = Boolean(slotId && runningSessionIds.has(slotId));
           const isEmptyMultiSlot = isMultiLayout && !session;

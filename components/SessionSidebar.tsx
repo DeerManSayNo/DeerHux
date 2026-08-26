@@ -10,6 +10,7 @@ import { FileExplorer } from "./FileExplorer";
 import { SchedulerRunsBlock } from "./SchedulerRunsBlock";
 import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
 import { readCachedJson, writeCachedJson } from "@/lib/client-resilience";
+import { getProjectDisplayName } from "@/lib/project-name";
 
 
 type RunningSessionStatus = {
@@ -224,12 +225,6 @@ function buildProjectGroups(sessions: SessionInfo[]): ProjectGroup[] {
       return { cwd, sessions: sorted, latestModified: sorted[0]?.modified ?? "" };
     })
     .sort((a, b) => b.latestModified.localeCompare(a.latestModified));
-}
-
-function getProjectName(cwd: string): string {
-  const normalized = cwd.replace(/[\\/]+$/, "");
-  const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : cwd;
 }
 
 function isScheduledTasksCwd(cwd: string): boolean {
@@ -712,7 +707,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (!normalizedSearchQuery) return allProjects;
     return allProjects
       .map((project) => {
-        const projectTitle = project.displayName ?? getProjectName(project.cwd);
+        const projectTitle = project.displayName ?? getProjectDisplayName(project.cwd);
         const projectMatches = [projectTitle, project.cwd, project.note ?? ""]
           .some((value) => value.toLowerCase().includes(normalizedSearchQuery));
         const sessions = projectMatches
@@ -750,7 +745,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   useEffect(() => {
     onProjectsChange?.(allProjects.map((project) => ({
       cwd: project.cwd,
-      displayName: project.displayName ?? getProjectName(project.cwd),
+      displayName: project.displayName ?? getProjectDisplayName(project.cwd),
     })));
   }, [allProjects, onProjectsChange]);
 
@@ -826,7 +821,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const handlePurgeProjectSessions = useCallback((cwd: string) => {
     if (cwd === defaultCwd) return;
-    const displayName = isScheduledTasksCwd(cwd) ? "定时任务" : getProjectName(cwd);
+    const displayName = isScheduledTasksCwd(cwd) ? "定时任务" : getProjectDisplayName(cwd);
     setConfirmPurge({ cwd, displayName });
   }, [defaultCwd]);
 
@@ -1323,7 +1318,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             onContextMenu={(e) => e.preventDefault()}
           >
             <div style={{ padding: "5px 8px 7px", color: "var(--text-dim)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={project.cwd}>
-              {project.displayName ?? getProjectName(project.cwd)}
+              {project.displayName ?? getProjectDisplayName(project.cwd)}
             </div>
             <button style={itemStyle} onClick={() => { setProjectMenu(null); void handleReselectProjectPath(project.cwd); }}>
               重新选定路径
@@ -1621,7 +1616,7 @@ function ProjectSection({
   }
   const hiddenSessionCount = Math.max(0, project.sessions.length - collapsedLimit);
   const sessionTree = buildSessionTree(project.sessions);
-  const projectTitle = project.displayName ?? getProjectName(project.cwd);
+  const projectTitle = project.displayName ?? getProjectDisplayName(project.cwd);
   const projectInitial = getInitial(projectTitle);
   const projectRowBackground = isActiveProject && !selectedInProject ? "var(--bg-selected)" : "transparent";
 
@@ -1857,7 +1852,7 @@ function SessionItem({
   const hasRunningStatus = Boolean(runningStatus);
   const isRunning = Boolean(runningStatus?.isStreaming || runningStatus?.isCompacting);
   const runningText = runningStatus ? formatRunningStatus(runningStatus, statusClock) : null;
-  const projectName = getProjectName(session.cwd);
+  const projectName = getProjectDisplayName(session.cwd);
 
   useEffect(() => {
     if (!hasRunningStatus) return;
