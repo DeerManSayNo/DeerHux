@@ -55,6 +55,11 @@ impl Drop for OwnedHandle {
 
 #[cfg(target_os = "windows")]
 fn acquire_single_instance() -> std::io::Result<Option<OwnedHandle>> {
+    #[cfg(debug_assertions)]
+    let name: Vec<u16> = "Local\\DeerHux.Desktop.Singleton.Dev\0"
+        .encode_utf16()
+        .collect();
+    #[cfg(not(debug_assertions))]
     let name: Vec<u16> = "Local\\DeerHux.Desktop.Singleton\0"
         .encode_utf16()
         .collect();
