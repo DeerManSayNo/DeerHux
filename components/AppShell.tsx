@@ -7,6 +7,7 @@ import { useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { CHAT_LAYOUT_COUNTS, ChatWorkspace, type ChatLayoutMode } from "./ChatWorkspace";
 import { FilePreviewPanel } from "./FilePreviewPanel";
+import { WindowControls, useNeedsWindowControls } from "./WindowControls";
 import type { Tab } from "./TabBar";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import { normalizeExternalHref, openExternalLink } from "@/lib/external-links";
@@ -264,6 +265,8 @@ export function AppShell() {
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [topActionBarHovered, setTopActionBarHovered] = useState(false);
   const topActionBarHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Windows/Linux 无边框主窗口需要在左上角自绘仿 macOS 红绿灯窗口控制按钮。
+  const needsWindowControls = useNeedsWindowControls();
 
   useEscapeClose(() => setSettingsMenuOpen(false), settingsMenuOpen);
 
@@ -1615,6 +1618,7 @@ export function AppShell() {
         {chatWindowLimitNotice}
       </div>
     )}
+    {needsWindowControls && <WindowControls />}
     <button
       data-tauri-drag-region="false"
       onClick={() => setSidebarMode((mode) => mode === "open" ? "closed" : "open")}
