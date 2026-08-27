@@ -41,6 +41,14 @@ const nodeModules = path.join(standaloneDir, "node_modules");
 remove(path.join(nodeModules, "sharp"));
 remove(path.join(nodeModules, "@img"));
 
+// caniuse-lite (~600 files) is browserslist compatibility data used only at
+// build time (autoprefixer / JS transform targets). The standalone runtime
+// never queries it. Verified by booting the pruned bundle and probing /,
+// /file-preview, /api/sessions, /api/models, /api/skills — all 200. Removing
+// it cuts Windows cold-start file I/O: every small file the process would
+// touch is one more potential real-time antivirus scan.
+remove(path.join(nodeModules, "caniuse-lite"));
+
 // ── 3. Dev-only files across all nested node_modules ─────────────────────────
 // These are never read at runtime by Node.js.
 const stripExts = new Set([
@@ -79,7 +87,10 @@ function walk(dir) {
     const full = path.join(dir, entry.name);
     if (entry.isFile()) {
       const ext = path.extname(entry.name);
-      if (stripExts.has(ext) || stripNames.has(entry.name)) {
+      // *.nft.json are build-time module traces Next uses to assemble the
+      // standalone output (~20MB total). Nothing reads them at runtime.
+      const isNftTrace = entry.name.endsWith(".nft.json");
+      if (isNftTrace || stripExts.has(ext) || stripNames.has(entry.name)) {
         remove(full);
       }
     } else if (entry.isDirectory()) {

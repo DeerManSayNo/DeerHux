@@ -57,3 +57,4 @@ placeholder-dist/
 
 # backup files
 *.bak
+tauri-dev.log 

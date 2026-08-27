@@ -27,7 +27,10 @@ function nowIso(): string {
 }
 
 function safeRunFileName(runId: string): string {
-  const normalized = runId.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 240);
+  // runId embeds "<sessionId>:<turnId>"; `:` is a reserved character in
+  // Windows file names (EINVAL on open/rename), so map it to "__". The file
+  // name is storage-only — the JSON payload keeps the original runId.
+  const normalized = runId.replace(/:/g, "__").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 240);
   if (!normalized) throw new Error("Invalid empty agent run id");
   return `${normalized}.json`;
 }

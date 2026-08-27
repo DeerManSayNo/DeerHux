@@ -133,10 +133,28 @@ impl BackendState {
         if let Ok(mut slot) = self.child.lock() {
             if let Some(mut process) = slot.take() {
                 startup_log(format!("stopping backend pid={}", process.pid));
-                #[cfg(target_os = "windows")]
-                process.job.take();
-                let _ = process.child.kill();
-                let _ = process.child.wait();
+                // Graceful shutdown first: closing the stdin pipe lets the
+                // backend exit(0) and persist its compile cache. Only fall
+                // back to hard termination if it ignores the signal.
+                drop(process.child.stdin.take());
+                let mut exited_gracefully = false;
+                for _ in 0..30 {
+                    if process.child.try_wait().ok().flatten().is_some() {
+                        exited_gracefully = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if !exited_gracefully {
+                    startup_log(format!(
+                        "backend pid={} did not exit gracefully, killing",
+                        process.pid
+                    ));
+                    #[cfg(target_os = "windows")]
+                    process.job.take();
+                    let _ = process.child.kill();
+                    let _ = process.child.wait();
+                }
                 remove_owned_pid_file(process.pid);
             }
         }
@@ -327,6 +345,15 @@ fn cleanup_legacy_backend() {
 }
 
 #[cfg(not(debug_assertions))]
+fn node_compile_cache_dir() -> PathBuf {
+    // ~/.deerhux/node-compile-cache — one level above agent_dir().
+    let dir = agent_dir();
+    dir.parent()
+        .map(|root| root.join("node-compile-cache"))
+        .unwrap_or_else(|| dir.join("node-compile-cache"))
+}
+
+#[cfg(not(debug_assertions))]
 fn resolve_node(resource_dir: &Path) -> PathBuf {
     let exe_dir = std::env::current_exe()
         .ok()
@@ -387,13 +414,21 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
         let node = resolve_node(&resource_dir);
         let server_js = resource_dir.join("deerhux-server.js");
         startup_log(format!("spawning {} on port {port}", node.display()));
+        // V8 compile cache persisted across launches: after the first run,
+        // starts skip parsing/compiling ~25MB of bundled JS.
+        let compile_cache = node_compile_cache_dir();
+        let _ = std::fs::create_dir_all(&compile_cache);
 
         let mut command = Command::new(&node);
         command
             .arg(&server_js)
             .env("DEERHUX_RESOURCE_DIR", &resource_dir)
             .env("PORT", port.to_string())
-            .stdin(Stdio::null())
+            .env("NODE_COMPILE_CACHE", &compile_cache)
+            // stdin pipe doubles as a shutdown signal: the launcher exits(0)
+            // on stdin EOF, letting Node flush the V8 compile cache to disk
+            // (Windows has no deliverable signal; TerminateProcess skips it).
+            .stdin(Stdio::piped())
             // Do not persist backend output: provider errors and tool output may
             // contain credentials or user data. Desktop phase logs stay metadata-only.
             .stdout(Stdio::null())
