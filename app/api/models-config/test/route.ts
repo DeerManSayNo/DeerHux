@@ -152,11 +152,12 @@ export async function POST(req: Request) {
 
     tempDir = mkdtempSync(join(tmpdir(), "deerhux-model-test-"));
     const modelsPath = join(tempDir, "models.json");
+    const { fastMode: _fastMode, ...testModel } = body.model;
     writeFileSync(modelsPath, JSON.stringify({
       providers: {
         [providerName]: {
           ...body.provider,
-          models: [{ ...body.model, id: modelId }],
+          models: [{ ...testModel, id: modelId }],
         },
       },
     }, null, 2), "utf8");

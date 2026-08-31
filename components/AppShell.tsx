@@ -158,6 +158,7 @@ function layoutModeForSlotCount(count: number): ChatLayoutMode {
 }
 
 const CUSTOM_CWDS_STORAGE_KEY = "deerhux.custom-cwds";
+const SIMPLE_WAITING_INDICATOR_STORAGE_KEY = "deerhux.simple-waiting-indicator";
 
 function readCustomCwds(): string[] {
   if (typeof window === "undefined") return [];
@@ -263,6 +264,7 @@ export function AppShell() {
   const [customCwds, setCustomCwds] = useState<string[]>([]);
   const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [simpleWaitingIndicator, setSimpleWaitingIndicator] = useState(false);
   const [topActionBarHovered, setTopActionBarHovered] = useState(false);
   const topActionBarHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Windows/Linux 无边框主窗口需要在左上角自绘仿 macOS 红绿灯窗口控制按钮。
@@ -362,6 +364,7 @@ export function AppShell() {
       if (Number.isFinite(parsed)) setRightPanelWidth(Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, parsed)));
     }
     setCustomCwds(readCustomCwds());
+    setSimpleWaitingIndicator(getLocalStorageItem(SIMPLE_WAITING_INDICATOR_STORAGE_KEY) === "true");
   }, []);
 
   useEffect(() => {
@@ -1880,7 +1883,7 @@ export function AppShell() {
                 position: "absolute",
                 top: 46,
                 right: 8,
-                width: 180,
+                width: 240,
                 padding: 6,
                 background: "var(--bg-panel)",
                 border: "1px solid var(--border)",
@@ -1890,6 +1893,67 @@ export function AppShell() {
               }}
               onClick={(e) => e.stopPropagation()}
             >
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={simpleWaitingIndicator}
+                onClick={() => {
+                  setSimpleWaitingIndicator((current) => {
+                    const next = !current;
+                    try {
+                      window.localStorage.setItem(SIMPLE_WAITING_INDICATOR_STORAGE_KEY, String(next));
+                    } catch { /* localStorage unavailable */ }
+                    return next;
+                  });
+                }}
+                style={{
+                  width: "100%",
+                  padding: "8px 9px",
+                  border: "none",
+                  borderRadius: 8,
+                  background: "transparent",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  textAlign: "left",
+                  fontSize: 12,
+                }}
+                onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; event.currentTarget.style.color = "var(--text-muted)"; }}
+              >
+                <span>
+                  <span style={{ display: "block" }}>简洁等待动画</span>
+                  <span style={{ display: "block", marginTop: 2, color: "var(--text-dim)", fontSize: 10 }}>隐藏模型响应前的详细状态</span>
+                </span>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    position: "relative",
+                    width: 30,
+                    height: 18,
+                    flexShrink: 0,
+                    borderRadius: 999,
+                    background: simpleWaitingIndicator ? "var(--accent)" : "var(--border)",
+                    transition: "background 0.15s ease",
+                  }}
+                >
+                  <span style={{
+                    position: "absolute",
+                    top: 2,
+                    left: simpleWaitingIndicator ? 14 : 2,
+                    width: 14,
+                    height: 14,
+                    borderRadius: "50%",
+                    background: "#fff",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+                    transition: "left 0.15s ease",
+                  }} />
+                </span>
+              </button>
+              <div style={{ height: 1, margin: "4px 5px", background: "var(--border)" }} />
               {([
                 { label: "扩展总览", disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd, onClick: () => { setSettingsMenuOpen(false); setExtensionsConfigOpen(true); } },
                 { label: "微信 Bot", disabled: false, onClick: () => { setSettingsMenuOpen(false); setWechatConfigOpen(true); } },
@@ -2117,6 +2181,7 @@ export function AppShell() {
                 focusedSlotIndex={focusedChatSlotIndex}
                 isPlaceholderSession={isPlaceholderSession}
                 runningSessionIds={new Set(runningSessionStatuses.keys())}
+                simpleWaitingIndicator={simpleWaitingIndicator}
                 onFocusSlot={handleFocusChatSlot}
                 onClearSlot={handleClearChatSlot}
                 onAgentEnd={handleAgentEnd}

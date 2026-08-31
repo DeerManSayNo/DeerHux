@@ -40,6 +40,7 @@ interface Props {
   activeTabId?: string | null;
   isFocused?: boolean;
   streamRenderPriority?: StreamRenderPriority;
+  simpleWaitingIndicator?: boolean;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   compact?: boolean;
@@ -248,6 +249,146 @@ function StatusPill({ label, value, accent, title }: { label: string; value: str
       <span className="opacity-60">{label}</span>
       <span className={accent ? "font-semibold" : ""}>{value}</span>
     </span>
+  );
+}
+
+const SIMPLE_WAITING_DOT_COUNT = 12;
+
+function SimpleWaitingIndicator() {
+  const [litDots, setLitDots] = useState(1);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setLitDots((current) => current >= SIMPLE_WAITING_DOT_COUNT ? 0 : current + 1);
+    }, 300);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <span
+      role="status"
+      aria-label="正在等待 AI 响应"
+      className="inline-flex h-4 items-center gap-1"
+    >
+      {Array.from({ length: SIMPLE_WAITING_DOT_COUNT }, (_, index) => (
+        <span
+          key={index}
+          aria-hidden="true"
+          className="h-1.5 w-1.5 rounded-full transition-colors duration-150"
+          style={{ background: index < litDots ? "var(--accent)" : "var(--border)" }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function getStreamTextLength(message: Partial<AgentMessage> | null): number {
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) return 0;
+  return message.content.reduce((total, block) => {
+    if (block.type === "text") return total + (block.text?.length ?? 0);
+    if (block.type === "thinking") return total + (block.thinking?.length ?? 0);
+    return total;
+  }, 0);
+}
+
+function hasRenderableStreamOutput(message: Partial<AgentMessage> | null): boolean {
+  if (getStreamTextLength(message) > 0) return true;
+  return message?.role === "assistant"
+    && Array.isArray(message.content)
+    && message.content.some((block) => block.type === "toolCall");
+}
+
+function revealStreamMessage(message: Partial<AgentMessage>, visibleChars: number): AgentMessage {
+  if (message.role !== "assistant" || !Array.isArray(message.content)) return message as AgentMessage;
+  let remaining = visibleChars;
+  let waitingForEarlierText = false;
+  const content: typeof message.content = [];
+  for (const block of message.content) {
+    if (waitingForEarlierText) break;
+    if (block.type === "text") {
+      const source = block.text ?? "";
+      const visible = source.slice(0, Math.max(0, remaining));
+      remaining -= visible.length;
+      if (visible) content.push({ ...block, text: visible });
+      waitingForEarlierText = visible.length < source.length;
+    } else if (block.type === "thinking") {
+      const source = block.thinking ?? "";
+      const visible = source.slice(0, Math.max(0, remaining));
+      remaining -= visible.length;
+      if (visible) content.push({ ...block, thinking: visible });
+      waitingForEarlierText = visible.length < source.length;
+    } else {
+      content.push(block);
+    }
+  }
+  return { ...message, content } as AgentMessage;
+}
+
+function SmoothStreamingMessage({
+  message,
+  isBackground,
+  modelNames,
+  watchdogInfo,
+  onOpenSession,
+}: {
+  message: Partial<AgentMessage>;
+  isBackground: boolean;
+  modelNames?: Record<string, string>;
+  watchdogInfo: WatchdogInfo | null;
+  onOpenSession?: (sessionId: string) => void;
+}) {
+  const targetRef = useRef(message);
+  const targetLengthRef = useRef(getStreamTextLength(message));
+  const [visibleChars, setVisibleChars] = useState(() => Math.min(1, targetLengthRef.current));
+  const visibleCharsRef = useRef(visibleChars);
+  const carryRef = useRef(0);
+
+  targetRef.current = message;
+  targetLengthRef.current = getStreamTextLength(message);
+
+  useEffect(() => {
+    if (isBackground) {
+      const target = targetLengthRef.current;
+      visibleCharsRef.current = target;
+      setVisibleChars(target);
+      return;
+    }
+
+    let frame = 0;
+    let previousAt = performance.now();
+    const tick = (now: number) => {
+      const elapsed = Math.min(100, now - previousAt);
+      previousAt = now;
+      const target = targetLengthRef.current;
+      const current = visibleCharsRef.current;
+      const backlog = Math.max(0, target - current);
+      if (backlog > 0) {
+        // 基础速度保持稳定；积压较多时有限加速，避免网络突发分片造成长期落后。
+        const charsPerSecond = Math.min(240, 42 + backlog * 0.45);
+        carryRef.current += charsPerSecond * elapsed / 1000;
+        const increment = Math.max(1, Math.floor(carryRef.current));
+        carryRef.current = Math.max(0, carryRef.current - increment);
+        const next = Math.min(target, current + increment);
+        visibleCharsRef.current = next;
+        setVisibleChars(next);
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [isBackground]);
+
+  const visibleMessage = revealStreamMessage(message, visibleChars);
+
+  return (
+    <MessageView
+      message={visibleMessage}
+      isStreaming
+      isBackground={isBackground}
+      modelNames={modelNames}
+      watchdogInfo={watchdogInfo}
+      onOpenSession={onOpenSession}
+    />
   );
 }
 
@@ -490,7 +631,7 @@ function Typewriter({ phrases, paused = false }: { phrases: string[]; paused?: b
   );
 }
 
-export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
+export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", simpleWaitingIndicator = false, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
@@ -1386,7 +1527,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         />
       )}
       <ChatInput
-        key={session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`}
         ref={chatInputRef}
         compact={compact}
         onSend={sendWithRole}
@@ -1921,8 +2061,18 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               });
             })()}
 
-            {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming isBackground={!isFocused} modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
+            {streamState.isStreaming && streamState.streamingMessage && hasRenderableStreamOutput(streamState.streamingMessage) && (
+              simpleWaitingIndicator ? (
+                <SmoothStreamingMessage
+                  message={streamState.streamingMessage}
+                  isBackground={!isFocused}
+                  modelNames={modelNames}
+                  watchdogInfo={watchdogInfo}
+                  onOpenSession={onOpenSession}
+                />
+              ) : (
+                <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming isBackground={!isFocused} modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
+              )
             )}
 
             {/* 活跃 subagent run 钉在聊天流最底部（所有消息/流式 bubble 之后），
@@ -1938,24 +2088,28 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               </div>
             )}
 
-            {isRunning && !streamState.streamingMessage && (
+            {isRunning && !hasRenderableStreamOutput(streamState.streamingMessage) && (
               <div className="py-2 text-[13px] text-text-muted">
-                <div className="flex items-center gap-0 flex-wrap">
-                  {(!transientPhaseNoticeKey || showTransientPhaseNotice) && (
-                    <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabel(agentPhase, { serverStatus, retryInfo, isCompacting, stallLevel, compactionMessage: compactionProgress?.message })}</span>
-                  )}
-                  <AgentStatusTicker
-                    serverStatus={serverStatus}
-                    watchdog={watchdogInfo}
-                    agentPhase={agentPhase}
-                    thinkingLevel={thinkingLevel}
-                    retryInfo={retryInfo}
-                    contextUsage={contextUsage}
-                    isCompacting={isCompacting}
-                    stallLevel={stallLevel}
-                    autoRecoveryMode={autoRecoveryMode}
-                  />
-                </div>
+                {simpleWaitingIndicator ? (
+                  <SimpleWaitingIndicator />
+                ) : (
+                  <div className="flex items-center gap-0 flex-wrap">
+                    {(!transientPhaseNoticeKey || showTransientPhaseNotice) && (
+                      <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabel(agentPhase, { serverStatus, retryInfo, isCompacting, stallLevel, compactionMessage: compactionProgress?.message })}</span>
+                    )}
+                    <AgentStatusTicker
+                      serverStatus={serverStatus}
+                      watchdog={watchdogInfo}
+                      agentPhase={agentPhase}
+                      thinkingLevel={thinkingLevel}
+                      retryInfo={retryInfo}
+                      contextUsage={contextUsage}
+                      isCompacting={isCompacting}
+                      stallLevel={stallLevel}
+                      autoRecoveryMode={autoRecoveryMode}
+                    />
+                  </div>
+                )}
               </div>
             )}
 

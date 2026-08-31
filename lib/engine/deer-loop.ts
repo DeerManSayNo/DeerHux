@@ -86,6 +86,7 @@ import type { AgentSessionPort } from "../session/port";
 import { SessionPersistenceError } from "../session/errors.ts";
 import type { AgentRuntimeEventBase } from "../agent-runtime/types";
 import type { ModelCatalogPort } from "../model/port";
+import { isModelFastModeEnabled } from "../model-fast-mode";
 
 /**
  * 不限定具体 Api 的 Model 类型别名。
@@ -1114,6 +1115,15 @@ export class DeerLoopEngine implements AgentEnginePort {
     let stopReason: string | undefined;
     let permit: LlmPermit | null = null;
     let meta: LlmRequestMeta | null = null;
+    const transportStartedAt = Date.now();
+    let payloadReadyAt: number | undefined;
+    let httpResponseAt: number | undefined;
+    let firstEventAt: number | undefined;
+    let firstTextAt: number | undefined;
+    let reportedServiceTier: string | null = null;
+    let reportedServiceTierSource: "header" | "unavailable" = "unavailable";
+    let responseStatus: number | undefined;
+    let responseHeaders: Record<string, string> | undefined;
 
     // ★ 流停滞超时（TTFT / idle）：独立于用户 abortController。
     //   - 非激进：经典 TTFT——仅等首个流事件；收到后取消计时。
@@ -1174,9 +1184,29 @@ export class DeerLoopEngine implements AgentEnginePort {
         this.abortController!.signal,
         ttftController.signal,
       ]);
+      const fastMode = this._model.api === "openai-responses"
+        && isModelFastModeEnabled(this._model.provider, this._model.id);
       const streamOptions: SimpleStreamOptions = {
         signal: combinedSignal,
         sessionId: this._sessionId,
+        onPayload: (payload) => {
+          payloadReadyAt = Date.now();
+          return fastMode && payload && typeof payload === "object"
+            ? { ...payload, service_tier: "priority" }
+            : payload;
+        },
+        onResponse: (response) => {
+          httpResponseAt = Date.now();
+          responseStatus = response.status;
+          responseHeaders = response.headers;
+          const headerTier = response.headers["service-tier"]
+            ?? response.headers["x-service-tier"]
+            ?? response.headers["openai-service-tier"];
+          if (headerTier) {
+            reportedServiceTier = headerTier;
+            reportedServiceTierSource = "header";
+          }
+        },
       };
       let apiKey: string | undefined;
       if (this._thinkingLevel) {
@@ -1217,6 +1247,15 @@ export class DeerLoopEngine implements AgentEnginePort {
         }
         if (iterResult.done) break;
         const ev = iterResult.value;
+        const eventAt = Date.now();
+        firstEventAt ??= eventAt;
+        if (
+          firstTextAt === undefined
+          && ((ev.type === "text_delta" && ev.delta.length > 0)
+            || ("partial" in ev && extractText(ev.partial).length > 0))
+        ) {
+          firstTextAt = eventAt;
+        }
 
         // abort 检查：即便 stream 没抛，也主动退出。
         if (this.abortController?.signal.aborted) {
@@ -1311,6 +1350,42 @@ export class DeerLoopEngine implements AgentEnginePort {
       // 最终守卫：只要是 TTFT 触发且用户未停，绝不能以 aborted=true 返回。
       if (aborted && isTtftAbort()) {
         markTtftTimeout();
+      }
+      const completedAt = Date.now();
+      try {
+        this._sessionPort?.appendCustomEntry("llm_transport_diagnostic", {
+          version: 1,
+          provider: this._model.provider,
+          modelId: this._model.id,
+          api: this._model.api,
+          requestKind: this._requestKind,
+          requestedServiceTier: this._model.api === "openai-responses"
+            && isModelFastModeEnabled(this._model.provider, this._model.id)
+            ? "priority"
+            : null,
+          reportedServiceTier,
+          reportedServiceTierSource,
+          responseStatus,
+          responseHeaderNames: responseHeaders ? Object.keys(responseHeaders).sort() : [],
+          startedAt: new Date(transportStartedAt).toISOString(),
+          payloadReadyAt: payloadReadyAt ? new Date(payloadReadyAt).toISOString() : null,
+          httpResponseAt: httpResponseAt ? new Date(httpResponseAt).toISOString() : null,
+          firstEventAt: firstEventAt ? new Date(firstEventAt).toISOString() : null,
+          firstTextAt: firstTextAt ? new Date(firstTextAt).toISOString() : null,
+          completedAt: new Date(completedAt).toISOString(),
+          durationsMs: {
+            payload: payloadReadyAt === undefined ? null : payloadReadyAt - transportStartedAt,
+            httpResponse: httpResponseAt === undefined ? null : httpResponseAt - transportStartedAt,
+            firstEvent: firstEventAt === undefined ? null : firstEventAt - transportStartedAt,
+            firstText: firstTextAt === undefined ? null : firstTextAt - transportStartedAt,
+            total: completedAt - transportStartedAt,
+          },
+          outcome: aborted ? "aborted" : errorMessage ? "error" : "success",
+          errorCode: normalizedError?.code ?? null,
+          responseId: finalMessage?.responseId ?? lastPartial?.responseId ?? null,
+        });
+      } catch (diagnosticError) {
+        console.warn("Failed to persist LLM transport diagnostic", diagnosticError);
       }
       cancelStallTimer();
       permit?.release();
@@ -2325,10 +2400,23 @@ export class DeerLoopEngine implements AgentEnginePort {
             }, permit.queuedMs);
           }
 
+          const fastMode = model.api === "openai-responses"
+            && isModelFastModeEnabled(model.provider, model.id);
           const stream = this._streamFn(model, context, {
             ...options,
             signal: combinedSignal,
             sessionId: this._sessionId,
+            ...(fastMode
+              ? {
+                  onPayload: async (payload, payloadModel) => {
+                    const transformed = await options?.onPayload?.(payload, payloadModel);
+                    const finalPayload = transformed ?? payload;
+                    return finalPayload && typeof finalPayload === "object"
+                      ? { ...finalPayload, service_tier: "priority" }
+                      : finalPayload;
+                  },
+                }
+              : {}),
           });
           iterator = stream[Symbol.asyncIterator]();
           const idleTimeoutMs = this.computeCompactionIdleTimeoutMs();

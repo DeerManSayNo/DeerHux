@@ -10,6 +10,7 @@
     "frontendDist": "placeholder-dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }

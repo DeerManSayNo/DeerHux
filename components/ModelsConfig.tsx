@@ -101,6 +101,7 @@ interface ModelEntry {
   name?: string;
   api?: string;
   reasoning?: boolean;
+  fastMode?: boolean;
   thinkingLevelMap?: Record<string, string | null>;
   input?: string[];
   contextWindow?: number;
@@ -511,7 +512,18 @@ function ModelDetail({
   const [testState, setTestState] = useState<ModelTestState>({ phase: "idle" });
   const [testMode, setTestMode] = useState<"text" | "image">("text");
   const hasImageInput = model.input?.includes("image") ?? false;
+  const effectiveApi = model.api ?? provider.api;
+  const supportsFastMode = effectiveApi === "openai-responses";
   const set = <K extends keyof ModelEntry>(k: K, v: ModelEntry[K]) => onChange({ ...model, [k]: v });
+  const setApi = (api: string) => onChange({
+    ...model,
+    api: api || undefined,
+    ...(api && api !== "openai-responses" ? { fastMode: undefined } : {}),
+  });
+  const setFastMode = (enabled: boolean) => onChange({
+    ...model,
+    ...(enabled ? { api: "openai-responses", fastMode: true } : { fastMode: undefined }),
+  });
   const costVal = (k: keyof NonNullable<ModelEntry["cost"]>) => model.cost?.[k] !== undefined ? String(model.cost[k]) : "";
   const setCost = (k: keyof NonNullable<ModelEntry["cost"]>, v: string) => {
     const n = parseFloat(v);
@@ -714,14 +726,30 @@ function ModelDetail({
       </div>
 
       <Field label="API 格式覆盖">
-        <Select value={model.api ?? ""} onChange={(v) => set("api", v || undefined)} options={API_OPTIONS} />
+        <Select value={model.api ?? ""} onChange={setApi} options={API_OPTIONS} />
       </Field>
 
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
         <Check label="推理过程 / 思考" checked={model.reasoning ?? false} onChange={(v) => set("reasoning", v || undefined)} />
         <Check label="图片输入" checked={model.input?.includes("image") ?? false}
           onChange={(v) => set("input", v ? ["text", "image"] : undefined)} />
+        <label
+          title={supportsFastMode ? "请求 Priority 服务等级；上游可能忽略或降级" : "开启后会自动切换为 openai-responses API 格式"}
+          style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: "var(--text-muted)" }}
+        >
+          <input
+            type="checkbox"
+            checked={model.fastMode ?? false}
+            onChange={(event) => setFastMode(event.target.checked)}
+          />
+          快速模式（Priority）
+        </label>
       </div>
+      {model.fastMode && supportsFastMode && (
+        <div style={{ marginTop: -4, fontSize: 10, color: "var(--text-dim)" }}>
+          每次请求将携带 service_tier: priority；是否生效由模型服务或中转决定，通常会增加额度消耗。
+        </div>
+      )}
 
       {model.reasoning && (
         <>

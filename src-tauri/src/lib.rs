@@ -497,6 +497,19 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
                                 &format!("后台已启动，但页面打开失败：{error}"),
                             );
                             backend.stop();
+                            return;
+                        }
+                        if let Some(floating_window) = app.get_webview_window("floating-chat") {
+                            match format!("http://127.0.0.1:{port}/floating-chat").parse() {
+                                Ok(floating_url) => {
+                                    if let Err(error) = floating_window.navigate(floating_url) {
+                                        eprintln!("failed to open floating chat: {error}");
+                                    } else if let Err(error) = floating_window.show() {
+                                        eprintln!("failed to show floating chat: {error}");
+                                    }
+                                }
+                                Err(error) => eprintln!("invalid floating chat URL: {error}"),
+                            }
                         }
                     }
                     Err(error) => show_startup_error(&app, &format!("本地地址无效：{error}")),
@@ -557,6 +570,33 @@ pub fn run() {
             let builder = builder.decorations(false);
 
             let window = builder.build()?;
+
+            #[cfg(debug_assertions)]
+            let floating_url = WebviewUrl::External("http://localhost:30141/floating-chat".parse()?);
+            #[cfg(not(debug_assertions))]
+            let floating_url = WebviewUrl::App("index.html".into());
+            let floating_window = WebviewWindowBuilder::new(app, "floating-chat", floating_url)
+                .title("DeerHux 快捷对话")
+                .inner_size(76.0, 76.0)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .shadow(false)
+                .visible(false)
+                .build()?;
+            if let Some(monitor) = floating_window.current_monitor()? {
+                let work_area = monitor.work_area();
+                let scale = monitor.scale_factor();
+                let margin = (18.0 * scale) as i32;
+                let x = work_area.position.x + work_area.size.width as i32 - (76.0 * scale) as i32 - margin;
+                let y = work_area.position.y + work_area.size.height as i32 - (76.0 * scale) as i32 - margin;
+                floating_window.set_position(tauri::PhysicalPosition::new(x, y))?;
+            }
+            #[cfg(debug_assertions)]
+            floating_window.show()?;
+
             #[cfg(debug_assertions)]
             window.open_devtools();
             #[cfg(not(debug_assertions))]

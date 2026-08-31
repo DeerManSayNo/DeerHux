@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for the main window",
-  "windows": ["main", "file-preview"],
+  "windows": ["main", "file-preview", "floating-chat"],
   "remote": {
     "urls": [
       "http://localhost:30141",
@@ -17,6 +17,12 @@
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-scale-factor",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-set-always-on-top",
     "core:webview:allow-create-webview-window",
     "dialog:allow-open",
     "shell:allow-open"

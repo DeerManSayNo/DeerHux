@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, chmodSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { extractFastModePreferences, mergeFastModePreferences, writeFastModePreferences } from "@/lib/model-fast-mode";
 
 export const dynamic = "force-dynamic";
 
@@ -43,13 +44,15 @@ function writeModelsJson(data: Record<string, unknown>): void {
 }
 
 export async function GET() {
-  return NextResponse.json(readModelsJson());
+  return NextResponse.json(mergeFastModePreferences(readModelsJson()));
 }
 
 export async function PUT(req: Request) {
   try {
     const body = await req.json() as Record<string, unknown>;
-    writeModelsJson(body);
+    const { config, preferences } = extractFastModePreferences(body);
+    writeModelsJson(config);
+    writeFastModePreferences(preferences);
     // Model registry refreshes on each /api/models request (no local cache to invalidate)
     return NextResponse.json({ success: true });
   } catch (_error) {

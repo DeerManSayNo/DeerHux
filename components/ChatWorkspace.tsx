@@ -24,6 +24,7 @@ interface ChatWorkspaceProps {
   focusedSlotIndex: number;
   isPlaceholderSession: (sessionId: string) => boolean;
   runningSessionIds: Set<string>;
+  simpleWaitingIndicator?: boolean;
   modelsRefreshKey?: number;
   chatInputRef?: RefObject<ChatInputHandle | null>;
   onFocusSlot: (slotIndex: number) => void;
@@ -77,6 +78,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
     focusedSlotIndex,
     isPlaceholderSession,
     runningSessionIds,
+    simpleWaitingIndicator,
     modelsRefreshKey,
     chatInputRef,
     onFocusSlot,
@@ -289,6 +291,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                       activeTabId={slotId}
                       isFocused={isFocused}
                       streamRenderPriority={isFocused ? "focused" : "visible"}
+                      simpleWaitingIndicator={simpleWaitingIndicator}
                       session={activeSession}
                       newSessionCwd={newSessionCwd}
                       onAgentEnd={onAgentEnd}
