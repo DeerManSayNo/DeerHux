@@ -1,4 +1,0 @@
-export const FLOATING_CHAT_WINDOW_LABEL = "floating-chat";
-export const FLOATING_CHAT_COLLAPSED_SIZE = 76;
-export const FLOATING_CHAT_EXPANDED_WIDTH = 430;
-export const FLOATING_CHAT_EXPANDED_HEIGHT = 330;

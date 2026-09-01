@@ -30,6 +30,7 @@ import { subscribeHostEvents } from "@/lib/agent-event-client";
 import type { ChatInputHandle, ChatInputState } from "./ChatInput";
 import { ChatDraftStore, clearCwdScopedDraftResources, promoteNewSessionDraft } from "@/lib/chat-drafts";
 import { getChatRenderKey, promoteChatRenderKey } from "@/lib/chat-render-keys";
+import { restoreQuickSessionVisibility } from "@/lib/quick-session-visibility";
 
 type SidebarMode = "open" | "closed";
 
@@ -906,6 +907,7 @@ export function AppShell() {
       ? sessionTabsRef.current.find((candidate) => candidate.id === sourceSessionId)
       : null;
     if (session && sourceSession?.cwd && session.cwd !== sourceSession.cwd) return;
+    if (session?.path) restoreQuickSessionVisibility(session.id);
     if (!session) {
       const pendingId = pendingSessionIdsBySlotRef.current.get(slotIndex);
       if (pendingId) {

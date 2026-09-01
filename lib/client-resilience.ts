@@ -30,11 +30,16 @@ export function writeCachedJson<T>(key: string, value: T): void {
 
 export class ControlPlaneHttpError extends Error {
   readonly status: number;
+  readonly url?: string;
+  readonly detail?: string;
 
-  constructor(status: number) {
-    super(`HTTP ${status}`);
+  constructor(status: number, url?: string, detail?: string) {
+    const normalizedDetail = detail?.replace(/\s+/g, " ").trim().slice(0, 500);
+    super([`HTTP ${status}`, url, normalizedDetail].filter(Boolean).join(" · "));
     this.name = "ControlPlaneHttpError";
     this.status = status;
+    this.url = url;
+    this.detail = normalizedDetail;
   }
 }
 
@@ -88,7 +93,10 @@ export async function fetchJsonWithRetry<T>(
 
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
-      if (!response.ok) throw new ControlPlaneHttpError(response.status);
+      if (!response.ok) {
+        const detail = await response.clone().text().catch(() => "");
+        throw new ControlPlaneHttpError(response.status, url, detail);
+      }
       return await response.json() as T;
     } catch (error) {
       lastError = timedOut ? new ControlPlaneTimeoutError(timeoutMs, error) : error;

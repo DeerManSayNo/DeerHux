@@ -11,6 +11,7 @@ import { SchedulerRunsBlock } from "./SchedulerRunsBlock";
 import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
 import { readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 import { getProjectDisplayName } from "@/lib/project-name";
+import { publishVisibleProjects } from "@/lib/visible-projects";
 
 
 type RunningSessionStatus = {
@@ -741,6 +742,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     return visible;
   }, [activeSelectedCwd, normalizedSearchQuery, projects, showAllProjects]);
   const hiddenProjectCount = Math.max(0, projects.length - visibleProjects.length);
+
+  useEffect(() => {
+    publishVisibleProjects(visibleProjects.map((project) => ({
+      cwd: project.cwd,
+      displayName: project.displayName ?? getProjectDisplayName(project.cwd),
+    })));
+  }, [visibleProjects]);
 
   useEffect(() => {
     onProjectsChange?.(allProjects.map((project) => ({

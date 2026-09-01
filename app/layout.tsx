@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 
 const themeInitScript = `
@@ -28,7 +29,11 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" className={notoSansMono.variable} suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+        <Script
+          id="deerhux-theme-init"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: themeInitScript }}
+        />
       </head>
       <body style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
         {children}

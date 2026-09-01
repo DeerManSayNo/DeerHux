@@ -7,19 +7,19 @@ use std::path::{Path, PathBuf};
 #[cfg(not(debug_assertions))]
 use std::process::{Child, Command, Stdio};
 #[cfg(not(debug_assertions))]
+use std::sync::Arc;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Mutex,
 };
 #[cfg(not(debug_assertions))]
 use std::time::{Duration, Instant};
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 use std::{mem::size_of, os::windows::io::AsRawHandle, os::windows::process::CommandExt};
-#[cfg(not(debug_assertions))]
-use tauri::Manager;
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
 use tauri::{LogicalPosition, TitleBarStyle};
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -34,6 +34,164 @@ use windows_sys::Win32::{
 
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+const QUICK_SESSION_WINDOW_LABEL: &str = "quick-session";
+const QUICK_SESSION_OPEN_EVENT: &str = "quick-session://request-open";
+const QUICK_SESSION_CLOSE_EVENT: &str = "quick-session://request-close";
+const QUICK_SESSION_NEW_EVENT: &str = "quick-session://request-new";
+const QUICK_SESSION_WINDOW_WIDTH: f64 = 380.0;
+static QUICK_SESSION_SHORTCUT_PRESSED: AtomicBool = AtomicBool::new(false);
+static QUICK_SESSION_NEW_SHORTCUT_PRESSED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+static PREVIOUS_FRONTMOST_PID: Mutex<Option<i32>> = Mutex::new(None);
+
+fn position_quick_session_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()? else {
+        return Ok(());
+    };
+    let work_area = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let width = (QUICK_SESSION_WINDOW_WIDTH * scale).round() as u32;
+    let x = work_area.position.x + work_area.size.width as i32 - width as i32;
+    window.set_size(tauri::PhysicalSize::new(width, work_area.size.height))?;
+    window.set_position(tauri::PhysicalPosition::new(x, work_area.position.y))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn remember_frontmost_application() {
+    use objc2_app_kit::NSWorkspace;
+
+    let pid = NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|application| application.processIdentifier());
+    if let Ok(mut previous) = PREVIOUS_FRONTMOST_PID.lock() {
+        *previous = pid;
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remember_frontmost_application() {}
+
+#[cfg(target_os = "macos")]
+fn restore_previous_application() {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+
+    let pid = PREVIOUS_FRONTMOST_PID
+        .lock()
+        .ok()
+        .and_then(|mut previous| previous.take());
+    if let Some(pid) = pid {
+        if let Some(application) =
+            NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        {
+            application.unhide();
+            application.activateWithOptions(NSApplicationActivationOptions::empty());
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_previous_application() {}
+
+fn hide_quick_session(app: &tauri::AppHandle, restore_focus: bool) {
+    if let Some(window) = app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) {
+        if restore_focus {
+            // Hand focus back while the drawer is still the key window. If we hide
+            // it first, macOS briefly promotes DeerHux's main window before the
+            // previous application is activated, which causes a visible flash.
+            restore_previous_application();
+        }
+        let _ = window.hide();
+    }
+}
+
+#[tauri::command]
+fn hide_quick_session_window(app: tauri::AppHandle, restore_focus: bool) {
+    hide_quick_session(&app, restore_focus);
+}
+
+#[tauri::command]
+fn resize_quick_session_window(app: tauri::AppHandle, width: f64) -> Result<(), String> {
+    if !width.is_finite() || width <= 0.0 {
+        return Err("invalid quick-session width".into());
+    }
+    let window = app
+        .get_webview_window(QUICK_SESSION_WINDOW_LABEL)
+        .ok_or_else(|| "quick-session window not found".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSWindow;
+
+        let ns_window_ptr = window.ns_window().map_err(|error| error.to_string())?;
+        let ns_window: &NSWindow = unsafe { &*ns_window_ptr.cast() };
+        let mut frame = ns_window.frame();
+        let right = frame.origin.x + frame.size.width;
+        frame.origin.x = right - width;
+        frame.size.width = width;
+        // Resize the transparent host in one step. Animating the NSWindow frame
+        // can outrun WKWebView painting and briefly expose stale/clear frames;
+        // the card strip animation is handled by CSS instead.
+        ns_window.setFrame_display(frame, true);
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let position = window.outer_position().map_err(|error| error.to_string())?;
+        let size = window.outer_size().map_err(|error| error.to_string())?;
+        let scale = window.scale_factor().map_err(|error| error.to_string())?;
+        let physical_width = (width * scale).round() as u32;
+        let right = position.x + size.width as i32;
+        window
+            .set_size(tauri::PhysicalSize::new(physical_width, size.height))
+            .map_err(|error| error.to_string())?;
+        window
+            .set_position(tauri::PhysicalPosition::new(right - physical_width as i32, position.y))
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
+fn toggle_quick_session_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        // Let the WebView paint its transparent closed state before hiding the
+        // native window. Otherwise WKWebView can reuse the last open frame on
+        // the next show, making the drawer appear to open twice.
+        let _ = window.emit(QUICK_SESSION_CLOSE_EVENT, ());
+        return;
+    }
+    remember_frontmost_application();
+    let _ = position_quick_session_window(&window);
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    let _ = window.emit(QUICK_SESSION_OPEN_EVENT, ());
+}
+
+fn open_quick_session(app: &tauri::AppHandle, request_new: bool) {
+    let Some(window) = app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) else {
+        return;
+    };
+    if !window.is_visible().unwrap_or(false) {
+        remember_frontmost_application();
+        let _ = position_quick_session_window(&window);
+        let _ = window.unminimize();
+        let _ = window.show();
+    }
+    let _ = window.set_focus();
+    // Always request open: the native window can still be visible for the two
+    // closing paint frames while the React drawer is already closed.
+    let _ = window.emit(QUICK_SESSION_OPEN_EVENT, ());
+    if request_new {
+        let _ = window.emit(QUICK_SESSION_NEW_EVENT, ());
+    }
+}
 
 #[cfg(target_os = "windows")]
 struct OwnedHandle(HANDLE);
@@ -499,23 +657,21 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
                             backend.stop();
                             return;
                         }
-                        if let Some(floating_window) = app.get_webview_window("floating-chat") {
-                            match format!("http://127.0.0.1:{port}/floating-chat").parse() {
-                                Ok(floating_url) => {
-                                    if let Err(error) = floating_window.navigate(floating_url) {
-                                        eprintln!("failed to open floating chat: {error}");
-                                    } else if let Err(error) = floating_window.show() {
-                                        eprintln!("failed to show floating chat: {error}");
-                                    }
-                                }
-                                Err(error) => eprintln!("invalid floating chat URL: {error}"),
-                            }
-                        }
                     }
                     Err(error) => show_startup_error(&app, &format!("本地地址无效：{error}")),
                 }
             } else {
                 backend.stop();
+            }
+            if let Some(window) = app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) {
+                match format!("http://127.0.0.1:{port}/quick-session").parse() {
+                    Ok(url) => {
+                        if let Err(error) = window.navigate(url) {
+                            eprintln!("failed to open quick-session window: {error}");
+                        }
+                    }
+                    Err(error) => eprintln!("invalid quick-session URL: {error}"),
+                }
             }
         }
         Ok(_) => backend.stop(),
@@ -550,6 +706,40 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if shortcut.matches(Modifiers::ALT, Code::Backquote) {
+                        match event.state() {
+                            ShortcutState::Pressed => {
+                                if !QUICK_SESSION_SHORTCUT_PRESSED.swap(true, Ordering::AcqRel) {
+                                    toggle_quick_session_window(app);
+                                }
+                            }
+                            ShortcutState::Released => {
+                                QUICK_SESSION_SHORTCUT_PRESSED.store(false, Ordering::Release);
+                            }
+                        }
+                    } else if shortcut.matches(Modifiers::ALT, Code::KeyQ) {
+                        match event.state() {
+                            ShortcutState::Pressed => {
+                                if !QUICK_SESSION_NEW_SHORTCUT_PRESSED.swap(true, Ordering::AcqRel)
+                                {
+                                    open_quick_session(app, true);
+                                }
+                            }
+                            ShortcutState::Released => {
+                                QUICK_SESSION_NEW_SHORTCUT_PRESSED.store(false, Ordering::Release);
+                            }
+                        }
+                    }
+                })
+                .build(),
+        )
+        .invoke_handler(tauri::generate_handler![
+            hide_quick_session_window,
+            resize_quick_session_window,
+        ])
         .setup(move |app| {
             #[cfg(debug_assertions)]
             let webview_url = WebviewUrl::External("http://localhost:30141".parse()?);
@@ -572,30 +762,37 @@ pub fn run() {
             let window = builder.build()?;
 
             #[cfg(debug_assertions)]
-            let floating_url = WebviewUrl::External("http://localhost:30141/floating-chat".parse()?);
+            let quick_session_url =
+                WebviewUrl::External("http://localhost:30141/quick-session".parse()?);
             #[cfg(not(debug_assertions))]
-            let floating_url = WebviewUrl::App("index.html".into());
-            let floating_window = WebviewWindowBuilder::new(app, "floating-chat", floating_url)
-                .title("DeerHux 快捷对话")
-                .inner_size(76.0, 76.0)
-                .resizable(false)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .shadow(false)
-                .visible(false)
-                .build()?;
-            if let Some(monitor) = floating_window.current_monitor()? {
-                let work_area = monitor.work_area();
-                let scale = monitor.scale_factor();
-                let margin = (18.0 * scale) as i32;
-                let x = work_area.position.x + work_area.size.width as i32 - (76.0 * scale) as i32 - margin;
-                let y = work_area.position.y + work_area.size.height as i32 - (76.0 * scale) as i32 - margin;
-                floating_window.set_position(tauri::PhysicalPosition::new(x, y))?;
+            let quick_session_url = WebviewUrl::App("index.html".into());
+            let quick_session_window =
+                WebviewWindowBuilder::new(app, QUICK_SESSION_WINDOW_LABEL, quick_session_url)
+                    .title("DeerHux 快捷会话")
+                    .inner_size(QUICK_SESSION_WINDOW_WIDTH, 800.0)
+                    .min_inner_size(380.0, 480.0)
+                    .decorations(false)
+                    .transparent(true)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .resizable(false)
+                    // The drawer paints its own moving shadow. A native shadow
+                    // appears as soon as the transparent NSWindow is shown and
+                    // can look like a separate first entrance before the CSS
+                    // animation begins.
+                    .shadow(false)
+                    .visible(false)
+                    .build()?;
+            position_quick_session_window(&quick_session_window)?;
+
+            let quick_session_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Backquote);
+            if let Err(error) = app.global_shortcut().register(quick_session_shortcut) {
+                eprintln!("failed to register quick-session shortcut: {error}");
             }
-            #[cfg(debug_assertions)]
-            floating_window.show()?;
+            let quick_session_new_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyQ);
+            if let Err(error) = app.global_shortcut().register(quick_session_new_shortcut) {
+                eprintln!("failed to register new quick-session shortcut: {error}");
+            }
 
             #[cfg(debug_assertions)]
             window.open_devtools();

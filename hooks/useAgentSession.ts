@@ -11,7 +11,7 @@ import { agentEventBus } from "@/lib/agent-event-bus";
 import { isAmbiguousAgentCommandError, sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "@/lib/agent-modes";
-import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
+import { ControlPlaneHttpError, fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 import { ensureAgentEventsConnected, prepareAgentEvents, subscribeAgentEvents, subscribeSessionTransient } from "@/lib/agent-event-client";
 import type { SessionTransientSnapshot } from "@/lib/host-event-bus";
 import {
@@ -1004,10 +1004,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const messageEpochAtStart = messageMutationEpochRef.current;
     const controller = new AbortController();
     const sessionSignal = sessionAbortRef.current?.signal;
-    const timeout = setTimeout(() => controller.abort(), showLoading ? 30_000 : 12_000);
-    const onSessionAbort = () => controller.abort();
+    let timedOut = false;
+    let sessionAborted = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, showLoading ? 30_000 : 12_000);
+    const onSessionAbort = () => {
+      sessionAborted = true;
+      controller.abort();
+    };
     if (sessionSignal) {
-      if (sessionSignal.aborted) controller.abort();
+      if (sessionSignal.aborted) onSessionAbort();
       else sessionSignal.addEventListener("abort", onSessionAbort, { once: true });
     }
     try {
@@ -1091,15 +1099,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       setError(null);
     } catch (e) {
-      if (sid === sessionIdRef.current) {
+      const requestIsLatest = snapshotRequestSeq === messageSnapshotRequestSeqRef.current;
+      if (sid === sessionIdRef.current && requestIsLatest) {
         const isAbort = e instanceof DOMException && e.name === "AbortError";
-        if (showLoading) setError(isAbort ? "加载会话超时" : String(e));
+        if (showLoading && (!isAbort || timedOut)) setError(timedOut ? "加载会话超时" : String(e));
         else if (!isAbort) console.warn("[loadRecentMessages] failed:", e);
       }
     } finally {
       clearTimeout(timeout);
       if (sessionSignal) sessionSignal.removeEventListener("abort", onSessionAbort);
-      if (showLoading && sid === sessionIdRef.current) setLoading(false);
+      const requestIsLatest = snapshotRequestSeq === messageSnapshotRequestSeqRef.current;
+      if (showLoading && sid === sessionIdRef.current && requestIsLatest && (!sessionAborted || timedOut)) {
+        setLoading(false);
+      }
     }
   }, [applySessionSnapshot]);
 
@@ -2016,6 +2028,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     pendingScrollToUserRef.current = true;
 
     let optimisticNewSession: SessionInfo | null = null;
+    if (!isNew && session) onSessionStarted?.(session);
     if (isNew && newSessionCwd) {
       const optimisticId = `pending-${Date.now().toString(36)}`;
       optimisticSessionIdRef.current = optimisticId;
@@ -2127,7 +2140,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       clearAwaitingAgentStartGuard();
       optimisticSessionIdRef.current = null;
       adoptingCreatedSessionRef.current = null;
-      console.error("Failed to send message:", e);
+      if (e instanceof ControlPlaneHttpError && e.status >= 400 && e.status < 500) {
+        console.warn("Message request rejected:", e.message);
+      } else {
+        console.error("Failed to send message:", e);
+      }
       const errorMessage = e instanceof DOMException && e.name === "AbortError"
         ? "历史会话启动超时，请重试；本次请求已取消，不会在后台继续发送。"
         : e instanceof Error ? e.message : String(e);
