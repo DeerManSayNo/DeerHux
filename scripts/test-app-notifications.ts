@@ -14,15 +14,24 @@ const stopRoles = subscribeToAppNotification("deerhux.roles-updated", () => {
 const stopModels = subscribeToAppNotification("deerhux.models-updated", () => {
   received.push("deerhux.models-updated");
 }, target);
+const stopProjectFiles = subscribeToAppNotification("deerhux.project-files-updated", () => {
+  received.push("deerhux.project-files-updated");
+}, target);
 
 assert.deepEqual(appNotificationNames, {
   rolesUpdated: "deerhux.roles-updated",
   modelsUpdated: "deerhux.models-updated",
+  projectFilesUpdated: "deerhux.project-files-updated",
 });
 
 notifyApp("deerhux.roles-updated", target);
 notifyApp("deerhux.models-updated", target);
-assert.deepEqual(received, ["deerhux.roles-updated", "deerhux.models-updated"]);
+notifyApp("deerhux.project-files-updated", target);
+assert.deepEqual(received, [
+  "deerhux.roles-updated",
+  "deerhux.models-updated",
+  "deerhux.project-files-updated",
+]);
 
 stopRoles();
 stopRoles();
@@ -31,11 +40,16 @@ notifyApp("deerhux.models-updated", target);
 assert.deepEqual(received, [
   "deerhux.roles-updated",
   "deerhux.models-updated",
+  "deerhux.project-files-updated",
   "deerhux.models-updated",
 ]);
 
 stopModels();
 notifyApp("deerhux.models-updated", target);
-assert.equal(received.length, 3);
+assert.equal(received.length, 4);
+
+stopProjectFiles();
+notifyApp("deerhux.project-files-updated", target);
+assert.equal(received.length, 4);
 
 console.log("app notification tests passed");

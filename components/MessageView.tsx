@@ -7,7 +7,6 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { useTheme } from "@/hooks/useTheme";
-import { normalizeLocalFileHref, openLocalFileLink } from "@/lib/external-links";
 import { formatMessageUsage } from "@/lib/message-usage";
 import type {
   AgentMessage,
@@ -87,22 +86,44 @@ function formatTime(ts?: number): string | null {
   return `${date} ${time}`;
 }
 
-function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
+async function copyText(text: string): Promise<void> {
+  if (window.__TAURI_INTERNALS__) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("plugin:clipboard-manager|write_text", { text });
+      return;
+    } catch {
+      // Keep browser fallbacks available if the native plugin is unavailable.
+    }
   }
+
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Tauri/WebView can expose the Clipboard API while rejecting writes.
+      // Fall through to the selection-based browser compatibility path.
+    }
+  }
+
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const ta = document.createElement("textarea");
   try {
-    const ta = document.createElement("textarea");
     ta.value = text;
     ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
     ta.style.opacity = "0";
+    ta.setAttribute("readonly", "");
     document.body.appendChild(ta);
+    ta.focus();
     ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-    return Promise.resolve();
-  } catch {
-    return Promise.reject();
+    ta.setSelectionRange(0, ta.value.length);
+    if (!document.execCommand("copy")) throw new Error("Copy command was rejected");
+  } finally {
+    ta.remove();
+    activeElement?.focus();
   }
 }
 
@@ -252,6 +273,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
   const [expanded, setExpanded] = useState(false);
   const [editValue, setEditValue] = useState(content);
   const [showSystemPromptModal, setShowSystemPromptModal] = useState(false);
+  const [systemPromptCopyState, setSystemPromptCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const editorRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const canResend = !!onResend && !!entryId;
@@ -301,6 +323,16 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [showSystemPromptModal]);
+
+  const handleCopySystemPrompt = async () => {
+    try {
+      await copyText(systemPrompt ?? "");
+      setSystemPromptCopyState("copied");
+    } catch {
+      setSystemPromptCopyState("failed");
+    }
+    window.setTimeout(() => setSystemPromptCopyState("idle"), 1500);
+  };
 
   const handleSendEdit = () => {
     const trimmed = editValue.trim();
@@ -415,7 +447,10 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
     return (
       <span
         title={systemPrompt === null ? "当前系统提示词加载中" : systemPrompt || "（空）"}
-        onClick={isClickable ? () => setShowSystemPromptModal(true) : undefined}
+        onClick={isClickable ? () => {
+          setSystemPromptCopyState("idle");
+          setShowSystemPromptModal(true);
+        } : undefined}
         style={{
           display: "inline-flex",
           alignItems: "center",
@@ -757,9 +792,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <button
                   type="button"
-                  onClick={() => {
-                    void navigator.clipboard.writeText(systemPrompt ?? "");
-                  }}
+                  onClick={() => void handleCopySystemPrompt()}
                   style={{
                     display: "inline-flex", alignItems: "center", gap: 5,
                     padding: "6px 12px",
@@ -776,7 +809,9 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
                     <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
                     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                   </svg>
-                  复制
+                  <span aria-live="polite">
+                    {systemPromptCopyState === "copied" ? "已复制" : systemPromptCopyState === "failed" ? "复制失败" : "复制"}
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -1264,18 +1299,10 @@ function BlockView({ block, toolResults, streamingDuration, toolCallDurations, i
 function createMarkdownComponents(isStreaming: boolean): Components {
   return {
     a({ href, children, node: _node, ...props }) {
-      const isLocalFile = typeof href === "string" && normalizeLocalFileHref(href) !== null;
       return (
         <a
           {...props}
           href={href}
-          target={isLocalFile ? undefined : "_blank"}
-          rel={isLocalFile ? undefined : "noopener noreferrer"}
-          onClick={isLocalFile ? (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (href) void openLocalFileLink(href);
-          } : undefined}
         >
           {children}
         </a>
@@ -1320,7 +1347,7 @@ const COMPLETED_MARKDOWN_COMPONENTS = createMarkdownComponents(false);
 
 function TextBlock({ block, isStreaming }: { block: TextContent; isStreaming?: boolean }) {
   return (
-    <div className="markdown-body">
+    <div className="markdown-body" data-ai-output>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={isStreaming ? STREAMING_MARKDOWN_COMPONENTS : COMPLETED_MARKDOWN_COMPONENTS}

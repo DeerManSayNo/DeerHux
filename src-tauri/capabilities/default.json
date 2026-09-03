@@ -25,6 +25,7 @@
     "core:window:allow-set-size",
     "core:window:allow-set-always-on-top",
     "core:webview:allow-create-webview-window",
+    "clipboard-manager:allow-write-text",
     "dialog:allow-open",
     "shell:allow-open"
   ]

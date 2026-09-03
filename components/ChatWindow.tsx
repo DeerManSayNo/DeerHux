@@ -672,7 +672,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
 
   const {
     loading, error, data, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, agentMode, planReady, thinkingLevel,
+    agentRunning, modelNames, modelList, modelsLoadError, modelThinkingLevels, modelThinkingLevelMaps, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId, watchdogInfo,
     isCompacting, compactionProgress, clearCompactionProgress, compactError, lastModelError, terminalNotice, clearTerminalNotice, displayModel: displayModelValue, sessionStats,
     agentPhase,
@@ -1581,6 +1581,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         model={displayModelValue}
         modelNames={modelNames}
         modelList={modelList}
+        modelCatalogError={modelsLoadError}
         onModelChange={handleModelChange}
         onCompact={session?.id ? () => openCompactionDialog("manual") : undefined}
         onAbortCompaction={handleAbortCompaction}

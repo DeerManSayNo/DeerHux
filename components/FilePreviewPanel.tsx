@@ -71,7 +71,16 @@ export function FilePreviewPanel({ tabs, activeTabId, cwd, viewerCwd, onSelectTa
         </div>
       )}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {activeTab?.filePath ? (
+        {activeTab?.kind === "web" ? (
+          <iframe
+            key={activeTab.id}
+            src={activeTab.filePath}
+            title={activeTab.label}
+            referrerPolicy="strict-origin-when-cross-origin"
+            sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+            style={{ width: "100%", height: "100%", border: 0, background: "white" }}
+          />
+        ) : activeTab?.filePath ? (
           <FileViewer filePath={activeTab.filePath} cwd={viewerCwd ?? cwd ?? undefined} onOpenFile={onOpenFile} />
         ) : (
           <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>

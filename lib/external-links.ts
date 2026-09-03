@@ -70,6 +70,43 @@ export function normalizeLocalFileHref(href: string): string | null {
   return null;
 }
 
+/** Resolve a relative file link emitted by the agent against the active workspace. */
+export function resolveLocalFileHref(href: string, cwd?: string | null): string | null {
+  const absolutePath = normalizeLocalFileHref(href);
+  if (absolutePath) return absolutePath;
+  if (!cwd) return null;
+
+  const trimmed = href.trim();
+  if (!trimmed || /^(?:[a-z][a-z\d+.-]*:|\/\/|#|\?)/i.test(trimmed)) return null;
+
+  const encodedPath = trimmed.split(/[?#]/, 1)[0];
+  let relativePath: string;
+  try {
+    relativePath = decodeURIComponent(encodedPath);
+  } catch {
+    relativePath = encodedPath;
+  }
+
+  const windowsPath = WINDOWS_ABSOLUTE_PATH_RE.test(cwd);
+  const uncPath = cwd.startsWith("\\\\");
+  const normalizedCwd = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  const parts = `${normalizedCwd}/${relativePath.replace(/\\/g, "/")}`.split("/");
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (resolved.length > (windowsPath ? 1 : 0)) resolved.pop();
+      continue;
+    }
+    resolved.push(part);
+  }
+
+  const joined = resolved.join("/");
+  if (windowsPath) return joined;
+  if (uncPath) return `//${joined}`;
+  return `/${joined}`;
+}
+
 export async function openLocalFileLink(href: string): Promise<boolean> {
   const filePath = normalizeLocalFileHref(href);
   if (!filePath) return false;

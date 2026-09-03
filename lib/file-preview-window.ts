@@ -8,6 +8,7 @@ export interface FilePreviewTab {
   id: string;
   label: string;
   filePath: string;
+  kind?: "file" | "web";
 }
 
 export interface FilePreviewState {
@@ -37,7 +38,8 @@ export function sanitizeFilePreviewState(value: unknown): FilePreviewState {
       Boolean(tab) &&
       typeof tab.id === "string" &&
       typeof tab.label === "string" &&
-      typeof tab.filePath === "string"
+      typeof tab.filePath === "string" &&
+      (tab.kind === undefined || tab.kind === "file" || tab.kind === "web")
     ))
     : [];
   const activeTabId = typeof state.activeTabId === "string" && tabs.some((tab) => tab.id === state.activeTabId)

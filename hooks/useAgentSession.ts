@@ -314,6 +314,16 @@ function fetchModels(): Promise<ModelsResponse> {
   return modelsPromise;
 }
 
+function describeModelsLoadError(error: unknown): string {
+  if (error instanceof ControlPlaneHttpError) {
+    return `模型列表请求失败（HTTP ${error.status}），请检查本地后台服务或重启应用`;
+  }
+  if (error instanceof Error && error.message) {
+    return `模型列表加载失败：${error.message}`;
+  }
+  return "模型列表加载失败，请检查本地后台服务或重启应用";
+}
+
 export type AgentPhase =
   | { kind: "waiting_model"; reason: "initial" | "after_message" | "after_tool" | "restored" | "recovery" }
   | { kind: "running_tools"; tools: { id: string; name: string }[] }
@@ -643,6 +653,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [agentRunning, setAgentRunning] = useState(false);
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
   const [modelList, setModelList] = useState<{ id: string; name: string; provider: string; input?: ("text" | "image")[] }[]>([]);
+  const [modelsLoadError, setModelsLoadError] = useState<string | null>(null);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [autoRecoveryModels, setAutoRecoveryModels] = useState<({ provider: string; modelId: string } | null)[]>([]);
@@ -3220,6 +3231,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let cancelled = false;
     const applyModels = (d: ModelsResponse) => {
       if (cancelled || !isUsableModelsResponse(d)) return;
+      setModelsLoadError(null);
       setModelNames(d.models);
       setAutoRecoveryModels(d.autoRecoveryModels ?? []);
       if (d.thinkingLevels) setModelThinkingLevels(d.thinkingLevels);
@@ -3241,8 +3253,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const cached = readCachedJson<ModelsResponse>(MODELS_CACHE_KEY);
     if (isUsableModelsResponse(cached)) applyModels(cached);
-    fetchModels().then(applyModels).catch(() => {
+    fetchModels().then(applyModels).catch((error: unknown) => {
       // Stale data remains usable; the next mount/config event revalidates.
+      if (!cancelled) setModelsLoadError(describeModelsLoadError(error));
     });
     return () => { cancelled = true; };
   }, [isNew, modelsRefreshKey, modelsConfigVersion, setNewSessionModel]);
@@ -3263,7 +3276,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, agentMode, planReady, thinkingLevel,
+    agentRunning, modelNames, modelList, modelsLoadError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, systemPrompt: systemPrompt ?? lastSystemPromptRef.current, forkingEntryId,
     isCompacting, compactionProgress, clearCompactionProgress: () => setCompactionProgress(null), compactError, lastModelError, terminalNotice, clearTerminalNotice, currentModel, displayModel, sessionStats,
     agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,

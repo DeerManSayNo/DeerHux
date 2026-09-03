@@ -1,6 +1,7 @@
 export const appNotificationNames = {
   rolesUpdated: "deerhux.roles-updated",
   modelsUpdated: "deerhux.models-updated",
+  projectFilesUpdated: "deerhux.project-files-updated",
 } as const;
 
 export type AppNotificationName = (typeof appNotificationNames)[keyof typeof appNotificationNames];

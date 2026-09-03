@@ -1,5 +1,5 @@
 #[cfg(not(debug_assertions))]
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(not(debug_assertions))]
 use std::net::TcpStream;
 #[cfg(not(debug_assertions))]
@@ -16,9 +16,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 use std::{mem::size_of, os::windows::io::AsRawHandle, os::windows::process::CommandExt};
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(not(debug_assertions))]
 use tauri::webview::PageLoadEvent;
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
 use tauri::{LogicalPosition, TitleBarStyle};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -228,7 +228,10 @@ fn resize_quick_session_window(app: tauri::AppHandle, width: f64) -> Result<(), 
             .set_size(tauri::PhysicalSize::new(physical_width, size.height))
             .map_err(|error| error.to_string())?;
         window
-            .set_position(tauri::PhysicalPosition::new(right - physical_width as i32, position.y))
+            .set_position(tauri::PhysicalPosition::new(
+                right - physical_width as i32,
+                position.y,
+            ))
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -398,6 +401,7 @@ struct BackendState {
     child: Mutex<Option<BackendProcess>>,
     stopping: AtomicBool,
     cleaned: AtomicBool,
+    startup_logging: Arc<AtomicBool>,
 }
 
 #[cfg(not(debug_assertions))]
@@ -407,11 +411,13 @@ impl BackendState {
             child: Mutex::new(None),
             stopping: AtomicBool::new(false),
             cleaned: AtomicBool::new(false),
+            startup_logging: Arc::new(AtomicBool::new(true)),
         }
     }
 
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
+        self.startup_logging.store(false, Ordering::Release);
         if self.cleaned.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -500,44 +506,131 @@ fn startup_log(message: impl AsRef<str>) {
 }
 
 #[cfg(not(debug_assertions))]
+fn redact_backend_log_line(line: &str) -> String {
+    let line = line.trim().chars().take(2000).collect::<String>();
+    let lowercase = line.to_ascii_lowercase();
+    const SENSITIVE_MARKERS: [&str; 6] = [
+        "authorization",
+        "api-key",
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+    ];
+    let sensitive_at = SENSITIVE_MARKERS
+        .iter()
+        .filter_map(|marker| lowercase.find(marker))
+        .min();
+    match sensitive_at {
+        Some(index) => format!("{}[REDACTED]", &line[..index]),
+        None => line,
+    }
+}
+
+/// Drain both pipes for the child lifetime to prevent backpressure. Only the
+/// startup window is persisted; later provider/tool output may contain user data.
+#[cfg(not(debug_assertions))]
+fn capture_backend_output(
+    reader: impl Read + Send + 'static,
+    stream: &'static str,
+    enabled: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            if enabled.load(Ordering::Acquire) {
+                let line = redact_backend_log_line(&line);
+                if !line.is_empty() {
+                    startup_log(format!("backend {stream}: {line}"));
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(debug_assertions))]
 fn find_available_port() -> std::io::Result<u16> {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr().map(|addr| addr.port()))
 }
 
 #[cfg(not(debug_assertions))]
-fn server_responds(port: u16) -> bool {
+enum ReadinessProbe {
+    Ready,
+    Pending,
+    Failed(String),
+}
+
+#[cfg(not(debug_assertions))]
+fn probe_server_readiness(port: u16) -> ReadinessProbe {
     let Ok(mut stream) = TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_millis(100),
+        Duration::from_millis(250),
     ) else {
-        return false;
+        return ReadinessProbe::Pending;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+    // Windows cold starts may spend several seconds loading externalized agent
+    // modules through Defender. Wait for one probe instead of piling up retries.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     if stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .write_all(
+            b"GET /api/health/ready HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
         .is_err()
     {
-        return false;
+        return ReadinessProbe::Pending;
     }
 
-    let mut buffer = [0; 64];
-    stream.read(&mut buffer).is_ok_and(|size| {
-        std::str::from_utf8(&buffer[..size]).is_ok_and(|response| {
-            response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.1 30")
-        })
-    })
+    let mut buffer = Vec::with_capacity(4096);
+    if stream.take(8192).read_to_end(&mut buffer).is_err() {
+        return ReadinessProbe::Pending;
+    }
+    let Ok(response) = std::str::from_utf8(&buffer) else {
+        return ReadinessProbe::Pending;
+    };
+    let headers = response
+        .split_once("\r\n\r\n")
+        .map_or(response, |(headers, _)| headers)
+        .to_ascii_lowercase();
+    let is_deerhux = headers
+        .lines()
+        .any(|line| line.trim() == "x-deerhux-ready: 1");
+    if response.starts_with("HTTP/1.1 200") && is_deerhux {
+        return ReadinessProbe::Ready;
+    }
+    if response.starts_with("HTTP/1.1 503") && is_deerhux {
+        let permanent_failure = [
+            "node_version_unsupported",
+            "agent_directory_unavailable",
+            "run_store_unavailable",
+        ]
+        .iter()
+        .any(|code| headers.contains(&format!("x-deerhux-readiness-code: {code}")));
+        if !permanent_failure {
+            return ReadinessProbe::Pending;
+        }
+        let body = response.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+        let detail = body
+            .replace('\r', " ")
+            .replace('\n', " ")
+            .chars()
+            .take(1000)
+            .collect::<String>();
+        return ReadinessProbe::Failed(format!("后台运行时自检失败：{detail}"));
+    }
+    ReadinessProbe::Pending
 }
 
 #[cfg(not(debug_assertions))]
 fn wait_for_server(port: u16, backend: &BackendState) -> Result<(), String> {
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(20) {
+    while started.elapsed() < Duration::from_secs(60) {
         if backend.stopping.load(Ordering::Acquire) {
             return Err("应用窗口已关闭".into());
         }
-        if server_responds(port) {
-            return Ok(());
+        match probe_server_readiness(port) {
+            ReadinessProbe::Ready => return Ok(()),
+            ReadinessProbe::Failed(error) => return Err(error),
+            ReadinessProbe::Pending => {}
         }
         if let Ok(mut slot) = backend.child.lock() {
             if let Some(process) = slot.as_mut() {
@@ -546,9 +639,11 @@ fn wait_for_server(port: u16, backend: &BackendState) -> Result<(), String> {
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(500));
     }
-    Err(format!("等待后台服务超时（http://127.0.0.1:{port}）"))
+    Err(format!(
+        "等待后台运行时自检超时（60 秒，http://127.0.0.1:{port}/api/health/ready）"
+    ))
 }
 
 #[cfg(not(debug_assertions))]
@@ -699,7 +794,25 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
             .map_err(|error| format!("无法定位应用资源：{error}"))?;
         let node = resolve_node(&resource_dir);
         let server_js = resource_dir.join("deerhux-server.js");
-        startup_log(format!("spawning {} on port {port}", node.display()));
+        let node_version = Command::new(&node)
+            .arg("--version")
+            .output()
+            .map_err(|error| format!("无法执行内置 Node.js：{error}"))?;
+        if !node_version.status.success() {
+            return Err(format!(
+                "内置 Node.js 版本检查失败（{}）",
+                node_version.status
+            ));
+        }
+        let node_version = String::from_utf8_lossy(&node_version.stdout)
+            .trim()
+            .to_string();
+        startup_log(format!(
+            "runtime app=v{} node={} resource={} port={port}",
+            env!("CARGO_PKG_VERSION"),
+            node_version,
+            resource_dir.display()
+        ));
         // V8 compile cache persisted across launches: after the first run,
         // starts skip parsing/compiling ~25MB of bundled JS.
         let compile_cache = node_compile_cache_dir();
@@ -715,10 +828,8 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
             // on stdin EOF, letting Node flush the V8 compile cache to disk
             // (Windows has no deliverable signal; TerminateProcess skips it).
             .stdin(Stdio::piped())
-            // Do not persist backend output: provider errors and tool output may
-            // contain credentials or user data. Desktop phase logs stay metadata-only.
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         #[cfg(target_os = "windows")]
         command.creation_flags(CREATE_NO_WINDOW);
 
@@ -729,6 +840,12 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
             .spawn()
             .map_err(|error| format!("无法启动后台服务：{error}"))?;
         let pid = child.id();
+        if let Some(stdout) = child.stdout.take() {
+            capture_backend_output(stdout, "stdout", Arc::clone(&backend.startup_logging));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            capture_backend_output(stderr, "stderr", Arc::clone(&backend.startup_logging));
+        }
         #[cfg(target_os = "windows")]
         if unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) } == 0 {
             let error = std::io::Error::last_os_error();
@@ -764,7 +881,9 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
             "backend spawned pid={pid} +{}ms",
             process_started.elapsed().as_millis()
         ));
-        wait_for_server(port, &backend)?;
+        let readiness = wait_for_server(port, &backend);
+        backend.startup_logging.store(false, Ordering::Release);
+        readiness?;
         Ok(port)
     })();
 
@@ -841,6 +960,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -902,6 +1022,8 @@ pub fn run() {
             let builder = builder.decorations(false);
 
             let window = builder.build()?;
+            #[cfg(not(debug_assertions))]
+            let _ = &window;
 
             #[cfg(debug_assertions)]
             let quick_session_url =

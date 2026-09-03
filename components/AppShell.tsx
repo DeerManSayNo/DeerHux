@@ -12,11 +12,9 @@ import type { Tab } from "./TabBar";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import {
   normalizeExternalHref,
-  normalizeLocalFileHref,
-  openExternalLink,
-  openLocalFileLink,
+  resolveLocalFileHref,
 } from "@/lib/external-links";
-import { getRelativeFilePath } from "@/lib/file-paths";
+import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { retainCwdWorkspaceState } from "@/lib/workspace-cwd-state";
 import { getProjectDisplayName } from "@/lib/project-name";
 import {
@@ -36,6 +34,7 @@ import type { ChatInputHandle, ChatInputState } from "./ChatInput";
 import { ChatDraftStore, clearCwdScopedDraftResources, promoteNewSessionDraft } from "@/lib/chat-drafts";
 import { getChatRenderKey, promoteChatRenderKey } from "@/lib/chat-render-keys";
 import { restoreQuickSessionVisibility } from "@/lib/quick-session-visibility";
+import { subscribeToAppNotification } from "@/lib/app-notifications";
 
 type SidebarMode = "open" | "closed";
 
@@ -199,6 +198,10 @@ export function AppShell() {
   const focusedChatSlotIndexRef = useRef(0);
   const [refreshKey, setRefreshKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
+
+  useEffect(() => subscribeToAppNotification("deerhux.project-files-updated", () => {
+    setExplorerRefreshKey((key) => key + 1);
+  }), []);
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
@@ -327,43 +330,6 @@ export function AppShell() {
   useEffect(() => {
     activeCwdRef.current = activeCwd;
   }, [activeCwd]);
-
-  useEffect(() => {
-    const handleLinkClick = (event: MouseEvent) => {
-      if (
-        event.defaultPrevented ||
-        event.button !== 0 ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.shiftKey ||
-        event.altKey
-      ) {
-        return;
-      }
-
-      if (!(event.target instanceof Element)) return;
-
-      const anchor = event.target.closest("a[href]");
-      if (!(anchor instanceof HTMLAnchorElement)) return;
-
-      const href = anchor.getAttribute("href");
-      if (!href) return;
-
-      if (normalizeLocalFileHref(href)) {
-        event.preventDefault();
-        void openLocalFileLink(href);
-        return;
-      }
-
-      if (!normalizeExternalHref(href)) return;
-
-      event.preventDefault();
-      void openExternalLink(href);
-    };
-
-    document.addEventListener("click", handleLinkClick);
-    return () => document.removeEventListener("click", handleLinkClick);
-  }, []);
 
   // Sync client-only localStorage state after mount to avoid hydration mismatch
   useEffect(() => {
@@ -1158,10 +1124,67 @@ export function AppShell() {
     setRightPanelOpen(filePreviewDetached ? false : true);
   }, [filePreviewDetached]);
 
+  const handleOpenWebLink = useCallback((url: string, label?: string) => {
+    const tabId = `web:${url}`;
+    let fallbackLabel = url;
+    try {
+      fallbackLabel = new URL(url).hostname;
+    } catch {
+      // normalizeExternalHref has already validated the URL.
+    }
+    setFileTabs((prev) => {
+      if (prev.some((tab) => tab.id === tabId)) return prev;
+      return [...prev, {
+        id: tabId,
+        label: label?.trim() || fallbackLabel,
+        filePath: url,
+        kind: "web",
+      }];
+    });
+    setActiveFileTabId(tabId);
+    setRightPanelOpen(filePreviewDetached ? false : true);
+  }, [filePreviewDetached]);
+
+  useEffect(() => {
+    const handleAiOutputLinkClick = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey ||
+        !(event.target instanceof Element)
+      ) return;
+
+      const anchor = event.target.closest("[data-ai-output] a[href]");
+      if (!(anchor instanceof HTMLAnchorElement)) return;
+
+      const href = anchor.getAttribute("href");
+      if (!href) return;
+
+      const filePath = resolveLocalFileHref(href, effectiveProjectCwd);
+      if (filePath) {
+        event.preventDefault();
+        handleOpenFile(filePath, getFileName(filePath));
+        return;
+      }
+
+      const externalUrl = normalizeExternalHref(href);
+      if (!externalUrl) return;
+
+      event.preventDefault();
+      handleOpenWebLink(externalUrl, anchor.textContent ?? undefined);
+    };
+
+    document.addEventListener("click", handleAiOutputLinkClick);
+    return () => document.removeEventListener("click", handleAiOutputLinkClick);
+  }, [effectiveProjectCwd, handleOpenFile, handleOpenWebLink]);
+
   const handleSelectFileTab = useCallback((tabId: string) => {
     if (rightPanelOpen && tabId === activeFileTabId) {
       const tab = fileTabs.find((t) => t.id === tabId);
-      if (tab) {
+      if (tab && tab.kind !== "web") {
         chatInputRef.current?.toggleReference(getRelativeFilePath(tab.filePath, effectiveProjectCwd ?? undefined));
         return;
       }

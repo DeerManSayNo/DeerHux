@@ -7,6 +7,7 @@ const eslintConfig = [
       ".codegraph/**",
       ".deerhux/**",
       ".deerhux-build-home/**",
+      "codeAgent/**",
       "src-tauri/target/**",
       "src-tauri/resources/**",
     ],

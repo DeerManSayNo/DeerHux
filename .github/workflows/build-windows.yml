@@ -21,7 +21,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: npm
 
       - name: Set up Rust
@@ -30,14 +30,30 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install dependencies
-        # 现有 lockfile 含有 npm 无法解析的历史版本元数据；仅在临时 Runner 中移除后重新解算。
-        # 不会改写仓库中的 lockfile。
+        run: npm ci --legacy-peer-deps
+
+      - name: Validate source
         run: |
-          Remove-Item package-lock.json
-          npm install --legacy-peer-deps
+          npx tsc --noEmit
+          npm run test:core
+
+      - name: Download bundled Node runtime
+        run: npm run download:node:win
+
+      - name: Verify bundled Node runtime
+        shell: pwsh
+        run: |
+          $node = "src-tauri/binaries/node-x86_64-pc-windows-msvc.exe"
+          $version = & $node --version
+          if ([version]$version.TrimStart('v') -lt [version]'22.19.0') {
+            throw "Bundled Node $version does not satisfy >=22.19.0"
+          }
 
       - name: Build Windows installer
         run: npm run tauri:build:win
+
+      - name: Smoke test standalone with bundled Node
+        run: node scripts/smoke-standalone.js --node src-tauri/binaries/node-x86_64-pc-windows-msvc.exe
 
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4

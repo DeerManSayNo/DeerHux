@@ -8,6 +8,7 @@ export interface Tab {
   id: string;
   label: string;
   filePath: string;
+  kind?: "file" | "web";
 }
 
 interface Props {
@@ -243,7 +244,12 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
               }}
             >
               <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
-                {getFileIcon(tab.label, 13)}
+                {tab.kind === "web" ? (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" />
+                  </svg>
+                ) : getFileIcon(tab.label, 13)}
               </span>
               <span
                 style={{
@@ -337,10 +343,16 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
         <ContextMenuButton icon="others" disabled={otherTabIds.length === 0} onClick={() => closeTabs(otherTabIds)}>关闭其他页签</ContextMenuButton>
         <ContextMenuButton icon="all" disabled={allTabIds.length === 0} onClick={() => closeTabs(allTabIds)}>关闭全部页签</ContextMenuButton>
         <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
-        <ContextMenuButton icon="copy" onClick={() => handleCopyPath("absolute")}>{copied === "absolute" ? "已复制!" : "复制绝对路径"}</ContextMenuButton>
-        <ContextMenuButton icon="copy" onClick={() => handleCopyPath("relative")}>{copied === "relative" ? "已复制!" : "复制相对路径"}</ContextMenuButton>
-        <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
-        <ContextMenuButton icon="folder" onClick={handleRevealInFinder}>{isMac ? "在 Finder 中显示" : "打开所在文件夹"}</ContextMenuButton>
+        <ContextMenuButton icon="copy" onClick={() => handleCopyPath("absolute")}>
+          {copied === "absolute" ? "已复制!" : contextTab.kind === "web" ? "复制链接" : "复制绝对路径"}
+        </ContextMenuButton>
+        {contextTab.kind !== "web" && (
+          <>
+            <ContextMenuButton icon="copy" onClick={() => handleCopyPath("relative")}>{copied === "relative" ? "已复制!" : "复制相对路径"}</ContextMenuButton>
+            <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
+            <ContextMenuButton icon="folder" onClick={handleRevealInFinder}>{isMac ? "在 Finder 中显示" : "打开所在文件夹"}</ContextMenuButton>
+          </>
+        )}
       </div>
     )}
     </>
