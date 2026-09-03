@@ -734,6 +734,17 @@ fn node_compile_cache_dir() -> PathBuf {
         .unwrap_or_else(|| dir.join("node-compile-cache"))
 }
 
+#[cfg(all(not(debug_assertions), target_os = "windows"))]
+fn normalize_windows_path(path: &Path) -> PathBuf {
+    let path = path.as_os_str().to_string_lossy();
+    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{path}"));
+    }
+    path.strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(path.as_ref()))
+}
+
 #[cfg(not(debug_assertions))]
 fn resolve_node(resource_dir: &Path) -> PathBuf {
     let exe_dir = std::env::current_exe()
@@ -812,6 +823,8 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
             .path()
             .resource_dir()
             .map_err(|error| format!("无法定位应用资源：{error}"))?;
+        #[cfg(target_os = "windows")]
+        let resource_dir = normalize_windows_path(&resource_dir);
         let node = resolve_node(&resource_dir);
         let server_js = resource_dir.join("deerhux-server.js");
         let node_version = Command::new(&node)
@@ -1119,6 +1132,18 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(move |_handle, _event| {
+        #[cfg(target_os = "windows")]
+        if matches!(
+            &_event,
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { .. }, .. }
+                if label == "main"
+        ) {
+            #[cfg(not(debug_assertions))]
+            backend.stop();
+            _handle.exit(0);
+            return;
+        }
+
         #[cfg(not(debug_assertions))]
         if matches!(
             _event,
