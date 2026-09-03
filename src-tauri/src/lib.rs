@@ -1,3 +1,5 @@
+#[cfg(any(test, all(not(debug_assertions), target_os = "windows")))]
+use std::borrow::Cow;
 #[cfg(not(debug_assertions))]
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(not(debug_assertions))]
@@ -36,6 +38,39 @@ use windows_sys::Win32::{
 
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(any(test, all(not(debug_assertions), target_os = "windows")))]
+fn strip_windows_verbatim_prefix(path: &str) -> Cow<'_, str> {
+    let Some(verbatim) = path.strip_prefix(r"\\?\") else {
+        return Cow::Borrowed(path);
+    };
+
+    if verbatim
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+    {
+        return Cow::Owned(format!(r"\\{}", &verbatim[4..]));
+    }
+
+    let bytes = verbatim.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        return Cow::Borrowed(verbatim);
+    }
+
+    Cow::Borrowed(path)
+}
+
+#[cfg(all(not(debug_assertions), target_os = "windows"))]
+fn normalize_windows_node_path(path: &Path) -> PathBuf {
+    path.to_str()
+        .map(strip_windows_verbatim_prefix)
+        .map(|path| PathBuf::from(path.as_ref()))
+        .unwrap_or_else(|| path.to_path_buf())
+}
 
 const QUICK_SESSION_WINDOW_LABEL: &str = "quick-session";
 const QUICK_SESSION_OPEN_EVENT: &str = "quick-session://request-open";
@@ -734,17 +769,6 @@ fn node_compile_cache_dir() -> PathBuf {
         .unwrap_or_else(|| dir.join("node-compile-cache"))
 }
 
-#[cfg(all(not(debug_assertions), target_os = "windows"))]
-fn normalize_windows_path(path: &Path) -> PathBuf {
-    let path = path.as_os_str().to_string_lossy();
-    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{path}"));
-    }
-    path.strip_prefix(r"\\?\")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(path.as_ref()))
-}
-
 #[cfg(not(debug_assertions))]
 fn resolve_node(resource_dir: &Path) -> PathBuf {
     let exe_dir = std::env::current_exe()
@@ -824,7 +848,7 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
             .resource_dir()
             .map_err(|error| format!("无法定位应用资源：{error}"))?;
         #[cfg(target_os = "windows")]
-        let resource_dir = normalize_windows_path(&resource_dir);
+        let resource_dir = normalize_windows_node_path(&resource_dir);
         let node = resolve_node(&resource_dir);
         let server_js = resource_dir.join("deerhux-server.js");
         let node_version = Command::new(&node)
@@ -1132,7 +1156,7 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(move |_handle, _event| {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if matches!(
             &_event,
             tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { .. }, .. }
@@ -1152,4 +1176,37 @@ pub fn run() {
             backend.stop();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_windows_verbatim_prefix;
+
+    #[test]
+    fn strips_windows_verbatim_drive_prefix_for_node() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\C:\Users\14016\AppData\Local\DeerHux"),
+            r"C:\Users\14016\AppData\Local\DeerHux"
+        );
+    }
+
+    #[test]
+    fn converts_windows_verbatim_unc_prefix_for_node() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\UNC\server\share\DeerHux"),
+            r"\\server\share\DeerHux"
+        );
+    }
+
+    #[test]
+    fn preserves_non_verbatim_and_non_filesystem_paths() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"C:\Users\14016\AppData\Local\DeerHux"),
+            r"C:\Users\14016\AppData\Local\DeerHux"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\"),
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\"
+        );
+    }
 }
