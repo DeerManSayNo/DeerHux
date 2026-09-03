@@ -37,10 +37,13 @@ import {
   makeSubagentToolCallLimitDetails,
 } from "../parallel-agent/subagent-concurrency.ts";
 import { buildPreview, spillLargeText, SPILL_PREVIEW_MAX_BYTES, SPILL_PREVIEW_MAX_LINES } from "./context-archive.ts";
+import { mayMutateWorkspace, runTrackedWorkspaceMutation } from "./workspace-mutation-coordinator.ts";
 
 export interface ToolExecutorOptions {
   /** 用于长工具输出 spill；缺失时跳过落盘。 */
   sessionId?: string;
+  /** 用于跨 Session 的项目级修改互斥与工具前后快照。 */
+  cwd?: string;
   /** 可选策略流水线；未配置时保持原有直接执行行为。 */
   pipeline?: ToolExecutionPipeline | ToolExecutionPipelineOptions;
 }
@@ -89,11 +92,13 @@ export class ToolExecutor {
   /** 绑定的工具注册表（查 executionMode / 取工具定义）。 */
   private readonly registry: ToolRegistry;
   private readonly sessionId?: string;
+  private readonly cwd?: string;
   private readonly pipeline: ToolExecutionPipeline;
 
   constructor(registry: ToolRegistry, options?: ToolExecutorOptions) {
     this.registry = registry;
     this.sessionId = options?.sessionId;
+    this.cwd = options?.cwd;
     this.pipeline = options?.pipeline instanceof ToolExecutionPipeline
       ? options.pipeline
       : new ToolExecutionPipeline(options?.pipeline);
@@ -233,22 +238,52 @@ export class ToolExecutor {
       if (argumentError) {
         return this.makeErrorOutput(`Tool "${toolName}" argument preparation failed: ${argumentError}`);
       }
+      const executeTool = async (): Promise<ToolPipelineOutput> => {
+        try {
+          const result = await tool.execute(toolCallId, params, signal, onUpdate, ctx);
+          // pi 的 AgentToolResult 类型不保证有 changedFiles（那是 DeerHux 的扩展），
+          // 但内置 bash/edit/write 工具会在运行时塞这个字段。用类型断言安全提取。
+          const changedFiles = (result as { changedFiles?: string[] })?.changedFiles;
+          return {
+            result: this.spillResultContent(result, toolCallId, toolName),
+            // defineTool 允许工具以结构化 isError 返回业务失败（例如前台
+            // subagent 超时后已安全中止）。不能因为 execute Promise 正常 resolve
+            // 就把失败洗成成功，否则 ToolResult/UI 都会显示绿色完成。
+            isError: (result as { isError?: boolean }).isError === true,
+            changedFiles,
+          };
+        } catch (err) {
+          // 错误隔离：不向上抛，转成 isError 结果。工具即便失败也可能已经落盘，
+          // 外层修改协调器仍会执行结束快照并记录实际变化。
+          const isAborted = signal.aborted || this.isAbortError(err);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return this.makeErrorOutput(
+            isAborted ? `Tool "${toolName}" aborted: ${errMsg}` : errMsg,
+          );
+        }
+      };
+
+      if (!this.cwd || !mayMutateWorkspace(toolName)) return executeTool();
+
       try {
-        const result = await tool.execute(toolCallId, params, signal, onUpdate, ctx);
-        // pi 的 AgentToolResult 类型不保证有 changedFiles（那是 DeerHux 的扩展），
-        // 但内置 bash/edit/write 工具会在运行时塞这个字段。用类型断言安全提取。
-        const changedFiles = (result as { changedFiles?: string[] })?.changedFiles;
+        const tracked = await runTrackedWorkspaceMutation({
+          cwd: this.cwd,
+          signal,
+          operation: executeTool,
+        });
+        const changedFiles = [...new Set([
+          ...(tracked.value.changedFiles ?? []),
+          ...tracked.changedFiles,
+        ])];
         return {
-          result: this.spillResultContent(result, toolCallId, toolName),
-          isError: false,
-          changedFiles,
+          ...tracked.value,
+          changedFiles: changedFiles.length > 0 ? changedFiles : undefined,
         };
       } catch (err) {
-        // 错误隔离：不向上抛，转成 isError 结果。
         const isAborted = signal.aborted || this.isAbortError(err);
         const errMsg = err instanceof Error ? err.message : String(err);
         return this.makeErrorOutput(
-          isAborted ? `Tool "${toolName}" aborted: ${errMsg}` : errMsg,
+          isAborted ? `Tool "${toolName}" aborted while waiting for workspace access: ${errMsg}` : errMsg,
         );
       }
     });

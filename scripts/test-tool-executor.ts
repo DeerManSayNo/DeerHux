@@ -67,6 +67,30 @@ function createSubagentExecutor(starts: string[], gates: Map<string, ReturnType<
 }
 
 {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "structured-error",
+    label: "structured-error",
+    description: "structured-error",
+    parameters: {},
+    executionMode: "parallel",
+    execute: async (): Promise<AgentToolResult> => ({
+      content: [{ type: "text", text: "foreground run aborted" }],
+      details: undefined,
+      isError: true,
+    }),
+  } as unknown as AnyToolDefinition);
+  registry.setActive(["structured-error"]);
+  const outputs = await new ToolExecutor(registry).executeBatch(
+    [makeCall("structured-error-1", "structured-error")],
+    new AbortController().signal,
+    {} as never,
+    () => {},
+  );
+  assert.equal(outputs[0].isError, true, "resolved tool results must preserve structured isError");
+}
+
+{
   const starts: string[] = [];
   const gates = new Map([
     ["read-1", deferred()],

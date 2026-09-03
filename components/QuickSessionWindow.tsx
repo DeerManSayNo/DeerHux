@@ -154,8 +154,22 @@ export function QuickSessionWindow() {
   useEffect(() => subscribeDismissedQuickSessions(setDismissedSessionIds), []);
 
   const hideWindow = useCallback((restoreFocus = true) => {
+    if (!restoreFocus) {
+      // Losing focus means macOS has already activated another application.
+      // Use the built-in window command directly: production pages can always
+      // access this capability, while a rejected custom invoke would leave an
+      // invisible native window intercepting the right side of the screen.
+      void import("@tauri-apps/api/window")
+        .then(({ getCurrentWindow }) => getCurrentWindow().hide())
+        .catch(() => {});
+      return;
+    }
+
+    // Shortcut/close-button closes should restore the application that was
+    // active before the drawer opened. The native close path has an additional
+    // revision-protected fallback if this custom command is unavailable.
     void import("@tauri-apps/api/core")
-      .then(({ invoke }) => invoke("hide_quick_session_window", { restoreFocus }))
+      .then(({ invoke }) => invoke("hide_quick_session_window", { restoreFocus: true }))
       .catch(() => {});
   }, []);
 
@@ -284,7 +298,12 @@ export function QuickSessionWindow() {
       ]))
       .then((stopListening) => {
         if (disposed) stopListening.forEach((stop) => stop());
-        else unlisten = stopListening;
+        else {
+          unlisten = stopListening;
+          void import("@tauri-apps/api/core")
+            .then(({ invoke }) => invoke("mark_quick_session_ready"))
+            .catch(() => {});
+        }
       })
       .catch(() => {});
     return () => {

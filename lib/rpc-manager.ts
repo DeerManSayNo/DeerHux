@@ -1,5 +1,3 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
 import path from "path";
 import { cacheSessionPath, forceRefreshSessionList } from "./session-reader";
 import type { AgentEnginePort, ToolInfo } from "./engine/port";
@@ -214,66 +212,6 @@ function resolveChangedFilePath(filePath: string, cwd: string): string | null {
   return resolved;
 }
 
-const execFileAsync = promisify(execFile);
-
-const GIT_STATUS_TIMEOUT_MS = 3_000;
-const GIT_STATUS_MAX_BUFFER = 4 * 1024 * 1024;
-
-/**
- * 异步读取 cwd 下的 Git 工作区状态。路径以绝对路径作为 Map key，以正确处理
- * session cwd 位于 Git 子目录的情况。失败时返回 null，调用方静默降级。
- */
-export async function readGitStatusSnapshot(cwd: string): Promise<Map<string, string> | null> {
-  try {
-    const deadline = Date.now() + GIT_STATUS_TIMEOUT_MS;
-    const remainingMs = () => Math.max(1, deadline - Date.now());
-    const { stdout: prefixOutput } = await execFileAsync("git", ["rev-parse", "--show-prefix"], {
-      cwd,
-      encoding: "utf8",
-      timeout: remainingMs(),
-      maxBuffer: 16 * 1024,
-      windowsHide: true,
-    });
-    const cwdPrefix = prefixOutput.trim().replace(/\\/g, "/");
-    const { stdout } = await execFileAsync(
-      "git",
-      ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", "."],
-      { cwd, encoding: "buffer", timeout: remainingMs(), maxBuffer: GIT_STATUS_MAX_BUFFER, windowsHide: true },
-    );
-    const snapshot = new Map<string, string>();
-    for (const entry of Buffer.from(stdout).toString("utf8").split("\0")) {
-      // porcelain v1 -z + --no-renames: "XY path"; pathname is relative to Git root.
-      if (entry.length < 4 || entry[2] !== " ") continue;
-      const status = entry.slice(0, 2);
-      const rootRelativePath = entry.slice(3);
-      if (!rootRelativePath || rootRelativePath.includes("\0") || path.isAbsolute(rootRelativePath)) continue;
-      const cwdRelativePath = cwdPrefix && rootRelativePath.startsWith(cwdPrefix)
-        ? rootRelativePath.slice(cwdPrefix.length)
-        : rootRelativePath;
-      const absolutePath = resolveChangedFilePath(cwdRelativePath, cwd);
-      if (absolutePath) snapshot.set(absolutePath, status);
-    }
-    return snapshot;
-  } catch {
-    return null;
-  }
-}
-
-/** 返回结束快照相对于回合开始快照新增或状态改变的工作区绝对路径。 */
-export function diffGitStatusSnapshots(
-  baseline: Map<string, string> | null,
-  current: Map<string, string> | null,
-  cwd: string,
-): string[] {
-  if (!baseline || !current) return [];
-  const changed: string[] = [];
-  for (const [absolutePath, status] of current) {
-    if (baseline.get(absolutePath) === status) continue;
-    if (resolveChangedFilePath(absolutePath, cwd)) changed.push(absolutePath);
-  }
-  return changed;
-}
-
 const TURN_CONTEXT_BLOCK_RE = /\n*<turn_context>[\s\S]*?<\/turn_context>\s*/g;
 
 /**
@@ -388,15 +326,10 @@ function upsertToolsSection(prompt: string, toolsSection: string | null): string
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private pendingToolEvents = new Map<string, AgentEvent>();
-  /** 保证异步 Git 结算不会重排同一 session 的引擎事件。 */
+  /** 保证异步工具事件归属不会重排同一 session 的引擎事件。 */
   private agentEventQueue: Promise<void> = Promise.resolve();
-  /** 当前逻辑回合的 Git 工作区状态；自动重试会复用，不会重新建基线。 */
-  private gitChangedFilesBaseline: Map<string, string> | null = null;
-  private gitChangedFilesTrackingActive = false;
-  /** 已由工具事件明确报告的路径；Git 不可用时仍可完整降级。 */
-  private explicitChangedFilesInTurn = new Set<string>();
-  /** 终态 Git 结算期间阻止下一 prompt 复用同一份回合级变更状态。 */
-  private changedFilesFinalizing = false;
+  /** 工具事件已明确归属的路径；以 turnId 分桶，避免延迟事件污染下一回合。 */
+  private changedFilesByTurn = new Map<string, Set<string>>();
   private unsubscribe: (() => void) | null = null;
   private idlePulseInterval: ReturnType<typeof setInterval> | null = null;
   private lastActiveAt = Date.now();
@@ -777,28 +710,21 @@ export class AgentSessionWrapper {
     return this._alive;
   }
 
-  private async beginChangedFilesTurn(): Promise<void> {
-    // 上一终态的 Git 结算仍在进行时，短暂等待其完成，避免新回合基线
-    // 覆盖尚未读取结束快照的旧基线（Git 超时 3s，上限留出余量）。
-    const finalizeDeadline = Date.now() + 3_500;
-    while (this.changedFilesFinalizing && Date.now() < finalizeDeadline) {
-      await sleepMs(10);
+  private beginChangedFilesTurn(turnKey = this.currentTurnKey): void {
+    if (turnKey && !this.changedFilesByTurn.has(turnKey)) {
+      this.changedFilesByTurn.set(turnKey, new Set());
     }
-    this.explicitChangedFilesInTurn.clear();
-    this.gitChangedFilesBaseline = this.session.cwd ? await readGitStatusSnapshot(this.session.cwd) : null;
-    this.gitChangedFilesTrackingActive = true;
   }
 
-  private consumeExplicitChangedFiles(): string[] {
-    const changedFiles = [...this.explicitChangedFilesInTurn];
-    this.explicitChangedFilesInTurn.clear();
-    this.gitChangedFilesBaseline = null;
-    this.gitChangedFilesTrackingActive = false;
+  private consumeChangedFiles(turnKey = this.currentTurnKey): string[] {
+    if (!turnKey) return [];
+    const changedFiles = [...(this.changedFilesByTurn.get(turnKey) ?? [])];
+    this.changedFilesByTurn.delete(turnKey);
     return changedFiles;
   }
 
   private enrichFallbackTerminalEvent(event: AgentEvent): AgentEvent {
-    const changedFiles = this.consumeExplicitChangedFiles();
+    const changedFiles = this.consumeChangedFiles();
     return changedFiles.length > 0 ? { ...event, changedFiles } : event;
   }
 
@@ -820,7 +746,6 @@ export class AgentSessionWrapper {
 
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       const turnKey = this.currentTurnKey;
-      if (event.type === "agent_end" && event.willRetry !== true) this.changedFilesFinalizing = true;
       if (event.type === "agent_start") {
         this.transitionCurrentRun({ status: "running", lastEventType: event.type });
       } else if (event.type === "agent_end" && event.willRetry !== true) {
@@ -840,7 +765,6 @@ export class AgentSessionWrapper {
       this.agentEventQueue = this.agentEventQueue
         .then(() => this.handleEngineEvent(event, liveIsland, turnKey))
         .catch((error) => {
-          if (event.type === "agent_end" && event.willRetry !== true) this.changedFilesFinalizing = false;
           console.warn("agent event handling failed:", error);
         });
     });
@@ -862,23 +786,20 @@ export class AgentSessionWrapper {
     const currentCwd = this.session.cwd;
     let emittedEvent = event;
 
-      // 基线在 prompt/fresh-turn 准入时建立，避免普通回合在 agent_start 前已标记活跃而漏建；
-      // 自动重试的 agent_start 只复用已有基线。
-      if (event.type === "agent_start" && !this.gitChangedFilesTrackingActive) {
-        await this.beginChangedFilesTurn();
-      }
+      // prompt 准入时通常已经建账本；冷启动或异常事件顺序下在这里兜底。
+      if (event.type === "agent_start") this.beginChangedFilesTurn(turnKey);
 
-      // Enrich only the final boundary, before EventStore/SSE/listeners observe it.
+      // 终态只消费当前 turn 的工具归属账本，不再从共享工作区的回合级 Git
+      // baseline 推断，避免并发 Session 相互认领文件。
       if (event.type === "agent_end" && event.willRetry !== true) {
-        const gitChangedFiles = currentCwd
-          ? diffGitStatusSnapshots(this.gitChangedFilesBaseline, await readGitStatusSnapshot(currentCwd), currentCwd)
+        const engineChangedFiles = currentCwd && Array.isArray(event.changedFiles)
+          ? event.changedFiles
+              .filter((filePath): filePath is string => typeof filePath === "string")
+              .map((filePath) => resolveChangedFilePath(filePath, currentCwd))
+              .filter((filePath): filePath is string => filePath !== null)
           : [];
-        const changedFiles = [...new Set([...this.explicitChangedFilesInTurn, ...gitChangedFiles])];
+        const changedFiles = [...new Set([...this.consumeChangedFiles(turnKey), ...engineChangedFiles])];
         if (changedFiles.length > 0) emittedEvent = { ...event, changedFiles };
-        this.gitChangedFilesBaseline = null;
-        this.gitChangedFilesTrackingActive = false;
-        this.explicitChangedFilesInTurn.clear();
-        this.changedFilesFinalizing = false;
       }
 
       if (event.type === "auto_retry_start") {
@@ -932,12 +853,20 @@ export class AgentSessionWrapper {
           const resolved = resolveChangedFilePath(changedFilePath, currentCwd);
           if (!resolved || seenChangedFiles.has(resolved)) continue;
           seenChangedFiles.add(resolved);
-          this.explicitChangedFilesInTurn.add(resolved);
-          const fileChangedEvent: AgentEvent = { type: "agent_file_changed", filePath: resolved, toolName: extractToolName(sourceEvent) };
+          if (turnKey) {
+            this.beginChangedFilesTurn(turnKey);
+            this.changedFilesByTurn.get(turnKey)!.add(resolved);
+          }
+          const fileChangedEvent: AgentEvent = {
+            type: "agent_file_changed",
+            filePath: resolved,
+            toolName: extractToolName(sourceEvent),
+            ...(typeof sourceEvent.toolCallId === "string" ? { toolCallId: sourceEvent.toolCallId } : {}),
+          };
           getAgentEventStore().append({
             sessionId: this.session.id,
             runId: this.session.id,
-            ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
+            ...(turnKey ? { turnId: turnKey } : {}),
             event: fileChangedEvent,
           });
           for (const l of this.listeners) l(turnKey ? { ...fileChangedEvent, turnId: turnKey } as AgentEvent : fileChangedEvent);
@@ -1531,7 +1460,7 @@ export class AgentSessionWrapper {
       // 与展示内容；turn_context 插在中间会切断该链路（见 32a2d25 引入的回归）。
       this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode);
       this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId, turnKey);
-      await this.beginChangedFilesTurn();
+      this.beginChangedFilesTurn(turnKey);
 
       const userEchoEvent = {
         type: "message_end",
@@ -1562,6 +1491,7 @@ export class AgentSessionWrapper {
       }));
       return { turnId: turnKey };
     } catch (error) {
+      this.changedFilesByTurn.delete(turnKey);
       const aborted = error instanceof DOMException && error.name === "AbortError";
       this.transitionCurrentRun({
         status: aborted ? "cancelled" : "failed",
@@ -1591,7 +1521,7 @@ export class AgentSessionWrapper {
       this.appendTurnContextMetadata(options.turnContext.references, options.turnContext.skill, options.admission.agentMode);
       this.appendDisplayUserMessage(displayUserContent, options.turnContext.references, options.turnContext.skill, undefined, turnKey);
       this._turnActive = true;
-      await this.beginChangedFilesTurn();
+      this.beginChangedFilesTurn(turnKey);
       this.trackTurn(turnNum, this.inner.prompt({
         text: options.prepared.message,
         ...(toSdkImages(options.prepared.images) ? { images: toSdkImages(options.prepared.images)! } : {}),
@@ -1599,6 +1529,7 @@ export class AgentSessionWrapper {
       }));
       return { turnId: turnKey };
     } catch (error) {
+      this.changedFilesByTurn.delete(turnKey);
       this._turnActive = false;
       const aborted = error instanceof DOMException && error.name === "AbortError";
       this.transitionCurrentRun({
@@ -1654,7 +1585,7 @@ export class AgentSessionWrapper {
             return { accepted: true, duplicate: true, clientMessageId: promptClientMessageId, turnId: accepted.turnId };
           }
         }
-        if (this.isTurnBusy() || this.changedFilesFinalizing || this._stopRequested) {
+        if (this.isTurnBusy() || this._stopRequested) {
           throw new Error("AGENT_BUSY: 当前会话仍有回合运行或正在停止，请等待回合结束后重试");
         }
         const admission = this.captureTurnAdmission(command);
@@ -1997,7 +1928,7 @@ export class AgentSessionWrapper {
 
       case "follow_up": {
         const queueIntoRunningTurn = this._isRunning || this.inner.isStreaming;
-        if (!queueIntoRunningTurn && (this.isTurnBusy() || this.changedFilesFinalizing || this._stopRequested)) {
+        if (!queueIntoRunningTurn && (this.isTurnBusy() || this._stopRequested)) {
           throw new Error("AGENT_BUSY: 当前会话已有回合或新回合正在准入，请稍后重试");
         }
         const followAdmissionController = this.reserveFreshTurnAdmission("当前会话已有回合或新回合正在准入，请稍后重试");
@@ -2160,6 +2091,7 @@ export class AgentSessionWrapper {
         try { l(destroyEvent); } catch { /* best effort */ }
       }
     }
+    this.changedFilesByTurn.clear();
     // Abort any ongoing agent turn (streaming, tools, retries) so underlying
     // WebSocket connections and child processes are released promptly.
     // Fire-and-forget: destroy() is called synchronously from idle timeout,

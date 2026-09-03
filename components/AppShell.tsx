@@ -10,7 +10,12 @@ import { FilePreviewPanel } from "./FilePreviewPanel";
 import { WindowControls, useNeedsWindowControls } from "./WindowControls";
 import type { Tab } from "./TabBar";
 import { getLocalStorageItem } from "@/lib/client-storage";
-import { normalizeExternalHref, openExternalLink } from "@/lib/external-links";
+import {
+  normalizeExternalHref,
+  normalizeLocalFileHref,
+  openExternalLink,
+  openLocalFileLink,
+} from "@/lib/external-links";
 import { getRelativeFilePath } from "@/lib/file-paths";
 import { retainCwdWorkspaceState } from "@/lib/workspace-cwd-state";
 import { getProjectDisplayName } from "@/lib/project-name";
@@ -324,7 +329,7 @@ export function AppShell() {
   }, [activeCwd]);
 
   useEffect(() => {
-    const handleExternalLinkClick = (event: MouseEvent) => {
+    const handleLinkClick = (event: MouseEvent) => {
       if (
         event.defaultPrevented ||
         event.button !== 0 ||
@@ -342,14 +347,22 @@ export function AppShell() {
       if (!(anchor instanceof HTMLAnchorElement)) return;
 
       const href = anchor.getAttribute("href");
-      if (!href || !normalizeExternalHref(href)) return;
+      if (!href) return;
+
+      if (normalizeLocalFileHref(href)) {
+        event.preventDefault();
+        void openLocalFileLink(href);
+        return;
+      }
+
+      if (!normalizeExternalHref(href)) return;
 
       event.preventDefault();
       void openExternalLink(href);
     };
 
-    document.addEventListener("click", handleExternalLinkClick);
-    return () => document.removeEventListener("click", handleExternalLinkClick);
+    document.addEventListener("click", handleLinkClick);
+    return () => document.removeEventListener("click", handleLinkClick);
   }, []);
 
   // Sync client-only localStorage state after mount to avoid hydration mismatch

@@ -7,6 +7,8 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { useTheme } from "@/hooks/useTheme";
+import { normalizeLocalFileHref, openLocalFileLink } from "@/lib/external-links";
+import { formatMessageUsage } from "@/lib/message-usage";
 import type {
   AgentMessage,
   FileReference,
@@ -52,6 +54,8 @@ interface Props {
   turnEndTimestamp?: number;
   /** 当前页面运行态冻结下来的整轮耗时；优先于时间戳推算。 */
   turnDurationSeconds?: number;
+  /** 同一 user turn 中、最终回答之前的 assistant 工具过程。完成后统一折叠展示。 */
+  toolProcessMessages?: ToolProcessMessage[];
   nextUserTimestamp?: number;
   onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
   onRetryDelivery?: (message: UserMessage) => void;
@@ -63,6 +67,11 @@ interface Props {
   turnEntryIds?: string[];
   onOpenSession?: (sessionId: string) => void;
   onCollaborationRunUpdate?: (run: CollaborationRunSnapshot) => void;
+}
+
+export interface ToolProcessMessage {
+  message: AssistantMessage;
+  prevTimestamp?: number;
 }
 
 function formatTime(ts?: number): string | null {
@@ -97,7 +106,7 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ message, isStreaming, isBackground, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
+function MessageViewImpl({ message, isStreaming, isBackground, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, toolProcessMessages, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
   // 新 run 用 parentEntryId 精确归属到触发它的 user turn；旧数据没有该字段时，
   // 才保留 createdAt 时间窗作为兼容兜底。
   const rawTs = message.role === "user" ? (message as UserMessage).timestamp : undefined;
@@ -135,7 +144,7 @@ function MessageViewImpl({ message, isStreaming, isBackground, toolResults, mode
     );
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} isBackground={isBackground} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} isBackground={isBackground} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} toolProcessMessages={toolProcessMessages} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -160,6 +169,7 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.turnStartTimestamp === next.turnStartTimestamp &&
   prev.turnEndTimestamp === next.turnEndTimestamp &&
   prev.turnDurationSeconds === next.turnDurationSeconds &&
+  prev.toolProcessMessages === next.toolProcessMessages &&
   prev.nextUserTimestamp === next.nextUserTimestamp &&
   prev.onResend === next.onResend &&
   prev.onRetryDelivery === next.onRetryDelivery &&
@@ -827,6 +837,7 @@ function AssistantMessageView({
   turnStartTimestamp,
   turnEndTimestamp,
   turnDurationSeconds,
+  toolProcessMessages,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -840,6 +851,7 @@ function AssistantMessageView({
   turnStartTimestamp?: number;
   turnEndTimestamp?: number;
   turnDurationSeconds?: number;
+  toolProcessMessages?: ToolProcessMessage[];
 }) {
   const time = showTimestamp ? formatTime(message.timestamp) : null;
   const blocks = message.content ?? [];
@@ -888,6 +900,7 @@ function AssistantMessageView({
     .filter((b): b is TextContent => b.type === "text")
     .map((b) => b.text)
     .join("\n");
+  const hasCollapsedToolProcess = Boolean(toolProcessMessages?.length);
 
   const copyContent = () => {
     copyText(textContent).then(() => {
@@ -1024,7 +1037,21 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {hasCollapsedToolProcess && (
+          <ToolProcessGroup
+            messages={toolProcessMessages!}
+            finalMessage={message}
+            finalPrevTimestamp={prevTimestamp}
+            toolResults={toolResults}
+            duration={totalDurationFromFile}
+          />
+        )}
         {blocks.map((block, i) => {
+          // 最终 assistant 自身的 reasoning/toolCall 也属于执行过程，随上方区块折叠；
+          // 最终文字和图片仍作为正式回答直接展示。
+          if (hasCollapsedToolProcess && (block.type === "thinking" || block.type === "toolCall")) {
+            return null;
+          }
           // 失败消息会同时写入 text + errorMessage；UI 只展示红色错误框，避免重复。
           if (
             !isStreaming
@@ -1070,10 +1097,10 @@ function AssistantMessageView({
       }}>
         {message.usage && !isStreaming && (
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {formatUsage(message.usage)}
+            {formatMessageUsage(message.usage)}
           </div>
         )}
-        {totalDurationFromFile !== undefined && !isStreaming && (
+        {totalDurationFromFile !== undefined && !isStreaming && !hasCollapsedToolProcess && (
           <div style={{ fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
             总耗时 {formatCompactDuration(totalDurationFromFile)}
           </div>
@@ -1119,12 +1146,110 @@ function AssistantMessageView({
   );
 }
 
+function ToolProcessGroup({
+  messages,
+  finalMessage,
+  finalPrevTimestamp,
+  toolResults,
+  duration,
+}: {
+  messages: ToolProcessMessage[];
+  finalMessage: AssistantMessage;
+  finalPrevTimestamp?: number;
+  toolResults?: Map<string, ToolResultMessage>;
+  duration?: number;
+}) {
+  // 该组件只会在完整的最终回答落盘后挂载，因此初始态即为自动收起。
+  const [expanded, setExpanded] = useState(false);
+  const processMessages: ToolProcessMessage[] = [
+    ...messages,
+    { message: finalMessage, prevTimestamp: finalPrevTimestamp },
+  ];
+
+  return (
+    <div style={{ borderBottom: "1px solid var(--border)", marginBottom: 4 }}>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          width: "100%",
+          padding: "5px 0 9px",
+          border: "none",
+          background: "transparent",
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          fontSize: 13,
+          textAlign: "left",
+        }}
+      >
+        <span>{duration === undefined ? "已处理" : `已处理 ${formatCompactDuration(duration)}`}</span>
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 10 10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}
+        >
+          <polyline points="3.5 2 6.5 5 3.5 8" />
+        </svg>
+      </button>
+
+      {expanded && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingBottom: 10 }}>
+          {processMessages.flatMap(({ message: processMessage, prevTimestamp: processPrevTimestamp }, messageIndex) => {
+            const messageTimestamp = typeof processMessage.timestamp === "number" ? processMessage.timestamp : undefined;
+            const thinkingDuration = messageTimestamp && processPrevTimestamp
+              ? Math.max(0, Math.round((messageTimestamp - processPrevTimestamp) / 1000))
+              : undefined;
+            return (processMessage.content ?? []).map((block, blockIndex) => {
+              // 最终回答的正文/图片不属于过程，留在折叠区外正常展示。
+              if (messageIndex === processMessages.length - 1 && block.type !== "thinking" && block.type !== "toolCall") {
+                return null;
+              }
+              let toolDuration: number | undefined;
+              if (block.type === "toolCall" && messageTimestamp) {
+                const resultTimestamp = toolResults?.get(block.toolCallId)?.timestamp;
+                if (resultTimestamp) {
+                  const seconds = Math.round((resultTimestamp - messageTimestamp) / 1000);
+                  if (seconds > 0) toolDuration = seconds;
+                }
+              }
+              return (
+                <BlockView
+                  key={`${messageIndex}:${blockIndex}`}
+                  block={block}
+                  toolResults={toolResults}
+                  streamingDuration={block.type === "thinking" ? thinkingDuration : undefined}
+                  toolCallDurations={block.type === "toolCall" && toolDuration !== undefined
+                    ? new Map([[block.toolCallId, toolDuration]])
+                    : undefined}
+                />
+              );
+            });
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BlockView({ block, toolResults, streamingDuration, toolCallDurations, isStreaming }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; streamingDuration?: number; toolCallDurations?: Map<string, number>; isStreaming?: boolean }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} />;
   }
   if (block.type === "thinking") {
-    if (!isStreaming && !(block as ThinkingContent).thinking?.trim()) return null;
+    // Responses API 会先发 reasoning item，再按需补 summary 文本；部分模型或
+    // 中转站只返回用于后续上下文回传的 signature，thinking 会始终为空。
+    // 数据块必须保留，但没有可见内容时不应渲染空的“思考过程”卡片。
+    if (!(block as ThinkingContent).thinking?.trim()) return null;
     return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={isStreaming} />;
   }
   if (block.type === "toolCall") {
@@ -1138,9 +1263,20 @@ function BlockView({ block, toolResults, streamingDuration, toolCallDurations, i
 
 function createMarkdownComponents(isStreaming: boolean): Components {
   return {
-    a({ href, children, ...props }) {
+    a({ href, children, node: _node, ...props }) {
+      const isLocalFile = typeof href === "string" && normalizeLocalFileHref(href) !== null;
       return (
-        <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+        <a
+          {...props}
+          href={href}
+          target={isLocalFile ? undefined : "_blank"}
+          rel={isLocalFile ? undefined : "noopener noreferrer"}
+          onClick={isLocalFile ? (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (href) void openLocalFileLink(href);
+          } : undefined}
+        >
           {children}
         </a>
       );
@@ -1412,23 +1548,6 @@ function formatCompactDuration(seconds: number): string {
   const mins = minutes % 60;
   return mins ? `${hours}h ${mins}m` : `${hours}h`;
 }
-
-function formatUsage(usage: {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cost: { total: number };
-}): string {
-  const parts = [];
-  if (usage.input) parts.push(`${usage.input.toLocaleString()} 输入`);
-  if (usage.output) parts.push(`${usage.output.toLocaleString()} 输出`);
-  if (usage.cacheRead) parts.push(`${usage.cacheRead.toLocaleString()} 缓存读取`);
-  if (usage.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
-  return parts.join(" · ");
-}
-
-
 
 function CodeBlock({ code, lang }: { code: string; lang: string }) {
   const { isDark } = useTheme();

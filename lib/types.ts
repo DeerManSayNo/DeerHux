@@ -92,6 +92,8 @@ export interface AssistantMessage {
   usage?: {
     input: number;
     output: number;
+    /** Provider-reported internal reasoning tokens; already included in output. */
+    reasoning?: number;
     cacheRead: number;
     cacheWrite: number;
     cost: {

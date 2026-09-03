@@ -6,10 +6,11 @@ import {
   startCollaborationRun,
   subscribeCollaborationRun,
 } from "./collaboration-orchestrator";
-import type { CollaborationRunEvent, CollaborationRunState, CollaborationWorkerState, SubagentTaskMode, SubagentWorkflow } from "./collaboration-types";
+import type { CollaborationRunState, CollaborationWorkerState, SubagentTaskMode, SubagentWorkflow } from "./collaboration-types";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { isSubagentConcurrencyLimitError, SUBAGENT_TOOL_NAME } from "./subagent-concurrency";
 import { MAX_WORKERS_PER_RUN } from "./subagent-planner";
+import { waitForForegroundRun } from "./foreground-run-wait";
 
 export { SUBAGENT_TOOL_NAME };
 
@@ -132,56 +133,16 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
       // ★ 流式进度：订阅 collaboration run 事件，通过 onUpdate 推送给主 Agent
       //   每次 worker 状态变化 / 工具活动更新时，发射 tool_execution_update 事件。
       const runId = state.runId;
-      const TERMINAL_EVENTS = new Set<CollaborationRunEvent["type"]>(["run_complete", "run_error", "run_aborted"]);
-
-      const finalState = await new Promise<CollaborationRunState>((resolve, reject) => {
-        let settled = false;
-        let timeout: ReturnType<typeof setTimeout> | null = null;
-        const abortRun = () => {
-          void abortCollaborationRun(runId).then((aborted) => {
-            if (aborted) return;
-            const latest = getCollaborationRun(runId);
-            settle(() => latest
-              ? resolve(latest)
-              : reject(new DOMException("Subagent task aborted", "AbortError")));
-          }).catch((error) => {
-            settle(() => reject(error instanceof Error ? error : new Error(String(error))));
-          });
-        };
-        const settle = (fn: () => void) => {
-          if (settled) return;
-          settled = true;
-          if (timeout) clearTimeout(timeout);
-          signal?.removeEventListener("abort", abortRun);
-          unsubscribe();
-          fn();
-        };
-        const unsubscribe = subscribeCollaborationRun(runId, (event) => {
-          // 推送进度给主 Agent（仅当 onUpdate 可用且非终态事件时）
-          if (onUpdate && !TERMINAL_EVENTS.has(event.type)) {
-            const latest = getCollaborationRun(runId);
-            if (latest) {
-              onUpdate(buildProgressPartial(runId, latest));
-            }
-          }
-          // 终态事件 → resolve/reject
-          if (event.type === "run_complete" || event.type === "run_error") {
-            const latest = getCollaborationRun(runId);
-            if (latest) settle(() => resolve(latest));
-            else settle(() => reject(new Error("Run not found after completion")));
-          } else if (event.type === "run_aborted") {
-            const latest = getCollaborationRun(runId);
-            if (latest) settle(() => resolve(latest));
-            else settle(() => reject(new Error("Subagent task was aborted")));
-          }
-        });
-        // 兜底超时（12 分钟，与 waitForCollaborationRun 一致）
-        timeout = setTimeout(() => {
-          const latest = getCollaborationRun(runId);
-          settle(() => latest ? resolve(latest) : reject(new Error("Timed out waiting for subagent task")));
-        }, 12 * 60 * 1000);
-        if (signal?.aborted) abortRun();
-        else signal?.addEventListener("abort", abortRun, { once: true });
+      const finalState = await waitForForegroundRun({
+        runId,
+        timeoutMs: 12 * 60 * 1000,
+        signal,
+        getRun: getCollaborationRun,
+        subscribe: subscribeCollaborationRun,
+        abortRun: abortCollaborationRun,
+        onProgress: (_event, latest) => {
+          if (onUpdate) onUpdate(buildProgressPartial(runId, latest));
+        },
       });
 
       // 终态时推送最后一次完整进度，确保主 Agent 看到最终 worker 状态

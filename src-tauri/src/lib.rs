@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 #[cfg(not(debug_assertions))]
 use std::sync::Arc;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
 };
 #[cfg(not(debug_assertions))]
@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 use std::{mem::size_of, os::windows::io::AsRawHandle, os::windows::process::CommandExt};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+#[cfg(not(debug_assertions))]
+use tauri::webview::PageLoadEvent;
 #[cfg(target_os = "macos")]
 use tauri::{LogicalPosition, TitleBarStyle};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -42,6 +44,10 @@ const QUICK_SESSION_NEW_EVENT: &str = "quick-session://request-new";
 const QUICK_SESSION_WINDOW_WIDTH: f64 = 380.0;
 static QUICK_SESSION_SHORTCUT_PRESSED: AtomicBool = AtomicBool::new(false);
 static QUICK_SESSION_NEW_SHORTCUT_PRESSED: AtomicBool = AtomicBool::new(false);
+static QUICK_SESSION_READY: AtomicBool = AtomicBool::new(false);
+static QUICK_SESSION_PENDING_OPEN: AtomicBool = AtomicBool::new(false);
+static QUICK_SESSION_PENDING_NEW: AtomicBool = AtomicBool::new(false);
+static QUICK_SESSION_CLOSE_REVISION: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
 static PREVIOUS_FRONTMOST_PID: Mutex<Option<i32>> = Mutex::new(None);
@@ -107,9 +113,82 @@ fn hide_quick_session(app: &tauri::AppHandle, restore_focus: bool) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn set_quick_session_bootstrap_mode(window: &tauri::WebviewWindow, enabled: bool) {
+    use objc2_app_kit::NSWindow;
+
+    if let Ok(ns_window_ptr) = window.ns_window() {
+        let ns_window: &NSWindow = unsafe { &*ns_window_ptr.cast() };
+        ns_window.setAlphaValue(if enabled { 0.0 } else { 1.0 });
+        ns_window.setIgnoresMouseEvents(enabled);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_quick_session_bootstrap_mode(_window: &tauri::WebviewWindow, _enabled: bool) {}
+
+#[cfg(not(debug_assertions))]
+fn wake_quick_session_webview(app: &tauri::AppHandle) {
+    let wake_app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = wake_app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) else {
+            return;
+        };
+        // WKWebView can defer JavaScript for a window that has never been shown.
+        // Make the native host visible but fully transparent and click-through so
+        // React can hydrate without flashing or blocking the right edge.
+        set_quick_session_bootstrap_mode(&window, true);
+        let _ = position_quick_session_window(&window);
+        let _ = window.show();
+    });
+
+    let fallback_app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if QUICK_SESSION_READY.load(Ordering::Acquire) {
+            return;
+        }
+        let main_app = fallback_app.clone();
+        let _ = fallback_app.run_on_main_thread(move || {
+            if let Some(window) = main_app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) {
+                let _ = window.hide();
+                set_quick_session_bootstrap_mode(&window, false);
+            }
+        });
+    });
+}
+
 #[tauri::command]
 fn hide_quick_session_window(app: tauri::AppHandle, restore_focus: bool) {
     hide_quick_session(&app, restore_focus);
+}
+
+fn complete_quick_session_ready(app: tauri::AppHandle) {
+    let ready_app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if QUICK_SESSION_READY.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending_open = QUICK_SESSION_PENDING_OPEN.swap(false, Ordering::AcqRel);
+        let request_new = QUICK_SESSION_PENDING_NEW.swap(false, Ordering::AcqRel);
+        if let Some(window) = ready_app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) {
+            // End the invisible bootstrap before making the drawer logically
+            // available. Hiding first also makes open_quick_session_now remember
+            // and restore the correct previously focused application.
+            let _ = window.hide();
+            set_quick_session_bootstrap_mode(&window, false);
+        }
+        if pending_open {
+            open_quick_session_now(&ready_app, request_new);
+        }
+    });
+}
+
+#[tauri::command]
+fn mark_quick_session_ready(app: tauri::AppHandle) {
+    #[cfg(not(debug_assertions))]
+    startup_log("quick-session frontend ready");
+    complete_quick_session_ready(app);
 }
 
 #[tauri::command]
@@ -155,26 +234,45 @@ fn resize_quick_session_window(app: tauri::AppHandle, width: f64) -> Result<(), 
     }
 }
 
-fn toggle_quick_session_window(app: &tauri::AppHandle) {
+fn close_quick_session_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) else {
         return;
     };
-    if window.is_visible().unwrap_or(false) {
-        // Let the WebView paint its transparent closed state before hiding the
-        // native window. Otherwise WKWebView can reuse the last open frame on
-        // the next show, making the drawer appear to open twice.
-        let _ = window.emit(QUICK_SESSION_CLOSE_EVENT, ());
-        return;
-    }
-    remember_frontmost_application();
-    let _ = position_quick_session_window(&window);
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
-    let _ = window.emit(QUICK_SESSION_OPEN_EVENT, ());
+    QUICK_SESSION_PENDING_OPEN.store(false, Ordering::Release);
+    QUICK_SESSION_PENDING_NEW.store(false, Ordering::Release);
+    let close_revision = QUICK_SESSION_CLOSE_REVISION.fetch_add(1, Ordering::AcqRel) + 1;
+    let _ = window.emit(QUICK_SESSION_CLOSE_EVENT, ());
+
+    // The normal path lets React paint its closed transparent state, then calls
+    // hide_quick_session_window. If the quick page has not hydrated or failed to
+    // load, that event has no listener; hide natively so an invisible always-on-
+    // top window can never keep intercepting the right side of the screen.
+    let fallback_app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        let main_app = fallback_app.clone();
+        let _ = fallback_app.run_on_main_thread(move || {
+            if QUICK_SESSION_CLOSE_REVISION.load(Ordering::Acquire) != close_revision {
+                return;
+            }
+            let still_visible = main_app
+                .get_webview_window(QUICK_SESSION_WINDOW_LABEL)
+                .and_then(|window| window.is_visible().ok())
+                .unwrap_or(false);
+            if still_visible {
+                hide_quick_session(&main_app, true);
+            } else {
+                // The frontend may have hidden the native window through the
+                // built-in API already. Focus restoration is still our job and
+                // PREVIOUS_FRONTMOST_PID is consumed exactly once.
+                restore_previous_application();
+            }
+        });
+    });
 }
 
-fn open_quick_session(app: &tauri::AppHandle, request_new: bool) {
+fn open_quick_session_now(app: &tauri::AppHandle, request_new: bool) {
+    QUICK_SESSION_CLOSE_REVISION.fetch_add(1, Ordering::AcqRel);
     let Some(window) = app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) else {
         return;
     };
@@ -185,12 +283,42 @@ fn open_quick_session(app: &tauri::AppHandle, request_new: bool) {
         let _ = window.show();
     }
     let _ = window.set_focus();
-    // Always request open: the native window can still be visible for the two
-    // closing paint frames while the React drawer is already closed.
     let _ = window.emit(QUICK_SESSION_OPEN_EVENT, ());
     if request_new {
         let _ = window.emit(QUICK_SESSION_NEW_EVENT, ());
     }
+}
+
+fn request_open_quick_session(app: &tauri::AppHandle, request_new: bool) {
+    QUICK_SESSION_CLOSE_REVISION.fetch_add(1, Ordering::AcqRel);
+    if !QUICK_SESSION_READY.load(Ordering::Acquire) {
+        QUICK_SESSION_PENDING_OPEN.store(true, Ordering::Release);
+        if request_new {
+            QUICK_SESSION_PENDING_NEW.store(true, Ordering::Release);
+        }
+        return;
+    }
+    open_quick_session_now(app, request_new);
+}
+
+fn toggle_quick_session_window(app: &tauri::AppHandle) {
+    if !QUICK_SESSION_READY.load(Ordering::Acquire) {
+        let already_pending = QUICK_SESSION_PENDING_OPEN.swap(true, Ordering::AcqRel);
+        if already_pending {
+            QUICK_SESSION_PENDING_OPEN.store(false, Ordering::Release);
+            QUICK_SESSION_PENDING_NEW.store(false, Ordering::Release);
+        }
+        return;
+    }
+    let visible = app
+        .get_webview_window(QUICK_SESSION_WINDOW_LABEL)
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    if visible {
+        close_quick_session_window(app);
+        return;
+    }
+    open_quick_session_now(app, false);
 }
 
 #[cfg(target_os = "windows")]
@@ -664,13 +792,20 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
                 backend.stop();
             }
             if let Some(window) = app.get_webview_window(QUICK_SESSION_WINDOW_LABEL) {
+                QUICK_SESSION_READY.store(false, Ordering::Release);
                 match format!("http://127.0.0.1:{port}/quick-session").parse() {
                     Ok(url) => {
                         if let Err(error) = window.navigate(url) {
+                            startup_log(format!("quick-session navigation failed: {error}"));
                             eprintln!("failed to open quick-session window: {error}");
+                        } else {
+                            wake_quick_session_webview(&app);
                         }
                     }
-                    Err(error) => eprintln!("invalid quick-session URL: {error}"),
+                    Err(error) => {
+                        startup_log(format!("invalid quick-session URL: {error}"));
+                        eprintln!("invalid quick-session URL: {error}");
+                    }
                 }
             }
         }
@@ -713,6 +848,12 @@ pub fn run() {
                         match event.state() {
                             ShortcutState::Pressed => {
                                 if !QUICK_SESSION_SHORTCUT_PRESSED.swap(true, Ordering::AcqRel) {
+                                    #[cfg(not(debug_assertions))]
+                                    startup_log(format!(
+                                        "quick-session shortcut pressed (ready={}, pending={})",
+                                        QUICK_SESSION_READY.load(Ordering::Acquire),
+                                        QUICK_SESSION_PENDING_OPEN.load(Ordering::Acquire)
+                                    ));
                                     toggle_quick_session_window(app);
                                 }
                             }
@@ -725,7 +866,7 @@ pub fn run() {
                             ShortcutState::Pressed => {
                                 if !QUICK_SESSION_NEW_SHORTCUT_PRESSED.swap(true, Ordering::AcqRel)
                                 {
-                                    open_quick_session(app, true);
+                                    request_open_quick_session(app, true);
                                 }
                             }
                             ShortcutState::Released => {
@@ -738,6 +879,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             hide_quick_session_window,
+            mark_quick_session_ready,
             resize_quick_session_window,
         ])
         .setup(move |app| {
@@ -782,15 +924,38 @@ pub fn run() {
                     // animation begins.
                     .shadow(false)
                     .visible(false)
+                    .on_page_load(|_window, _payload| {
+                        #[cfg(not(debug_assertions))]
+                        if _payload.event() == PageLoadEvent::Finished
+                            && _payload.url().path().trim_end_matches('/') == "/quick-session"
+                        {
+                            startup_log("quick-session page load finished");
+                            let ready_app = _window.app_handle().clone();
+                            // The load event runs after deferred scripts, but leave
+                            // React one paint turn to install its event listeners.
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(350));
+                                complete_quick_session_ready(ready_app);
+                            });
+                        }
+                    })
                     .build()?;
             position_quick_session_window(&quick_session_window)?;
 
             let quick_session_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Backquote);
             if let Err(error) = app.global_shortcut().register(quick_session_shortcut) {
+                #[cfg(not(debug_assertions))]
+                startup_log(format!(
+                    "failed to register quick-session shortcut: {error}"
+                ));
                 eprintln!("failed to register quick-session shortcut: {error}");
             }
             let quick_session_new_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::KeyQ);
             if let Err(error) = app.global_shortcut().register(quick_session_new_shortcut) {
+                #[cfg(not(debug_assertions))]
+                startup_log(format!(
+                    "failed to register new quick-session shortcut: {error}"
+                ));
                 eprintln!("failed to register new quick-session shortcut: {error}");
             }
 

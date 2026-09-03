@@ -1,10 +1,10 @@
 "use client";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { AgentMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
+import type { AgentMessage, AssistantMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import type { CollaborationMuxSnapshot } from "@/lib/parallel-agent/collaboration-mux";
-import { MessageView } from "./MessageView";
+import { MessageView, type ToolProcessMessage } from "./MessageView";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { CompactionConfirmModal } from "./CompactionConfirmModal";
@@ -1453,6 +1453,49 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     }
     return undefined;
   }, [messages, entryIds]);
+  const toolProcessLayout = useMemo(() => {
+    const hiddenMessageIndexes = new Set<number>();
+    const messagesByFinalIndex = new Map<number, ToolProcessMessage[]>();
+
+    let turnStart = 0;
+    while (turnStart < messages.length) {
+      let turnEnd = turnStart + 1;
+      while (turnEnd < messages.length && messages[turnEnd].role !== "user") turnEnd++;
+
+      // 最后一回合仍在运行时必须保留原始实时展示；等最终回答完成落盘后再聚合、收起。
+      const turnIsComplete = turnEnd < messages.length || !isRunning;
+      if (turnIsComplete) {
+        const assistantIndexes: number[] = [];
+        for (let index = turnStart; index < turnEnd; index++) {
+          if (messages[index].role === "assistant") assistantIndexes.push(index);
+        }
+        const finalAssistantIndex = assistantIndexes.at(-1);
+        if (finalAssistantIndex !== undefined) {
+          const finalAssistant = messages[finalAssistantIndex] as AssistantMessage;
+          const hasFinalAnswer = (finalAssistant.content ?? []).some(
+            (block) => block.type === "text" && block.text.trim().length > 0,
+          );
+          const processIndexes = assistantIndexes.slice(0, -1);
+          const hasToolProcess = processIndexes.some((index) => {
+            const assistant = messages[index] as AssistantMessage;
+            return (assistant.content ?? []).some((block) => block.type === "toolCall");
+          });
+
+          if (hasFinalAnswer && hasToolProcess) {
+            const processMessages = processIndexes.map((index): ToolProcessMessage => ({
+              message: messages[index] as AssistantMessage,
+              prevTimestamp: parseMessageTimestamp(messages[index - 1]),
+            }));
+            processIndexes.forEach((index) => hiddenMessageIndexes.add(index));
+            messagesByFinalIndex.set(finalAssistantIndex, processMessages);
+          }
+        }
+      }
+
+      turnStart = turnEnd;
+    }
+    return { hiddenMessageIndexes, messagesByFinalIndex };
+  }, [messages, isRunning]);
   const [completedTurnDurations, setCompletedTurnDurations] = useState<Record<string, number>>({});
   const activeTurnTimerRef = useRef<{
     sessionKey: string;
@@ -1954,6 +1997,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               }
               let refIdx = 0;
               return messages.map((msg, idx) => {
+                if (toolProcessLayout.hiddenMessageIndexes.has(idx)) return null;
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = isVisible ? refIdx++ : -1;
                 let showTimestamp = false;
@@ -2038,6 +2082,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                     turnStartTimestamp={turnStartTimestamp}
                     turnEndTimestamp={turnEndTimestamp}
                     turnDurationSeconds={turnKey ? completedTurnDurations[turnKey] : undefined}
+                    toolProcessMessages={toolProcessLayout.messagesByFinalIndex.get(idx)}
                     nextUserTimestamp={nextUser}
                     onResend={session && entryIds[idx] ? handleResend : undefined}
                     onRetryDelivery={msg.role === "user" && msg.deliveryRetryable && (msg.deliveryState === "failed" || msg.deliveryState === "unknown") ? handleRetryDelivery : undefined}

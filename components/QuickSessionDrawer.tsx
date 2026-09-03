@@ -164,11 +164,33 @@ export function QuickSessionDrawer({
     if (resizeState.running) return;
     resizeState.running = true;
 
-    void import("@tauri-apps/api/core").then(async ({ invoke }) => {
+    void Promise.all([
+      import("@tauri-apps/api/core"),
+      import("@tauri-apps/api/window"),
+    ]).then(async ([{ invoke }, { getCurrentWindow, PhysicalPosition, PhysicalSize }]) => {
       let appliedWidth = -1;
       while (appliedWidth !== resizeState.targetWidth) {
         const nextWidth = resizeState.targetWidth;
-        await invoke("resize_quick_session_window", { width: nextWidth });
+        try {
+          // Native macOS implementation updates frame origin and width in one
+          // operation, which is the smoothest path in tauri:dev.
+          await invoke("resize_quick_session_window", { width: nextWidth });
+        } catch {
+          // A production page is loaded from 127.0.0.1 on a random port after
+          // the WebView was created. Custom invokes can be rejected in that
+          // remote context even though built-in window capabilities are valid.
+          // Fall back to those built-ins and keep the right edge anchored.
+          const appWindow = getCurrentWindow();
+          const [position, size, scale] = await Promise.all([
+            appWindow.outerPosition(),
+            appWindow.outerSize(),
+            appWindow.scaleFactor(),
+          ]);
+          const physicalWidth = Math.round(nextWidth * scale);
+          const right = position.x + size.width;
+          await appWindow.setSize(new PhysicalSize(physicalWidth, size.height));
+          await appWindow.setPosition(new PhysicalPosition(right - physicalWidth, position.y));
+        }
         appliedWidth = nextWidth;
       }
     }).catch(() => {}).finally(() => {

@@ -50,6 +50,8 @@ export interface CompactionResult {
 export interface AgentToolResult<T = unknown> {
   content: unknown[];
   details: T;
+  /** 工具可返回业务失败而不 throw；Executor 必须保留该标记。 */
+  isError?: boolean;
   /** 本次执行修改了哪些文件（绝对路径）。 */
   changedFiles?: string[];
   /** 终止 hint：本批所有工具都 terminate=true 时 loop 提前停。 */

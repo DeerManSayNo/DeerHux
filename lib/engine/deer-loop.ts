@@ -648,7 +648,7 @@ export class DeerLoopEngine implements AgentEnginePort {
 
     // M2：初始化工具注册表与执行器（executor 带 sessionId，用于长输出 spill）。
     this.registry = new ToolRegistry();
-    this.toolExecutor = new ToolExecutor(this.registry, { sessionId: this._sessionId });
+    this.toolExecutor = new ToolExecutor(this.registry, { sessionId: this._sessionId, cwd: this._cwd });
     this._maxToolRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     // M4：可选注入自定义重试策略（测试用极小 delay/settle）。未传时为 null，
     // 等 installRetryHardening() 安装 DefaultRetryPolicy（生产路径）。
