@@ -10,6 +10,12 @@ interface ModelOption {
   name: string;
 }
 
+interface ApiModelOption {
+  provider: string;
+  id: string;
+  name: string;
+}
+
 // ============================================================================
 // Cron presets for quick selection
 // ============================================================================
@@ -116,8 +122,14 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
   useEffect(() => {
     fetch("/api/models")
       .then((res) => res.json())
-      .then((data: { modelList?: ModelOption[]; defaultModel?: { provider: string; modelId: string } | null }) => {
-        if (data.modelList) setModels(data.modelList);
+      .then((data: { modelList?: ApiModelOption[]; defaultModel?: { provider: string; modelId: string } | null }) => {
+        if (data.modelList) {
+          setModels(data.modelList.map((model) => ({
+            provider: model.provider,
+            modelId: model.id,
+            name: model.name,
+          })));
+        }
         if (data.defaultModel) setDefaultModel(data.defaultModel);
       })
       .catch(() => { /* ignore */ });
