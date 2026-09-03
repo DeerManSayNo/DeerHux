@@ -237,24 +237,32 @@ Promise.all([download(url, tmpArchive), downloadText(checksumsUrl)])
       fs.chmodSync(destPath, 0o755);
     }
 
-    // macOS: the official Node.js darwin tarball ships a UNIVERSAL binary
-    // (x86_64 + arm64 ≈ 227M). Strip it to a single architecture so we don't
-    // ship ~115M of dead code for the other CPU. e.g. a build targeting
-    // aarch64-apple-darwin only needs arm64.
+    // Older macOS archives may contain a universal binary; current archives
+    // are architecture-specific. Only invoke `lipo -thin` for a fat binary.
     if (platform === "darwin") {
       const lipoArch = arch === "arm64" ? "arm64" : "x86_64";
-      const before = fs.statSync(destPath).size;
-      const thinned = `${destPath}.thin`;
-      execSync(`lipo -thin ${lipoArch} "${destPath}" -output "${thinned}"`, {
-        stdio: "inherit",
-      });
-      fs.renameSync(thinned, destPath);
-      fs.chmodSync(destPath, 0o755);
-      const after = fs.statSync(destPath).size;
-      console.log(
-        `🔪 Stripped universal binary to ${lipoArch}: ` +
-          `${(before / 1024 / 1024).toFixed(0)}M → ${(after / 1024 / 1024).toFixed(0)}M`
-      );
+      const binaryArchs = execFileSync("lipo", ["-archs", destPath], {
+        encoding: "utf8",
+      }).trim().split(/\s+/);
+      if (!binaryArchs.includes(lipoArch)) {
+        throw new Error(`Downloaded Node architecture is ${binaryArchs.join(", ")}, expected ${lipoArch}`);
+      }
+      if (binaryArchs.length > 1) {
+        const before = fs.statSync(destPath).size;
+        const thinned = `${destPath}.thin`;
+        execFileSync("lipo", ["-thin", lipoArch, destPath, "-output", thinned], {
+          stdio: "inherit",
+        });
+        fs.renameSync(thinned, destPath);
+        fs.chmodSync(destPath, 0o755);
+        const after = fs.statSync(destPath).size;
+        console.log(
+          `🔪 Stripped universal binary to ${lipoArch}: ` +
+            `${(before / 1024 / 1024).toFixed(0)}M → ${(after / 1024 / 1024).toFixed(0)}M`
+        );
+      } else {
+        console.log(`   Verified architecture: ${lipoArch}`);
+      }
     }
 
     const extractedVersion = readNativeBinaryVersion();
@@ -276,5 +284,7 @@ Promise.all([download(url, tmpArchive), downloadText(checksumsUrl)])
     try { fs.unlinkSync(tmpArchive); } catch {}
     try { fs.rmSync(versionMarkerPath, { force: true }); } catch {}
     try { fs.rmSync(destPath, { force: true }); } catch {}
+    try { fs.rmSync(`${destPath}.thin`, { force: true }); } catch {}
+    try { fs.rmSync(path.join(binariesDir, extractedDir), { recursive: true, force: true }); } catch {}
     process.exit(1);
   });

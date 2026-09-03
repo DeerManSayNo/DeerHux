@@ -751,11 +751,31 @@ fn resolve_node(resource_dir: &Path) -> PathBuf {
         let temp_dir = std::env::temp_dir().join("deerhux-node");
         let destination = temp_dir.join("node");
         let _ = std::fs::create_dir_all(&temp_dir);
-        if !destination.exists() {
-            if std::fs::copy(&bundle_node, &destination).is_ok() {
-                use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o755));
+
+        // The sidecar is copied out of the signed app bundle because macOS can
+        // otherwise delay its first execution. Do not blindly reuse that copy:
+        // after an app upgrade it may still be an older Node runtime.
+        let read_version = |path: &Path| {
+            Command::new(path)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        };
+        let bundled_version = read_version(&bundle_node);
+        let cached_version = read_version(&destination);
+        if bundled_version.is_none() || cached_version != bundled_version {
+            let pending = temp_dir.join(format!("node.tmp-{}", std::process::id()));
+            let copied = std::fs::copy(&bundle_node, &pending)
+                .and_then(|_| {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o755))
+                })
+                .and_then(|_| std::fs::rename(&pending, &destination));
+            let _ = std::fs::remove_file(&pending);
+            if copied.is_err() {
+                return bundle_node;
             }
         }
         destination
