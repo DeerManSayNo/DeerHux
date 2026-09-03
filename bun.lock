@@ -1,9 +1,11 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "deerhux",
       "dependencies": {
+        "@colbymchenry/codegraph": "^0.9.5",
         "@earendil-works/pi-ai": "^0.75.5",
         "@earendil-works/pi-coding-agent": "^0.75.5",
         "@lobehub/icons": "5.6.0",
@@ -153,6 +155,20 @@
     "@chevrotain/types": ["@chevrotain/types@12.0.0", "", {}, "sha512-S+04vjFQKeuYw0/eW3U52LkAHQsB1ASxsPGsLPUyQgrZ2iNNibQrsidruDzjEX2JYfespXMG0eZmXlhA6z7nWA=="],
 
     "@chevrotain/utils": ["@chevrotain/utils@12.0.0", "", {}, "sha512-lB59uJoaGIfOOL9knQqQRfhl9g7x8/wqFkp13zTdkRu1huG9kg6IJs1O8hqj9rs6h7orGxHJUKb+mX3rPbWGhA=="],
+
+    "@colbymchenry/codegraph": ["@colbymchenry/codegraph@0.9.9", "", { "optionalDependencies": { "@colbymchenry/codegraph-darwin-arm64": "0.9.9", "@colbymchenry/codegraph-darwin-x64": "0.9.9", "@colbymchenry/codegraph-linux-arm64": "0.9.9", "@colbymchenry/codegraph-linux-x64": "0.9.9", "@colbymchenry/codegraph-win32-arm64": "0.9.9", "@colbymchenry/codegraph-win32-x64": "0.9.9" }, "bin": { "codegraph": "npm-shim.js" } }, "sha512-23Dl9q0RHKVhJRp+Y823GfmQJjcPiRycoKN7TkaI8eJitluRvieoVlclPILqua8znvkAw9KevYziFfK3k74CBQ=="],
+
+    "@colbymchenry/codegraph-darwin-arm64": ["@colbymchenry/codegraph-darwin-arm64@0.9.9", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Mu6xhG4bF1OLeTqN2eSI5U8z2esymK/RjxP3T8cCigA4YprDIvd3XSGmTZREbDNRCuqrCi0R1LCJ7fsdFfpAPA=="],
+
+    "@colbymchenry/codegraph-darwin-x64": ["@colbymchenry/codegraph-darwin-x64@0.9.9", "", { "os": "darwin", "cpu": "x64" }, "sha512-xShaChiPJsajmBxvr1yP2XWsYstq0kJzHwQmiUG1huWrE14tP9NJnJ36hsbzHfHiqwBOJo2+5MZHuXmmzJa/vQ=="],
+
+    "@colbymchenry/codegraph-linux-arm64": ["@colbymchenry/codegraph-linux-arm64@0.9.9", "", { "os": "linux", "cpu": "arm64" }, "sha512-zccx1m3gGB2jAGfz41U+1GQNK12mtLGuX48XyZXiyQIGFsJQCFS8v/OvShAfPygSGhUr3zKMetbkMnztp7ULtg=="],
+
+    "@colbymchenry/codegraph-linux-x64": ["@colbymchenry/codegraph-linux-x64@0.9.9", "", { "os": "linux", "cpu": "x64" }, "sha512-vQfe5VdSQb/cVo1pwO12FyzTNaDIXtN3dLuAS/LIPsg2tQVyT9fwr10QmL10qWUNBShjgnRsomHdMG7hCjW3Yg=="],
+
+    "@colbymchenry/codegraph-win32-arm64": ["@colbymchenry/codegraph-win32-arm64@0.9.9", "", { "os": "win32", "cpu": "arm64" }, "sha512-U2QlTT434ulbEw6sTJVS+VNhjJUbZqCnw8tXuXSKkcuzGPZq/Hxoofe9UpY77+J9hAJu9PwwiWjEEaiDX9yb1w=="],
+
+    "@colbymchenry/codegraph-win32-x64": ["@colbymchenry/codegraph-win32-x64@0.9.9", "", { "os": "win32", "cpu": "x64" }, "sha512-N7Xgt80BeEy78nNeqHaUgcsngxmy1Hty570QSa4hOh4zl6z6v6n7i9ZSUfraktESVUkfmMbUwoqfEzVwUbB0/g=="],
 
     "@dnd-kit/accessibility": ["@dnd-kit/accessibility@3.1.1", "", { "dependencies": { "tslib": "^2.0.0" }, "peerDependencies": { "react": ">=16.8.0" } }, "sha512-2P+YgaXF+gRsIihwwY1gCsQSYnu9Zyj2py8kY5fFvUM1qm2WA2u639R6YNVfU4GWr+ZM5mqEsfHZZLoRONbemw=="],
 
@@ -1408,7 +1424,7 @@
 
     "iterator.prototype": ["iterator.prototype@1.1.5", "", { "dependencies": { "define-data-property": "^1.1.4", "es-object-atoms": "^1.0.0", "get-intrinsic": "^1.2.6", "get-proto": "^1.0.0", "has-symbols": "^1.1.0", "set-function-name": "^2.0.2" } }, "sha512-H0dkQoCa3b2VEeKQBOxFph+JAbcrQdE7KC0UkqwpLmv2EC4P41QXP+rqo9wYodACiG5/WM5s9oDApTU8utwj9g=="],
 
-    "jiti": ["jiti@1.21.7", "", { "bin": { "jiti": "bin/jiti.js" } }, "sha512-/imKNG4EbWNrVjoNC/1H5/9GFy+tqjGBHCaSsN+P2RnPqjsLmv6UD3Ej+Kj8nBWaRAwyk7kK5ZUc+OEatnTR3A=="],
+    "jiti": ["jiti@2.7.0", "", { "bin": { "jiti": "lib/jiti-cli.mjs" } }, "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ=="],
 
     "js-cookie": ["js-cookie@3.0.5", "", {}, "sha512-cEiJEAEoIbWfCZYKWhVwFuvPX1gETRYPw6LlaTKoxD3s2AkXzkCjnp6h0V77ozyqj0jakteJ4YqDJT830+lVGw=="],
 
@@ -2185,8 +2201,6 @@
     "@earendil-works/pi-coding-agent/chalk": ["chalk@5.6.2", "", {}, "sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA=="],
 
     "@earendil-works/pi-coding-agent/ignore": ["ignore@7.0.5", "", {}, "sha512-Hs59xBNfUIunMFgWAbGX5cq6893IbWg4KnrjbYwX3tx0ztorVgTDA6B2sxf8ejHJ4wz8BqGUMYlnzNBer5NvGg=="],
-
-    "@earendil-works/pi-coding-agent/jiti": ["jiti@2.7.0", "", { "bin": { "jiti": "lib/jiti-cli.mjs" } }, "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ=="],
 
     "@earendil-works/pi-coding-agent/minimatch": ["minimatch@10.2.5", "", { "dependencies": { "brace-expansion": "^5.0.5" } }, "sha512-MULkVLfKGYDFYejP07QOurDLLQpcjk7Fw+7jXS2R2czRQzR56yHRveU5NDJEOviH+hETZKSkIk5c+T23GjFUMg=="],
 
