@@ -8,6 +8,7 @@ import type { ChatInputHandle, ChatInputState } from "./ChatInput";
 import styles from "./QuickSessionDrawer.module.css";
 import type { SessionInfo } from "@/lib/types";
 import { getProjectDisplayName } from "@/lib/project-name";
+import { scrollbarOffset } from "@/lib/quick-session-scrollbar";
 import {
   QUICK_SESSION_DEFAULT_WIDTH,
   QUICK_SESSION_EXPANDED_COUNT,
@@ -126,7 +127,8 @@ export function QuickSessionDrawer({
   const placeholderSessionIdsRef = useRef(new Set<string>());
   const sessionRenderKeysRef = useRef(new Map<string, string>());
   const handledNewSessionRequestRef = useRef(0);
-  const revealDragRef = useRef({ screenX: 0, offset: 0 });
+  const revealThumbRef = useRef<HTMLDivElement | null>(null);
+  const revealDragRef = useRef({ screenX: 0, position: 0, travel: 0, maximumOffset: 0 });
   const nativeResizeRef = useRef({ targetWidth: QUICK_SESSION_DEFAULT_WIDTH, running: false });
   const orderedSessions = useMemo(() => sortSessions(sessions, sentAt), [sentAt, sessions]);
   const cardWidth = QUICK_SESSION_DEFAULT_WIDTH - SCROLLER_INLINE_PADDING;
@@ -284,14 +286,28 @@ export function QuickSessionDrawer({
   }, [activeIndex, open, orderedSessions]);
 
   const handleRevealStart = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.isPrimary || event.button !== 0 || maximumRevealOffset <= 0) return;
+    const thumb = revealThumbRef.current;
+    if (!thumb) return;
     event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
+    const trackRect = event.currentTarget.getBoundingClientRect();
+    const thumbRect = thumb.getBoundingClientRect();
+    const travel = Math.max(0, trackRect.width - thumbRect.width);
+    // Preserve the grab point on the thumb; track clicks center it under the pointer.
+    const onThumb = event.clientX >= thumbRect.left && event.clientX <= thumbRect.right;
+    const position = onThumb
+      ? revealOffsetRef.current / maximumRevealOffset * travel
+      : Math.max(0, Math.min(travel, event.clientX - trackRect.left - thumbRect.width / 2));
+    applyRevealOffset(scrollbarOffset(position, travel, maximumRevealOffset));
     event.currentTarget.setPointerCapture(event.pointerId);
-    revealDragRef.current = { screenX: event.screenX, offset: revealOffsetRef.current };
-  }, []);
+    revealDragRef.current = { screenX: event.screenX, position, travel, maximumOffset: maximumRevealOffset };
+  }, [applyRevealOffset, maximumRevealOffset]);
 
   const handleRevealMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    applyRevealOffset(revealDragRef.current.offset + event.screenX - revealDragRef.current.screenX);
+    const drag = revealDragRef.current;
+    applyRevealOffset(scrollbarOffset(drag.position + event.screenX - drag.screenX, drag.travel, drag.maximumOffset));
   }, [applyRevealOffset]);
 
   const handleRevealEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -482,13 +498,14 @@ export function QuickSessionDrawer({
       <div
         className={styles.revealScrollbar}
         role="scrollbar"
-        aria-label="展开快捷会话"
+        aria-label="横向滚动快捷会话"
         aria-controls="quick-session-strip"
         aria-orientation="horizontal"
         aria-valuemin={0}
         aria-valuemax={maximumRevealOffset}
         aria-valuenow={revealOffset}
-        tabIndex={0}
+        aria-disabled={maximumRevealOffset <= 0}
+        tabIndex={maximumRevealOffset > 0 ? 0 : -1}
         onPointerDown={handleRevealStart}
         onPointerMove={handleRevealMove}
         onPointerUp={handleRevealEnd}
@@ -497,8 +514,13 @@ export function QuickSessionDrawer({
         onKeyDown={handleRevealKeyDown}
       >
         <div
+          ref={revealThumbRef}
           className={styles.revealProgress}
-          style={{ width: `${maximumRevealOffset > 0 ? (revealOffset / maximumRevealOffset) * 100 : 0}%` }}
+          style={{
+            width: `min(100%, max(28px, ${Math.min(1, viewportWidth / stripWidth) * 100}%))`,
+            left: `${maximumRevealOffset > 0 ? revealOffset / maximumRevealOffset * 100 : 0}%`,
+            transform: `translateX(-${maximumRevealOffset > 0 ? revealOffset / maximumRevealOffset * 100 : 0}%)`,
+          }}
         />
       </div>
     </aside>

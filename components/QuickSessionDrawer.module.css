@@ -55,14 +55,32 @@
 
 .revealScrollbar {
   position: relative;
-  height: 12px;
+  height: 28px;
   margin: 0 10px 4px;
-  flex: 0 0 12px;
+  flex: 0 0 28px;
   overflow: hidden;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--border) 58%, transparent);
-  cursor: ew-resize;
+  cursor: grab;
   touch-action: none;
+  user-select: none;
+}
+
+.revealScrollbar::before {
+  content: "";
+  position: absolute;
+  inset: 9px 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--border) 58%, transparent);
+  pointer-events: none;
+}
+
+.revealScrollbar:active {
+  cursor: grabbing;
+}
+
+.revealScrollbar[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .revealScrollbar:focus-visible {
@@ -72,11 +90,16 @@
 
 .revealProgress {
   position: absolute;
-  inset: 0 auto 0 0;
-  min-width: 28px;
+  top: 9px;
+  bottom: 9px;
   border-radius: inherit;
   background: var(--text-dim);
   pointer-events: none;
+}
+
+.revealScrollbar:hover .revealProgress,
+.revealScrollbar:active .revealProgress {
+  background: var(--text);
 }
 
 .sessionCard {

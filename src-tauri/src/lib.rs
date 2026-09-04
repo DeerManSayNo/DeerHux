@@ -1079,6 +1079,19 @@ pub fn run() {
             let builder = builder.decorations(false);
 
             let window = builder.build()?;
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            {
+                let close_app = app.handle().clone();
+                #[cfg(not(debug_assertions))]
+                let close_backend = Arc::clone(&setup_backend);
+                window.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                        #[cfg(not(debug_assertions))]
+                        close_backend.stop();
+                        close_app.exit(0);
+                    }
+                });
+            }
             #[cfg(not(debug_assertions))]
             let _ = &window;
 
@@ -1156,18 +1169,6 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(move |_handle, _event| {
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        if matches!(
-            &_event,
-            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { .. }, .. }
-                if label == "main"
-        ) {
-            #[cfg(not(debug_assertions))]
-            backend.stop();
-            _handle.exit(0);
-            return;
-        }
-
         #[cfg(not(debug_assertions))]
         if matches!(
             _event,
