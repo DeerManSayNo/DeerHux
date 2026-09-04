@@ -1998,9 +1998,11 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               }
               let refIdx = 0;
               return messages.map((msg, idx) => {
-                if (toolProcessLayout.hiddenMessageIndexes.has(idx)) return null;
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = isVisible ? refIdx++ : -1;
+                // 折叠的消息仍占用 ref 序号，与 userMsgIdxToRefIdx 保持一致，
+                // 否则后续提示词会定位到错误节点或空 ref。
+                if (toolProcessLayout.hiddenMessageIndexes.has(idx)) return null;
                 let showTimestamp = false;
                 let isLastAssistantInTurn = false;
                 if (msg.role === "assistant") {

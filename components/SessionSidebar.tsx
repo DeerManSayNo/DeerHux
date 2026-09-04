@@ -12,6 +12,7 @@ import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
 import { readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 import { getProjectDisplayName } from "@/lib/project-name";
 import { publishVisibleProjects } from "@/lib/visible-projects";
+import { ProjectBranch } from "./ProjectBranch";
 
 
 type RunningSessionStatus = {
@@ -336,6 +337,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [projectsRefreshDone, setProjectsRefreshDone] = useState(false);
+  const [branchRefreshKey, setBranchRefreshKey] = useState(0);
   const projectsRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -919,6 +921,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const handleRefreshProjects = useCallback(async () => {
+    setBranchRefreshKey((key) => key + 1);
     setError(null);
     setRefreshing(true);
     try {
@@ -1226,6 +1229,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               <ProjectSection
                 key={project.cwd}
                 project={project}
+                branchRefreshKey={`${branchRefreshKey}:${refreshKey ?? 0}:${explorerRefreshKey ?? 0}`}
                 expanded={normalizedSearchQuery ? true : expandedCwds.has(project.cwd)}
                 showAll={normalizedSearchQuery ? true : showAllCwds.has(project.cwd)}
                 selectedSessionId={selectedSessionId}
@@ -1588,6 +1592,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
 function ProjectSection({
   project,
+  branchRefreshKey,
   expanded,
   showAll,
   selectedSessionId,
@@ -1602,6 +1607,7 @@ function ProjectSection({
   isActiveProject = false,
 }: {
   project: ProjectGroup;
+  branchRefreshKey: string;
   expanded: boolean;
   showAll: boolean;
   selectedSessionId: string | null;
@@ -1643,7 +1649,15 @@ function ProjectSection({
         onContextMenu?.(event);
       }}
     >
-      <button
+      <div
+        role="button"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+          event.preventDefault();
+          if (compact && project.sessions.length > 0) onSelectSession(project.sessions[0]);
+          else onToggle();
+        }}
         onClick={() => {
           if (compact && project.sessions.length > 0) {
             onSelectSession(project.sessions[0]);
@@ -1707,13 +1721,13 @@ function ProjectSection({
             {project.pinned && (
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-label="已置顶"><path d="m14 4 6 6-3 1-4 4-1 5-2-2-2-2 5-1 4-4Z" /></svg>
             )}
-            {project.sessions.length > 0 && <span style={{ color: "var(--text-dim)", fontSize: 10, flexShrink: 0 }}>{project.sessions.length}</span>}
+            <ProjectBranch cwd={project.cwd} refreshKey={branchRefreshKey} />
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: "var(--text-dim)" }}>
               <polyline points="3 2 7 5 3 8" />
             </svg>
           </>
         )}
-      </button>
+      </div>
 
       {(compact || expanded) && (
         <div>

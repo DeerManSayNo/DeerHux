@@ -776,13 +776,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!files.length) return;
     e.preventDefault();
 
-    // 浏览器生成的截图/网页位图通常叫 image.png，继续作为视觉附件处理；
-    // 从 Finder/资源管理器复制的具名图片和其他文件则落到项目根目录并引用。
-    const isGeneratedImage = files.length === 1
-      && files[0].type.startsWith("image/")
-      && (!files[0].name || /^(?:image|screenshot|截图)(?:[- _]\d+)?\.[a-z0-9]+$/i.test(files[0].name));
-    if (isGeneratedImage) processImageFiles(files);
-    else processPastedFiles(files);
+    // 剪贴板中的图片始终沿用视觉图片链路，不能因文件带有名称而退化为普通附件。
+    // 混合粘贴时，非图片文件仍按项目附件上传。
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const attachmentFiles = files.filter((file) => !file.type.startsWith("image/"));
+    if (imageFiles.length) processImageFiles(imageFiles);
+    if (attachmentFiles.length) processPastedFiles(attachmentFiles);
   }, [processImageFiles, processPastedFiles]);
 
 
