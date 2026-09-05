@@ -2,6 +2,7 @@
 
 import { businessRecoveryDelayMs, eligibleRecoveryEvents } from "@/lib/agent-runtime/recovery-buffer";
 import { SessionEventBuffer, type SessionBufferDiagnostics } from "@/lib/agent-runtime/session-event-buffer";
+import { isCollaborationSnapshotOlder } from "@/lib/collaboration-ui-state";
 import type {
   HostControlFrame,
   HostRunningSnapshot,
@@ -410,7 +411,7 @@ class AgentEventClient {
     } else {
       const runs = new Map((previous?.runs ?? []).map((run) => [run.runId, run]));
       const old = runs.get(frame.run.runId);
-      if (!old || old.updatedAt <= frame.run.updatedAt) runs.set(frame.run.runId, frame.run);
+      if (!old || frame.run.status === "removed" || !isCollaborationSnapshotOlder(frame.run, old)) runs.set(frame.run.runId, frame.run);
       this.subagentMirror.set(frame.parentSessionId, {
         type: "subagent_runs_snapshot",
         parentSessionId: frame.parentSessionId,

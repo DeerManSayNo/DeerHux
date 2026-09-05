@@ -175,16 +175,16 @@ export function ChatMinimap({ messages, streamingMessage, scrollContainer, messa
     scheduleDelayedUpdate(80);
   }, [messages.length, scheduleDelayedUpdate]);
 
-  const scrollToMinimapRatio = useCallback((viewportTopRatio: number) => {
+  const scrollToMinimapRatio = (viewportTopRatio: number) => {
     const el = scrollContainer.current;
     if (!el) return;
     const scrollable = el.scrollHeight - el.clientHeight;
     if (scrollable <= 0) return;
     const clamped = Math.max(0, Math.min(1 - viewportRatio, viewportTopRatio));
     el.scrollTop = (clamped / (1 - viewportRatio)) * scrollable;
-  }, [scrollContainer, viewportRatio]);
+  };
 
-  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!visible) return;
 
     draggingRef.current = true;
@@ -208,7 +208,7 @@ export function ChatMinimap({ messages, streamingMessage, scrollContainer, messa
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [visible, viewportRatio, scrollRatio, scrollToMinimapRatio]);
+  };
 
 
 

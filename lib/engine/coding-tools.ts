@@ -12,6 +12,8 @@ export const STANDARD_CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "gre
 export interface CreateStandardCodingToolsOptions {
   /** 当前 session id；用于长输出 spill 与 context 目录白名单。 */
   sessionId?: string;
+  /** 显式替代继承环境；子代理由 composition root 提供只读 allowlist 快照。 */
+  processEnv?: Readonly<NodeJS.ProcessEnv>;
 }
 
 const MAX_TEXT_BYTES = 200_000;
@@ -41,17 +43,17 @@ function textResult(text: string, details: unknown = undefined, changedFiles?: s
  * bash/grep/find 工具会找不到 rg、fd、brew 等命令。
  * 统一补齐：DeerHux 自带工具目录 + 常见包管理器目录。
  */
-function buildProcessEnv(): NodeJS.ProcessEnv {
+function buildProcessEnv(source: Readonly<NodeJS.ProcessEnv> = process.env): NodeJS.ProcessEnv {
   const extraDirs = [
     path.join(homedir(), ".deerhux", "agent", "bin"),
     "/opt/homebrew/bin",
     "/usr/local/bin",
   ];
-  const parts = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const parts = (source.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(path.delimiter).filter(Boolean);
   for (const dir of extraDirs) {
     if (!parts.includes(dir)) parts.push(dir);
   }
-  return { ...process.env, PATH: parts.join(path.delimiter) };
+  return { ...source, PATH: parts.join(path.delimiter) };
 }
 
 function activeSignal(signal: AbortSignal | undefined): AbortSignal {
@@ -233,6 +235,7 @@ function runProcess(
     shell?: boolean;
     spillDir?: string;
     spillId?: string;
+    processEnv?: Readonly<NodeJS.ProcessEnv>;
   },
 ): Promise<ProcessRunResult> {
   if (opts.signal.aborted) {
@@ -243,7 +246,7 @@ function runProcess(
     const child = spawn(command, args, {
       cwd: opts.cwd,
       shell: opts.shell ?? false,
-      env: buildProcessEnv(),
+      env: buildProcessEnv(opts.processEnv),
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,
@@ -472,6 +475,7 @@ export function createStandardCodingTools(
           shell: true,
           spillDir,
           spillId: toolCallId,
+          processEnv: options?.processEnv,
         });
         const text = [
           `exit_code: ${result.code ?? "null"}${result.signal ? ` signal: ${result.signal}` : ""}`,
@@ -536,7 +540,7 @@ export function createStandardCodingTools(
         if (glob) args.push("--glob", glob);
         const limit = numberParam(params, ["limit", "maxResults"], 100);
         args.push("--max-count", String(Math.max(1, limit)), pattern, targetPath);
-        const result = await runProcess("rg", args, { cwd, signal: activeSignal(signal), timeoutMs: 60_000 });
+        const result = await runProcess("rg", args, { cwd, signal: activeSignal(signal), timeoutMs: 60_000, processEnv: options?.processEnv });
         if (result.code === 1 && !result.stdout) return textResult(`No matches for: ${pattern}`, { pattern, path: targetPath });
         return textResult(result.stdout || result.stderr || "No output", { pattern, path: targetPath, exitCode: result.code });
       },

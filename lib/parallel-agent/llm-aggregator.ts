@@ -83,9 +83,9 @@ function buildAggregatorUserPrompt(run: CollaborationRunState, completed: Collab
     const parts: string[] = [`## ${worker.name}`];
     parts.push(`任务：${worker.task}`);
     if (worker.result?.trim()) {
-      // 截断超长结果，避免上下文爆炸（单 worker 最多 ~3000 字）。
+      // 截断超长结果，避免上下文爆炸（单 worker 最多 10000 字符）。
       parts.push("结论：");
-      parts.push(truncate(worker.result.trim(), 3000));
+      parts.push(truncate(worker.result.trim(), 10000));
     }
     if (worker.diffStats?.trim()) {
       parts.push(`变更概览：\n${worker.diffStats.trim()}`);

@@ -7,12 +7,17 @@ import { getMcpProcessDiagnostics } from "@/lib/mcp-runtime";
 import { getEventLoopDiagnostics } from "@/lib/agent-runtime/event-loop-diagnostics";
 import { getMessageUpdateCoalescerDiagnostics } from "@/lib/agent-runtime/event-coalescer";
 import { getRuntimeDiagnosticEvents } from "@/lib/agent-runtime/diagnostic-events";
+import { getWorktreeDiagnostics } from "@/lib/parallel-agent/worktree-diagnostics";
+import { readWorktreeInventory } from "@/lib/parallel-agent/worktree-inventory";
+import { getIsolatedRunsRoot } from "@/lib/parallel-agent/worktree";
+import { getWorktreeRollout } from "@/lib/parallel-agent/worktree-rollout";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET() {
   const memory = process.memoryUsage();
+  const worktreeInventory = await readWorktreeInventory(getIsolatedRunsRoot());
   return NextResponse.json({
     timestamp: Date.now(),
     process: {
@@ -32,5 +37,6 @@ export async function GET() {
     coalescer: getMessageUpdateCoalescerDiagnostics(),
     recentDiagnosticEvents: getRuntimeDiagnosticEvents(100),
     mcp: getMcpProcessDiagnostics(),
+    worktrees: { rollout: getWorktreeRollout(), metrics: getWorktreeDiagnostics(), inventory: worktreeInventory },
   });
 }

@@ -1,0 +1,42 @@
+.actions { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: var(--text); font-size: 12px; }
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.button, .primaryButton, .dangerButton, .iconButton { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-hover); color: var(--text); padding: 7px 11px; min-height: 34px; font: inherit; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; text-decoration: none; }
+.primaryButton { background: var(--accent); color: var(--bg, #fff); border-color: var(--accent); font-weight: 650; }
+.dangerButton { color: #f87171; border-color: color-mix(in srgb, #f87171 45%, var(--border)); }
+.button:disabled, .primaryButton:disabled, .dangerButton:disabled, .iconButton:disabled { opacity: .45; cursor: not-allowed; }
+.button:focus-visible, .primaryButton:focus-visible, .dangerButton:focus-visible, .iconButton:focus-visible, .workerButton:focus-visible, .input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.iconButton { width: 34px; height: 34px; padding: 0; flex-shrink: 0; font-size: 23px; }
+.muted { color: var(--text-dim); line-height: 1.6; margin: 4px 0; overflow-wrap: anywhere; }
+.notice, .warning { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.warning { border-color: color-mix(in srgb, #f59e0b 40%, var(--border)); background: color-mix(in srgb, #f59e0b 7%, var(--bg-hover)); }
+.dialog { width: min(1000px, calc(100vw - 32px)); max-width: 1000px; max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--border); border-radius: 14px; color: var(--text); background: var(--bg, #151519); box-shadow: 0 20px 80px #0006; overflow: auto; font-size: 13px; }
+.dialog::backdrop { background: #0008; }
+.dialogHeader { display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; top: 0; background: var(--bg, #151519); border-bottom: 1px solid var(--border); padding: 14px 18px; z-index: 1; }
+.dialogHeader h3 { margin: 0; font-size: 16px; }
+.dialogBody { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.reviewGrid { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); gap: 16px; }
+.workerList { display: flex; flex-direction: column; gap: 6px; }
+.workerRow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.workerButton { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-hover); color: var(--text); cursor: pointer; text-align: left; padding: 9px; display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; overflow-wrap: anywhere; font: inherit; }
+.workerButton[aria-pressed=true] { border-color: var(--accent); }
+.workerButton small { color: var(--text-dim); }
+.filePanel { min-width: 0; }
+.filePanel h4 { margin: 0 0 8px; overflow-wrap: anywhere; }
+.fileList { max-height: 320px; overflow: auto; margin: 10px 0; border-block: 1px solid var(--border); }
+.fileRow { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 7px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.fileRow:last-child { border-bottom: 0; }
+.fileRow input { margin-top: 3px; flex-shrink: 0; }
+.fileName { overflow-wrap: anywhere; word-break: break-word; min-width: 0; flex: 1; }
+.fileRow small { color: var(--text-dim); }
+.diffText { max-height: 350px; max-width: 100%; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-hover); font-size: 12px; line-height: 1.55; tab-size: 2; }
+.input { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--border); border-radius: 8px; padding: 9px; background: var(--bg-hover); color: var(--text); font: inherit; }
+.workerOperation { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.resourceList { margin: 0; padding-left: 20px; overflow-wrap: anywhere; line-height: 1.65; }
+@media (max-width: 600px) {
+  .dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); border-radius: 10px; }
+  .dialogBody, .dialogHeader { padding: 12px; }
+  .reviewGrid { grid-template-columns: minmax(0, 1fr); }
+  .workerList { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+  .fileRow small { width: 100%; padding-left: 22px; }
+  .toolbar > button, .toolbar > a { max-width: 100%; white-space: normal; }
+}

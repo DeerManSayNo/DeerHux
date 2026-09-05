@@ -30,6 +30,9 @@ export async function load(url, context, nextLoad) {
 }
 
 export async function resolve(specifier, context, nextResolve) {
+  // Next exposes this subpath as server.js without an exports map. The app
+  // bundler resolves it, while direct Node route tests need the explicit file.
+  if (specifier === "next/server") return nextResolve("next/server.js", context);
   if (specifier.startsWith("@/")) {
     const projectUrl = new URL(`../${specifier.slice(2)}`, import.meta.url);
     for (const suffix of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) {

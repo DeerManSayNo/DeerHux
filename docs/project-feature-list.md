@@ -353,7 +353,7 @@ auto / off / minimal / low / medium / high / xhigh
 ### 10.2 隔离与调度
 
 - **analysis**：在共享工作目录中执行只读分析；
-- **isolated_coding**：在独立 Git Worktree 中编码；
+- **isolated_coding**：在独立 Git Worktree 中编码；新 Run 由服务端 `SUBAGENT_WORKTREE_V2=1` 显式启用，默认关闭。关闭只停止新建，不把已有 v2 Run 转交旧实现；
 - 支持前台和后台运行；
 - 支持并行、串行和 Pipeline 工作流；
 - 可声明 DAG 工作流意图；
@@ -374,10 +374,14 @@ auto / off / minimal / low / medium / high / xhigh
 
 ### 10.4 代码结果回收
 
-- 生成每个 Worker 的 Git Diff 与统计；
-- 显示修改文件和冲突文件；
-- 支持将 Worktree 补丁应用回主工作区；
-- 跟踪已应用、失败和冲突结果；
+- 相对创建时固定 `baseCommit` 捕获每个 Worker 的文本、二进制、未跟踪文件与 Worker commit，落盘可校验的 patch artifact；
+- 原生审阅对话框支持稳定 Worker ID、多 Worker 与文件子集选择、二进制/大 patch 下载和冲突反馈；
+- 使用临时 index、前置校验、事务 journal 与幂等键原子 Apply；不再逐 Worker 部分写入主仓库；
+- 新 Node 进程可恢复 Session/manifest，已捕获成果在 Worktree 缺失时仍可 Apply；已应用历史重放不会覆盖用户后续修改；
+- 显式 Discard 使用预览、短期确认 token 与强确认；无独立创建授权的自动清理保留现存资源，207 表示部分处理/仍保留，不伪装成已删除；
+- 默认环境模式为 `none`，可信仓库外配置可授权有限 Node hook，不自动复制 ignored 凭据或共享可写依赖。Worktree 是协作隔离，不是进程沙箱；
+- `SUBAGENT_WORKTREE_V2_APPLY=0` 可停止新 Apply；历史结果和 artifact 读取保留，前端按服务端快照能力关闭操作；
+- legacy Run 没有可验证基线时只提供脱敏恢复元数据与人工指引，不自动迁移、应用或清理；
 - 默认拒绝在 Dirty Git Worktree 上启动隔离编码，保护未提交改动。
 
 ---
@@ -654,7 +658,7 @@ auto / off / minimal / low / medium / high / xhigh
 
 1. **MCP 传输**：配置模型包含 `stdio`、`SSE` 和 `HTTP`，当前稳定运行主路径以 `stdio` 为主；扩展总览会将尚未支持的 HTTP/SSE Runtime 标记为 unsupported。
 2. **Subagent DAG**：可声明 `dag` 工作流，但当前 MVP 会按声明顺序降级为串行执行，尚未实现完整拓扑调度。
-3. **隔离编码**：稳定产品路径要求 Git 仓库；默认拒绝 Dirty Worktree。底层非 Git 临时目录复制不等于完整可审核的产品流程。
+3. **隔离编码**：v2 新建默认关闭，显式启用仍要求 clean Git 仓库；不提供非 Git 复制 fallback。24 小时耐久、Tauri 人工重启与分阶段真实保留窗口仍是发布前验收，不代表已部署。
 4. **事件存储**：实时 Event Store 与上游健康状态主要为进程内数据，后端重启后依赖 JSONL Session 快照恢复。
 5. **部署形态**：当前面向本机单用户、单 Node 后端进程，不是多租户云端 Agent 平台。
 6. **安全模型**：当前具备路径约束、工具白名单和模式限制，但尚无完整 OS 沙箱、网络出口治理和统一人工审批。

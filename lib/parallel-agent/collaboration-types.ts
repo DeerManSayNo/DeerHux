@@ -1,4 +1,5 @@
 import type { AgentEvent } from "@/lib/rpc-manager";
+import type { WorktreeChangeStats } from "./worktree-file-metadata";
 
 export type CollaborationRunMode = "analysis" | "isolated_coding";
 export type CollaborationRunStatus = "setting_up" | "running" | "complete" | "aborted" | "error" | "applying" | "applied" | "recoverable";
@@ -48,7 +49,7 @@ export interface CollaborationWorkerSpec {
 }
 
 export interface CollaborationWorkerState extends CollaborationWorkerSpec {
-  workerId?: string;
+  workerId: string;
   title?: string;
   instructions?: string;
   agentType?: SubagentTaskMode;
@@ -61,6 +62,12 @@ export interface CollaborationWorkerState extends CollaborationWorkerSpec {
   worktreePath?: string;
   diff?: string;
   diffStats?: string;
+  patchSha256?: string;
+  patchBytes?: number;
+  changedFiles?: string[];
+  binaryFiles?: string[];
+  changeStats?: WorktreeChangeStats;
+  captureErrorCode?: string;
   appliedFiles?: string[];
   conflictFiles?: string[];
   workerSessionState?: WorkerSessionState;
@@ -73,8 +80,18 @@ export interface CollaborationWorkerState extends CollaborationWorkerSpec {
   recentTools?: WorkerToolActivity[];
 }
 
+export interface WorktreeRunCapabilities {
+  implementation: "none" | "legacy" | "v2";
+  review: boolean;
+  apply: boolean;
+  continue: boolean;
+  discard: boolean;
+}
+
 export interface CollaborationRunState {
   runId: string;
+  /** Monotonically increasing store revision used by compare-and-set updates. */
+  version: number;
   parentSessionId?: string;
   parentEntryId?: string;
   cwd: string;
@@ -87,6 +104,16 @@ export interface CollaborationRunState {
   workflow?: SubagentWorkflow;
   status: CollaborationRunStatus;
   isGit?: boolean;
+  /** Internal lifecycle fact. Must be removed by every external projection. */
+  worktreeManifestPath?: string;
+  worktreeImplementation?: 2;
+  baseCommit?: string;
+  captureState?: "pending" | "captured" | "preserved" | "failed";
+  applyState?: "idle" | "applying" | "applied" | "failed" | "recovery_required";
+  applyTransactionId?: string;
+  /** Required together with applyTransactionId while status is applying. */
+  applyStartedAt?: string;
+  recoveryState?: "legacy_recovery_required" | "manual_recovery_required";
   workers: CollaborationWorkerState[];
   events: CollaborationRunEvent[];
   createdAt: string;
@@ -114,11 +141,20 @@ export interface CollaborationRunEvent {
     | "worker_complete"
     | "worker_error"
     | "worker_diff_ready"
+    | "worker_capture_started"
+    | "worker_capture_completed"
+    | "worker_capture_error"
+    | "worktree_preserved"
+    | "worktree_cleanup_completed"
+    | "worktree_cleanup_error"
     | "task_summary_ready"
     | "run_complete"
     | "run_aborted"
     | "run_error"
     | "patch_apply_started"
+    | "patch_apply_checked"
+    | "patch_apply_committed"
+    | "patch_apply_recovery_required"
     | "patch_applied"
     | "patch_apply_error";
   runId: string;
@@ -131,10 +167,19 @@ export interface CollaborationRunEvent {
   diff?: string;
   diffStats?: string;
   files?: string[];
+  transactionId?: string;
+  phase?: "prepared" | "checked" | "applied" | "persisted";
+  errorCode?: string;
+  reasonCode?: string;
+  fileCount?: number;
+  binaryFileCount?: number;
 }
 
 export interface CollaborationRunSnapshot {
   runId: string;
+  version: number;
+  worktreeImplementation?: 2;
+  worktreeCapabilities?: WorktreeRunCapabilities;
   taskId?: string;
   parentEntryId?: string;
   title?: string;
@@ -143,6 +188,12 @@ export interface CollaborationRunSnapshot {
   runPlacement?: SubagentRunPlacement;
   workflow?: SubagentWorkflow;
   status: CollaborationRunStatus;
+  baseCommit?: string;
+  captureState?: "pending" | "captured" | "preserved" | "failed";
+  applyState?: "idle" | "applying" | "applied" | "failed" | "recovery_required";
+  applyTransactionId?: string;
+  applyStartedAt?: string;
+  recoveryState?: "legacy_recovery_required" | "manual_recovery_required";
   message: string;
   workers: CollaborationWorkerState[];
   events?: CollaborationRunEvent[];

@@ -20,6 +20,7 @@ import { agentEventBus } from "@/lib/agent-event-bus";
 import { needsCompaction, type CompactionModelRef } from "@/lib/compaction-ui";
 import { subscribeSubagentRuns } from "@/lib/agent-event-client";
 import { getProjectDisplayName } from "@/lib/project-name";
+import { collaborationNeedsHydration, isCollaborationSnapshotOlder, mergeCollaborationMuxSnapshot } from "@/lib/collaboration-ui-state";
 
 interface AgentRole {
   id: string;
@@ -73,29 +74,6 @@ function getMessageRenderKey(message: AgentMessage, entryId: string | undefined,
   if (message.role === "user" && message.clientMessageId) return `client:${message.clientMessageId}`;
   const timestamp = typeof message.timestamp === "number" ? message.timestamp : "unknown";
   return `${message.role}:${timestamp}:${index}`;
-}
-
-function mergeCollaborationMuxSnapshot(
-  previous: CollaborationRunSnapshot,
-  snapshot: CollaborationMuxSnapshot,
-): CollaborationRunSnapshot {
-  if (previous.updatedAt > snapshot.updatedAt) return previous;
-
-  const details = new Map(
-    previous.workers.map((worker) => [worker.workerId ?? worker.name, worker]),
-  );
-  return {
-    ...previous,
-    title: snapshot.title ?? previous.title,
-    status: snapshot.status === "removed" ? "aborted" : snapshot.status,
-    workflow: snapshot.workflow,
-    updatedAt: snapshot.updatedAt,
-    workers: snapshot.workers.map((worker) => ({
-      ...details.get(worker.workerId ?? worker.name),
-      ...worker,
-      task: details.get(worker.workerId ?? worker.name)?.task ?? "",
-    })),
-  };
 }
 
 function parseUserMessageText(message: Extract<AgentMessage, { role: "user" }>): string {
@@ -731,7 +709,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         const merged = pending ? mergeCollaborationMuxSnapshot(run, pending) : run;
         if (pending) pendingRunMuxSnapshotsRef.current.delete(run.runId);
         const previous = byId.get(run.runId);
-        if (!previous || merged.updatedAt >= previous.updatedAt) byId.set(run.runId, merged);
+        if (!previous || !isCollaborationSnapshotOlder(merged, previous)) byId.set(run.runId, merged);
       }
       return byId;
     });
@@ -810,17 +788,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       removedCollaborationRunIdsRef.current.delete(snapshot.runId);
       if (liveCollaborationRunsRef.current.has(snapshot.runId)) {
         knownSnapshots.push(snapshot);
-        // Mux 不携带 sessionId；当 worker 发出 agent_start 后，用 sessionReady
-        // 触发一次详情水合，让卡片立即在安全边界解锁。
+        // Mux 仅携带安全摘要；capture/Apply 事实变化时获取文件详情。
+        // 不再根据永不出站的 sessionId 循环请求详情。
         const previous = liveCollaborationRunsRef.current.get(snapshot.runId);
-        const becameReady = snapshot.workers.some((worker) => {
-          if (!worker.sessionReady) return false;
-          const oldWorker = previous?.workers.find((candidate) =>
-            (worker.workerId && candidate.workerId === worker.workerId) || candidate.name === worker.name
-          );
-          return !oldWorker?.sessionId;
-        });
-        if (becameReady) {
+        if (previous && collaborationNeedsHydration(previous, snapshot)) {
           pendingRunMuxSnapshotsRef.current.set(snapshot.runId, snapshot);
           void hydrateCollaborationRun(snapshot.runId);
         }
@@ -828,7 +799,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       }
 
       const previousPending = pendingRunMuxSnapshotsRef.current.get(snapshot.runId);
-      if (!previousPending || previousPending.updatedAt <= snapshot.updatedAt) {
+      if (!previousPending || !isCollaborationSnapshotOlder(snapshot, previousPending)) {
         pendingRunMuxSnapshotsRef.current.set(snapshot.runId, snapshot);
       }
       void hydrateCollaborationRun(snapshot.runId);
@@ -937,7 +908,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     if (json?.data && json.data.systemPrompt !== undefined) {
       setSystemPrompt(json.data.systemPrompt ?? null);
     }
-  }, [session?.id, setSystemPrompt]);
+  }, [session, setSystemPrompt]);
 
   useEffect(() => {
     if (!data) return;
@@ -1106,7 +1077,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         if (json?.data && json.data.systemPrompt !== undefined) setSystemPrompt(json.data.systemPrompt ?? null);
       }
     }
-  }, [pendingRoleSetting, currentCwd, session?.id, applyRoleToSession, setSystemPrompt]);
+  }, [pendingRoleSetting, currentCwd, session, applyRoleToSession, setSystemPrompt]);
 
   const handleResend = useCallback((message: string, _entryId?: string, references?: FileReference[], skill?: SkillReference) => {
     if (isRunning && handleSteer) {
@@ -1439,20 +1410,20 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
-  const activeTurnStartedAt = useMemo(() => {
+  const activeTurnStartedAt = (() => {
     for (let index = messages.length - 1; index >= 0; index--) {
       if (messages[index].role !== "user") continue;
       return parseMessageTimestamp(messages[index]);
     }
     return undefined;
-  }, [messages]);
-  const activeTurnKey = useMemo(() => {
+  })();
+  const activeTurnKey = (() => {
     for (let index = messages.length - 1; index >= 0; index--) {
       if (messages[index].role !== "user") continue;
       return getTurnKey(messages[index], entryIds[index]);
     }
     return undefined;
-  }, [messages, entryIds]);
+  })();
   const toolProcessLayout = useMemo(() => {
     const hiddenMessageIndexes = new Set<number>();
     const messagesByFinalIndex = new Map<number, ToolProcessMessage[]>();
@@ -1497,6 +1468,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     return { hiddenMessageIndexes, messagesByFinalIndex };
   }, [messages, isRunning]);
   const [completedTurnDurations, setCompletedTurnDurations] = useState<Record<string, number>>({});
+  const [fallbackTurnStartedAt, setFallbackTurnStartedAt] = useState<number>();
   const activeTurnTimerRef = useRef<{
     sessionKey: string;
     initialTurnKey?: string;
@@ -1512,6 +1484,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
           initialTurnKey: activeTurnKey,
           startedAt: activeTurnStartedAt ?? Date.now(),
         };
+        setFallbackTurnStartedAt(activeTurnTimerRef.current.startedAt);
       } else if (activeTurnStartedAt !== undefined && activeTurnStartedAt < existing.startedAt) {
         existing.startedAt = activeTurnStartedAt;
       }
@@ -1534,10 +1507,11 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         }
       }
       activeTurnTimerRef.current = null;
+      setFallbackTurnStartedAt(undefined);
     }
   }, [isRunning, activeTurnStartedAt, activeTurnKey, activeSessionKey, activeTabId, newSessionCwd]);
   const activeTurnTimerStartedAt = activeTurnTimerRef.current?.startedAt
-    ?? (isRunning ? activeTurnStartedAt ?? Date.now() : undefined);
+    ?? (isRunning ? activeTurnStartedAt ?? fallbackTurnStartedAt : undefined);
 
   const chatInputSaveStateRef = useRef<((state: ChatInputState) => void) | null>(null);
   chatInputSaveStateRef.current = saveInputState ?? null;

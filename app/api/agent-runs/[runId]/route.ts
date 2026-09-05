@@ -19,7 +19,7 @@ export async function GET(
   if (!state) {
     return NextResponse.json({ error: "Run not found" }, { status: 404 });
   }
-  return NextResponse.json(sanitizeCollaborationRun(state));
+  return NextResponse.json(sanitizeCollaborationRun(state), { headers: { "Cache-Control": "no-store" } });
 }
 
 /**
@@ -39,10 +39,13 @@ export async function DELETE(
   if (!state) {
     return NextResponse.json({ error: "Run not found" }, { status: 404 });
   }
+  if (state.mode === "isolated_coding") {
+    return NextResponse.json({ error: "Isolated runs require the confirmation-based discard API" }, { status: 409 });
+  }
   // 仍运行中的 run 先停 workers，避免 remove 后后台 Promise.all 继续写已删除的 state。
   if (state.status === "running" || state.status === "setting_up" || state.status === "applying") {
     await abortCollaborationRun(runId).catch(() => {});
   }
-  removeCollaborationRun(runId);
+  await removeCollaborationRun(runId);
   return NextResponse.json({ ok: true });
 }

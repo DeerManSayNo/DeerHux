@@ -116,9 +116,6 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
           parentSessionId: options.getParentSessionId?.(),
           parentEntryId: options.getParentEntryId?.(),
           parentModel: options.getParentModel?.(),
-          // Tool invocations happen mid-turn while the main agent may have
-          // uncommitted edits; worktrees branch from HEAD regardless.
-          allowDirtyWorktree: true,
         });
       } catch (error) {
         const err = error instanceof Error ? error.message : String(error);
@@ -135,7 +132,6 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
       const runId = state.runId;
       const finalState = await waitForForegroundRun({
         runId,
-        timeoutMs: 12 * 60 * 1000,
         signal,
         getRun: getCollaborationRun,
         subscribe: subscribeCollaborationRun,

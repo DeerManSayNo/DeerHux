@@ -753,8 +753,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const messagesRef = useRef<AgentMessage[]>([]);
   const entryIdsRef = useRef<string[]>([]);
   const historySnapshotInvalidRef = useRef(false);
-  const lastAgentEventAtRef = useRef(Date.now());
-  const lastContentChangedAtRef = useRef(Date.now());
+  const [mountedAt] = useState(() => Date.now());
+  const lastAgentEventAtRef = useRef(mountedAt);
+  const lastContentChangedAtRef = useRef(mountedAt);
   const lastContentLengthRef = useRef(0);
   const autoRecoveryModelsRef = useRef<({ provider: string; modelId: string } | null)[]>([]);
   const watchdogCheckingRef = useRef(false);
