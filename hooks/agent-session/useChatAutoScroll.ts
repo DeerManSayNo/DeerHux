@@ -19,7 +19,14 @@ export function useChatAutoScroll() {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
-    messagesEndRef.current?.scrollIntoView({ behavior });
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    // 首次加载的后台卡片也会执行这里；scrollIntoView 会把抽屉的横向
+    // 会话列表一起滚到该卡片，导致第一次唤起时错位。
+    container.scrollTo({
+      top: Math.max(0, container.scrollHeight - container.clientHeight),
+      behavior,
+    });
   }, []);
 
   const scrollUserMsgToTop = useCallback(() => {

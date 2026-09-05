@@ -222,10 +222,11 @@ export function QuickSessionDrawer({
 
   useEffect(() => {
     if (!open) return;
+    let focusTimer: number | undefined;
     const frame = window.requestAnimationFrame(() => {
       const latestIndex = 0;
       scrollToIndex(latestIndex);
-      window.setTimeout(() => scrollerRef.current?.querySelector<HTMLElement>(`[data-session-index="${latestIndex}"] textarea`)?.focus(), 180);
+      focusTimer = window.setTimeout(() => scrollerRef.current?.querySelector<HTMLElement>(`[data-session-index="${latestIndex}"] textarea`)?.focus({ preventScroll: true }), 180);
     });
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -233,6 +234,7 @@ export function QuickSessionDrawer({
     window.addEventListener("keydown", closeOnEscape);
     return () => {
       window.cancelAnimationFrame(frame);
+      window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [onClose, open, orderedSessions.length, scrollToIndex]);
@@ -380,7 +382,7 @@ export function QuickSessionDrawer({
     onSessionCreated(placeholder);
     window.requestAnimationFrame(() => {
       scrollToIndex(0);
-      window.setTimeout(() => scrollerRef.current?.querySelector<HTMLElement>('[data-session-index="0"] textarea')?.focus(), 0);
+      window.setTimeout(() => scrollerRef.current?.querySelector<HTMLElement>('[data-session-index="0"] textarea')?.focus({ preventScroll: true }), 0);
     });
   }, [onSessionCreated, scrollToIndex]);
 

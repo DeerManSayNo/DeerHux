@@ -1,0 +1,87 @@
+.overlay { isolation: isolate; }
+.dialog { font-weight: 400; }
+.dialog button { transition: background .15s, border-color .15s; }
+.dialog button:disabled { cursor: not-allowed; opacity: .5; }
+.dialog button:focus-visible,
+.dialog input:focus-visible,
+.dialog textarea:focus-visible,
+.dialog select:focus-visible,
+.dialog summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dialog input:focus, .dialog textarea:focus, .dialog select:focus { border-color: var(--text-muted); }
+.sidebar { flex-shrink: 0; min-width: 0; }
+.sidebar > div:nth-child(2) { min-height: 0; overflow-y: auto; }
+.search { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px; font-size: 12px; font-weight: 400; background: var(--bg); color: var(--text); }
+.roleItem:hover { background: var(--bg-selected) !important; }
+.roleItem[aria-current="true"] { background: var(--bg-selected) !important; }
+.listCount { color: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.scopeText { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.toolbar { flex-shrink: 0; min-height: 66px; }
+.tabs { display: flex; gap: 24px; padding: 0 28px; border-bottom: 1px solid var(--border); }
+.tabs button { display: flex; align-items: center; gap: 7px; padding: 12px 0; background: transparent; border: 0; border-bottom: 2px solid transparent; font-size: 12px; color: var(--text-muted); cursor: pointer; }
+.tabs button[aria-pressed="true"] { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
+.tabs span { font-size: 10px; font-weight: 400; color: var(--text-muted); }
+.editor { flex: 1; min-height: 0; overflow-y: auto; padding: 0 28px 28px; background: var(--bg); }
+.formSection { padding: 24px 0; border-bottom: 1px solid var(--border); }
+.fields { display: grid; gap: 22px; }
+.fieldRow { display: grid; grid-template-columns: 138px minmax(0, 1fr); gap: 24px; align-items: start; color: var(--text); font-size: 12px; font-weight: 500; }
+.fieldRow > span { padding-top: 9px; }
+.fieldRow > input, .fieldRow > textarea { margin-top: 0 !important; }
+.fieldRow small { display: block; margin-top: 6px; max-width: 130px; font-size: 11px; line-height: 1.65; font-weight: 400; color: var(--text-muted); }
+.scopeFields { min-width: 0; display: grid; gap: 14px; }
+.deleteRole { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--text-muted); font-size: 11px; padding-top: 20px; }
+.deleteRole button { background: transparent !important; border-color: var(--border) !important; }
+.settingsHint { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin: 24px 0 14px; }
+.block { border-bottom: 1px solid var(--border); background: var(--bg); }
+.block summary { display: flex; align-items: center; gap: 12px; padding: 18px 0; list-style: none; cursor: pointer; }
+.block summary::-webkit-details-marker { display: none; }
+.block summary:hover .blockTitle { color: var(--text-muted); }
+.blockTitle { flex: 1; font-size: 13px; font-weight: 500; color: var(--text); }
+.count { font-size: 11px; color: var(--text-muted); }
+.chevron { color: var(--text-muted); font-size: 18px; transition: transform .15s; }
+.block[open] .chevron { transform: rotate(90deg); }
+.blockBody { padding: 0 0 18px; }
+.setting { margin-bottom: 14px; }
+.settingHeader { display: flex; justify-content: space-between; align-items: center; color: var(--text-muted); font-size: 11px; }
+.settingHeader button { border: 0; border-radius: 4px; padding: 4px 6px; color: var(--text-muted); background: transparent; cursor: pointer; font-size: 11px; }
+.settingHeader button:hover { background: rgba(239,68,68,.08); color: #ef4444; }
+.addSetting { border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text); font-size: 11px; padding: 6px 10px; cursor: pointer; }
+.addSetting:hover { background: var(--bg-panel); }
+.emptyBlock, .emptySearch { padding: 8px 0 16px; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.emptySearch { padding-top: 20px; text-align: center; }
+@media (max-width: 900px) {
+  .sidebar { width: 220px !important; }
+  .fieldRow { grid-template-columns: 110px minmax(0, 1fr); gap: 16px; }
+  .editor { padding-right: 20px; padding-left: 20px; }
+}
+@media (max-width: 700px) {
+  .sidebar { width: 190px !important; }
+  .toolbar { flex-wrap: wrap; gap: 8px !important; }
+  .toolbar > div:first-child { flex-basis: 100% !important; }
+  .fieldRow { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .fieldRow > span { padding-top: 0; }
+  .fieldRow small { max-width: none; margin-top: 3px; }
+  .tabs { padding: 0 20px; }
+}
+@media (max-width: 520px) {
+  .overlay { padding: 8px !important; }
+  .dialog { width: calc(100vw - 16px) !important; height: calc(100dvh - 16px) !important; flex-direction: column; }
+  .sidebar { width: 100% !important; max-height: 34%; border-right: 0 !important; border-bottom: 1px solid var(--border); }
+  .sidebar > div:first-child { padding: 10px !important; gap: 6px !important; }
+  .dialog main { min-height: 0; }
+  .toolbar { min-height: 56px; padding: 10px !important; }
+  .toolbar > div:first-child { flex-basis: auto !important; }
+  .scopeText { display: none; }
+  .deleteRole { align-items: flex-start; }
+}
+
+.toolbarActions { display: flex; align-items: center; gap: 4px; }
+.iconButton { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.iconButton:hover:not(:disabled) { color: var(--text); background: var(--bg-panel); }
+.dialog .iconButton:disabled { opacity: .3; cursor: default; }
+.dialog .iconButton[aria-pressed="true"] { color: var(--text); background: var(--bg-panel); opacity: 1; }
+.actionDivider { height: 14px; width: 1px; margin: 0 5px; background: var(--border); }
+.editor[data-editing="false"] input[readonly],
+.editor[data-editing="false"] textarea[readonly],
+.editor[data-editing="false"] select:disabled { border-color: transparent !important; background: transparent !important; box-shadow: none; opacity: 1; color: var(--text); -webkit-text-fill-color: var(--text); cursor: default; }
+.editor[data-editing="false"] textarea[readonly] { resize: none !important; }
+.editor[data-editing="false"] select:disabled { background-image: none !important; }

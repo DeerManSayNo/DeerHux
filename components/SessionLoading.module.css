@@ -1,0 +1,115 @@
+.loading {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 24px;
+  box-sizing: border-box;
+  color: var(--text-muted);
+}
+
+.content {
+  width: min(240px, 100%);
+  animation: appear 220ms ease-out 120ms both;
+}
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.bubble {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 10%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--text-muted) 5%, transparent);
+  animation: appear 300ms ease-out 160ms both;
+}
+
+.bubble span {
+  height: 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-muted) 16%, transparent);
+}
+
+.bubble span:last-child { width: 62%; }
+
+.bubble::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 15%, color-mix(in srgb, var(--accent) 9%, transparent) 50%, transparent 85%);
+  transform: translateX(-100%);
+  animation: sweep 1600ms ease-in-out 300ms infinite;
+}
+
+.user {
+  width: 60%;
+  align-self: flex-end;
+  border-bottom-right-radius: 4px;
+}
+
+.assistant {
+  width: 86%;
+  box-sizing: border-box;
+  border-bottom-left-radius: 4px;
+  animation-delay: 230ms;
+}
+
+.assistant::after { animation-delay: 460ms; }
+.assistant span:nth-child(2) { width: 88%; }
+
+.reply {
+  width: 48%;
+  align-self: flex-end;
+  border-bottom-right-radius: 4px;
+  animation-delay: 300ms;
+}
+
+.reply::after { animation-delay: 620ms; }
+
+.caption {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dots { display: inline-flex; gap: 3px; }
+.dots i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: dot 1000ms ease-in-out infinite;
+}
+.dots i:nth-child(2) { animation-delay: 120ms; }
+.dots i:nth-child(3) { animation-delay: 240ms; }
+
+@keyframes appear {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes sweep { to { transform: translateX(100%); } }
+
+@keyframes dot {
+  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .content, .bubble, .dots i { animation: none; }
+  .bubble::after { display: none; }
+}

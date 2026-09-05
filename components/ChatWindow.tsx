@@ -10,6 +10,7 @@ import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImag
 import { CompactionConfirmModal } from "./CompactionConfirmModal";
 import { useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
+import { SessionLoading } from "./SessionLoading";
 import { useAgentSession, type AgentPhase, type RetryInfo, type StreamRenderPriority, type WatchdogInfo } from "@/hooks/useAgentSession";
 import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useAudio } from "@/hooks/useAudio";
@@ -1593,11 +1594,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   );
 
   if (loading) {
-    return (
-      <div className="flex h-full items-center justify-center text-text-muted">
-        正在加载会话...
-      </div>
-    );
+    return <SessionLoading />;
   }
 
   if (error) {

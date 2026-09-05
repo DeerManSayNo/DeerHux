@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, useLayoutEffect, useRef, type CSSProperties, type TextareaHTMLAttributes } from "react";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { subscribeToAppNotification, notifyApp } from "@/lib/app-notifications";
 import { SystemPromptConfig } from "./SystemPromptConfig";
+import styles from "./RoleConfig.module.css";
 
 interface RoleSetting { id: string; text: string; createdAt: string }
 interface AgentRole {
@@ -79,11 +80,11 @@ function ProjectList({ projects, selectedCwd, onSelect }: { projects: { cwd: str
         title={selectedProject.cwd}
         style={{
           width: "100%",
-          minHeight: 40,
+          minHeight: 36,
           padding: "8px 10px",
           border: "1px solid var(--border)",
-          borderRadius: 11,
-          background: "var(--bg)",
+          borderRadius: 6,
+          background: "transparent",
           color: "var(--text)",
           cursor: "pointer",
           textAlign: "left",
@@ -92,10 +93,10 @@ function ProjectList({ projects, selectedCwd, onSelect }: { projects: { cwd: str
           gap: 8,
         }}
       >
-        <span style={{ width: 8, height: 8, borderRadius: 99, background: "var(--accent)", flexShrink: 0 }} />
+
         <span style={{ flex: 1, minWidth: 0 }}>
-          <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 800 }}>{selectedName}</span>
-          <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>{selectedProject.cwd}</span>
+          <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 600 }}>{selectedName}</span>
+
         </span>
         <span style={{ color: "var(--text-dim)", fontSize: 12, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>⌄</span>
       </button>
@@ -131,7 +132,7 @@ function ProjectList({ projects, selectedCwd, onSelect }: { projects: { cwd: str
                   width: "100%",
                   padding: "8px 9px",
                   border: "none",
-                  borderRadius: 9,
+                  borderRadius: 5,
                   background: active ? "var(--bg-selected)" : "transparent",
                   color: active ? "var(--text)" : "var(--text-muted)",
                   cursor: "pointer",
@@ -143,7 +144,7 @@ function ProjectList({ projects, selectedCwd, onSelect }: { projects: { cwd: str
                 }}
               >
                 <span style={{ width: 7, height: 7, borderRadius: 99, background: active ? "var(--accent)" : "var(--border)", flexShrink: 0 }} />
-                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: active ? 800 : 600 }}>{name}</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: active ? 600 : 400 }}>{name}</span>
               </button>
             );
           })}
@@ -168,8 +169,12 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
     return [...byCwd.values()];
   }, [cwd, projects, roles]);
   const [selectedRoleId, setSelectedRoleId] = useState("default");
+  const [search, setSearch] = useState("");
+  const [editorTab, setEditorTab] = useState<"basic" | "settings">("basic");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const canEdit = editing && !saving;
   const [draft, setDraft] = useState<AgentRole | null>(null);
   const [newRoleOpen, setNewRoleOpen] = useState(false);
   const [systemPromptRole, setSystemPromptRole] = useState<AgentRole | null>(null);
@@ -217,6 +222,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
   const selectedRole = useMemo(() => roles.find((r) => r.id === selectedRoleId) ?? roles[0] ?? null, [roles, selectedRoleId]);
 
   useEffect(() => {
+    setEditing(false);
     if (!selectedRole) {
       setDraft(null);
       return;
@@ -252,7 +258,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
   }, [newName, newDescription, newBasePrompt, newScope, selectedProjectCwd, effectiveCwd, loadRoles]);
 
   const saveDraft = useCallback(async () => {
-    if (!draft) return;
+    if (!draft || !editing || saving) return;
     setSaving(true);
     try {
       const currentScope = selectedRole ? (roleScope(selectedRole) === "project" ? "project" : "user") : "user";
@@ -288,6 +294,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
         window.alert(errMsg);
         return;
       }
+      setEditing(false);
       if (shouldMove && draftScope === "project" && draftProjectCwd) {
         setSelectedProjectCwd(draftProjectCwd);
         // Reload with the target project cwd immediately, because
@@ -301,7 +308,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
     } finally {
       setSaving(false);
     }
-  }, [draft, effectiveCwd, loadRoles, selectedRole, draftScope, draftProjectCwd]);
+  }, [draft, editing, saving, effectiveCwd, loadRoles, selectedRole, draftScope, draftProjectCwd]);
 
   const deleteSelectedRole = useCallback(async () => {
     if (!selectedRole || selectedRole.id === "default") return;
@@ -331,34 +338,36 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="角色"
+      aria-label="角色管理"
+      className={styles.overlay}
       style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.35)", padding: 20 }}
       onClick={onClose}
     >
       <div
+        className={styles.dialog}
         onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(1040px, calc(100vw - 40px))", height: "min(780px, calc(100vh - 40px))", border: "1px solid var(--border)", borderRadius: 16, background: "var(--bg)", boxShadow: "0 18px 60px rgba(0,0,0,0.28)", overflow: "hidden", display: "flex" }}
+        style={{ width: "min(1040px, calc(100vw - 40px))", height: "min(780px, calc(100vh - 40px))", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg)", boxShadow: "0 20px 70px rgba(0,0,0,0.2)", overflow: "hidden", display: "flex" }}
       >
-        <aside style={{ width: 280, borderRight: "1px solid var(--border)", background: "var(--bg-panel)", display: "flex", flexDirection: "column" }}>
+        <aside className={styles.sidebar} style={{ width: 248, borderRight: "1px solid var(--border)", background: "var(--bg-panel)", display: "flex", flexDirection: "column" }}>
           <div style={{ padding: 16, borderBottom: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <div>
-                <div style={{ fontSize: 16, fontWeight: 800, color: "var(--text)" }}>角色</div>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3 }}>Agent Profile</div>
+                <div style={{ fontSize: 16, fontWeight: 650, color: "var(--text)" }}>角色管理</div>
               </div>
-              <button onClick={() => setNewRoleOpen((v) => !v)} style={{ width: 30, height: 30, borderRadius: 9, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 18 }}>+</button>
+              <button aria-label={newRoleOpen ? "收起新建角色" : "新建角色"} title="新建角色" onClick={() => setNewRoleOpen((v) => !v)} style={{ width: 30, height: 30, borderRadius: 5, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 18 }}>+</button>
             </div>
             <ProjectList
               projects={projectChoices}
               selectedCwd={selectedProjectCwd}
               onSelect={setSelectedProjectCwd}
             />
+            <input className={styles.search} aria-label="搜索角色" placeholder="搜索角色…" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
           {newRoleOpen && (
             <div style={createPanelStyle}>
               <div style={createHeaderStyle}>
                 <div>
-                  <div style={{ fontSize: 12, fontWeight: 850, color: "var(--text)" }}>新建角色</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>新建角色</div>
                   <div style={{ marginTop: 2, fontSize: 10, color: "var(--text-dim)" }}>选择全局或指定项目保存</div>
                 </div>
                 <span style={{ ...scopeBadgeStyle, color: newScope === "project" ? "var(--text)" : "var(--text-muted)" }}>{newScope === "project" ? "项目" : "全局"}</span>
@@ -391,28 +400,28 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
               {!effectiveCwd && <div style={helperTextStyle}>未选择项目，暂只能创建全局角色</div>}
               <label style={fieldLabelStyle}>
                 <span>基础设定</span>
-                <textarea value={newBasePrompt} onChange={(e) => setNewBasePrompt(e.target.value)} placeholder="可选：描述角色职责、口吻、工作方式..." rows={3} style={textareaStyle} />
+                <AutoHeightTextarea value={newBasePrompt} onChange={(e) => setNewBasePrompt(e.target.value)} placeholder="可选：描述角色职责、口吻、工作方式..." rows={3} style={textareaStyle} />
               </label>
               <button onClick={createRole} disabled={!newName.trim() || saving || (newScope === "project" && !selectedProjectCwd)} style={{ ...primaryBtnStyle, width: "100%", minHeight: 36, opacity: !newName.trim() || saving || (newScope === "project" && !selectedProjectCwd) ? 0.5 : 1 }}>创建角色</button>
             </div>
           )}
           <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
             {loading ? <div style={{ padding: 12, color: "var(--text-muted)", fontSize: 12 }}>加载中...</div> : (() => {
-              const groups = ["project", "user", "builtIn"].map((scope) => ({ scope, items: roles.filter((role) => roleScope(role) === scope) })).filter((g) => g.items.length);
+              const groups = ["project", "user", "builtIn"].map((scope) => ({ scope, items: roles.filter((role) => roleScope(role) === scope && `${role.name} ${role.description}`.toLowerCase().includes(search.trim().toLowerCase())) })).filter((g) => g.items.length);
               const selectedProjectLabel = projectChoices.find((project) => project.cwd === selectedProjectCwd)?.displayName ?? (selectedProjectCwd ? projectName(selectedProjectCwd) : "项目");
+              if (!groups.length) return <div className={styles.emptySearch}>没有找到匹配的角色</div>;
               return groups.map((group) => (
                 <div key={group.scope} style={{ marginBottom: 8 }}>
-                  <div style={{ padding: "8px 8px 5px", fontSize: 10, fontWeight: 700, color: group.scope === "project" ? "var(--accent)" : "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{group.scope === "project" ? `项目 · ${selectedProjectLabel}` : (SCOPE_LABELS[group.scope] ?? group.scope)}</div>
+                  <div style={{ padding: "8px 8px 5px", fontSize: 10, fontWeight: 500, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.scope === "project" ? `项目 · ${selectedProjectLabel}` : (SCOPE_LABELS[group.scope] ?? group.scope)}</div>
                   {group.items.map((role) => {
                     const active = role.id === selectedRoleId;
-                    const scope = roleScope(role);
                     return (
-                      <button key={role.id} onClick={() => setSelectedRoleId(role.id)} style={{ width: "100%", display: "block", textAlign: "left", padding: "10px 11px", border: "none", borderRadius: 10, background: active ? "var(--bg-selected)" : "transparent", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", marginBottom: 4 }}>
+                      <button className={styles.roleItem} aria-current={active ? "true" : undefined} key={role.id} onClick={() => setSelectedRoleId(role.id)} style={{ width: "100%", display: "block", textAlign: "left", padding: "10px 11px", border: "none", borderRadius: 5, background: active ? "var(--bg-selected)" : "transparent", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", marginBottom: 4 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: active ? 700 : 500 }}>{role.name}</span>
-                          <span style={{ ...scopeBadgeStyle, color: scope === "project" ? "var(--accent)" : "var(--text-dim)" }}>{scope === "project" ? (projectName(roleProjectCwd(role)) || SCOPE_LABELS[scope]) : (SCOPE_LABELS[scope] ?? scope)}</span>
+                          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: active ? 600 : 400 }}>{role.name}</span>
+                          <span className={styles.listCount} title={`${settingCount(role)} 条设定`}>{settingCount(role) || ""}</span>
                         </div>
-                        <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{settingCount(role)} 条设定 · {role.description || "无描述"}</div>
+                        <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{role.description || "暂未添加角色描述"}</div>
                       </button>
                     );
                   })}
@@ -423,37 +432,50 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
         </aside>
 
         <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-          <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 12 }}>
+          <div className={styles.toolbar} style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ fontSize: 15, fontWeight: 800, color: "var(--text)" }}>{draft?.name ?? "角色设定库"}</div>
-                {selectedRole && <span style={{ ...scopeBadgeStyle, color: roleScope(selectedRole) === "project" ? "var(--accent)" : "var(--text-dim)" }}>{SCOPE_LABELS[roleScope(selectedRole)] ?? roleScope(selectedRole)}</span>}
+                <div style={{ fontSize: 15, fontWeight: 650, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{draft?.name ?? "角色设定库"}</div>
+                {selectedRole && <span className={styles.scopeText}>{SCOPE_LABELS[roleScope(selectedRole)] ?? roleScope(selectedRole)}角色</span>}
               </div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3 }}>按全局 / 所选项目管理会跨 session 复用的角色设定</div>
+
             </div>
-            {selectedRole && !selectedRole.builtIn && selectedRole.id !== "default" && <button onClick={deleteSelectedRole} disabled={saving} style={dangerBtnStyle}>删除角色</button>}
-            {selectedRole && <button onClick={() => setSystemPromptRole(selectedRole)} style={secondaryBtnStyle}>System Prompt 管理</button>}
-            <button onClick={saveDraft} disabled={!draft || saving} style={{ ...primaryBtnStyle, opacity: !draft || saving ? 0.5 : 1 }}>{saving ? "保存中..." : "保存"}</button>
-            <button onClick={onClose} style={closeBtnStyle}>×</button>
+            <div className={styles.toolbarActions}>
+              {selectedRole && <button type="button" className={styles.iconButton} title={canEdit ? "管理系统提示词" : "点击编辑后管理系统提示词"} aria-label="管理系统提示词" disabled={!canEdit} onClick={() => setSystemPromptRole(selectedRole)}><RoleActionIcon action="prompt" /></button>}
+              <button type="button" className={styles.iconButton} title={editing ? "正在编辑" : "编辑角色"} aria-label="编辑角色" aria-pressed={editing} disabled={!draft || saving || editing} onClick={() => setEditing(true)}><RoleActionIcon action="edit" /></button>
+              <button type="button" className={styles.iconButton} title={saving ? "保存中…" : "保存角色"} aria-label={saving ? "保存中" : "保存角色"} aria-busy={saving} disabled={!draft || !canEdit} onClick={saveDraft}><RoleActionIcon action="save" /></button>
+              <span className={styles.actionDivider} />
+              <button type="button" className={styles.iconButton} title="关闭" aria-label="关闭角色管理" onClick={onClose}><RoleActionIcon action="close" /></button>
+            </div>
           </div>
 
+          {draft && <div className={styles.tabs}>
+            <button aria-pressed={editorTab === "basic"} onClick={() => setEditorTab("basic")}>基本信息</button>
+            <button aria-pressed={editorTab === "settings"} onClick={() => setEditorTab("settings")}>角色设定 <span>{settingCount(draft)}</span></button>
+          </div>}
           {!draft ? (
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 13 }}>请选择角色</div>
           ) : (
-            <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 18 }}>
-                <label style={labelStyle}>角色名称<input value={draft.name} onChange={(e) => setDraft((p) => p ? { ...p, name: e.target.value } : p)} style={inputStyle} /></label>
-                <label style={labelStyle}>角色描述<input value={draft.description} onChange={(e) => setDraft((p) => p ? { ...p, description: e.target.value } : p)} style={inputStyle} /></label>
+            <div className={styles.editor} data-editing={editing}>
+              {editorTab === "basic" && <>
+              <section className={styles.formSection}>
+
+              <div className={styles.fields}>
+                <label className={styles.fieldRow}><span>角色名称</span><input readOnly={!canEdit} value={draft.name} onChange={(e) => setDraft((p) => p ? { ...p, name: e.target.value } : p)} style={inputStyle} /></label>
+                <label className={styles.fieldRow}><span>角色描述</span><AutoHeightTextarea readOnly={!canEdit} value={draft.description} onChange={(e) => setDraft((p) => p ? { ...p, description: e.target.value } : p)} rows={2} placeholder="一句话说明角色擅长什么" style={textareaStyle} /></label>
               </div>
-              <label style={labelStyle}>基础系统提示词<textarea value={draft.basePrompt} onChange={(e) => setDraft((p) => p ? { ...p, basePrompt: e.target.value } : p)} rows={4} style={textareaStyle} /></label>
+              </section>
+              <section className={styles.formSection}>
+              <label className={styles.fieldRow}><span>基础提示词<small>角色的核心职责与工作方式</small></span><AutoHeightTextarea readOnly={!canEdit} value={draft.basePrompt} onChange={(e) => setDraft((p) => p ? { ...p, basePrompt: e.target.value } : p)} rows={9} style={textareaStyle} /></label>
+              </section>
 
               {selectedRole && !selectedRole.builtIn && selectedRole.id !== "default" && (
-                <div style={{ marginTop: 20, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: "var(--text)", marginBottom: 12 }}>角色归属</div>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div className={styles.formSection}>
+                  <div className={styles.fieldRow}><span>使用范围<small>设置角色可用的项目</small></span>
+                  <div className={styles.scopeFields}>
                     <label style={{ ...fieldLabelStyle2, flex: "1 1 180px" }}>
                       <span>作用域</span>
-                      <select value={draftScope} onChange={(e) => setDraftScope(e.target.value as "user" | "project")} style={selectStyle}>
+                      <select disabled={!canEdit} value={draftScope} onChange={(e) => setDraftScope(e.target.value as "user" | "project")} style={selectStyle}>
                         <option value="user">全局（所有项目可见）</option>
                         <option value="project">项目（绑定到某个项目）</option>
                       </select>
@@ -461,7 +483,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
                     {draftScope === "project" && (
                       <label style={{ ...fieldLabelStyle2, flex: "1 1 260px" }}>
                         <span>目标项目</span>
-                        <select value={draftProjectCwd} onChange={(e) => setDraftProjectCwd(e.target.value)} style={selectStyle}>
+                        <select disabled={!canEdit} value={draftProjectCwd} onChange={(e) => setDraftProjectCwd(e.target.value)} style={selectStyle}>
                           {projectChoices.length === 0 && <option value="">无项目</option>}
                           {projectChoices.map((project) => <option key={project.cwd} value={project.cwd}>{project.displayName || projectName(project.cwd)}</option>)}
                         </select>
@@ -469,27 +491,30 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
                       </label>
                     )}
                   </div>
+                  </div>
                 </div>
               )}
 
+              {editing && selectedRole && !selectedRole.builtIn && selectedRole.id !== "default" && <div className={styles.deleteRole}><span>删除角色及其全部设定</span><button onClick={deleteSelectedRole} disabled={saving} style={dangerBtnStyle}>删除角色</button></div>}
+              </>}
+              {editorTab === "settings" && <>
+              <p className={styles.settingsHint}>这些设定会应用到使用该角色的对话中。</p>
               {BLOCKS.map((block) => (
-                <section key={block} style={{ marginTop: 20, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 800, color: "var(--text)" }}>{block} / {BLOCK_LABELS[block]}</div>
-                      <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>{draft.blocks[block]?.length ?? 0} 条设定</div>
-                    </div>
-                    <button onClick={() => updateDraftBlock(block, (items) => [...items, { id: `local_${Date.now()}`, text: "", createdAt: new Date().toISOString() }])} style={secondaryBtnStyle}>+ 新增</button>
-                  </div>
-                  {(draft.blocks[block] ?? []).length === 0 && <div style={{ fontSize: 12, color: "var(--text-dim)", padding: "8px 0" }}>暂无设定</div>}
+                <details key={`${selectedRoleId}-${block}`} className={styles.block} open={(draft.blocks[block]?.length ?? 0) > 0}>
+                  <summary><span className={styles.blockTitle}>{BLOCK_LABELS[block]}</span><span className={styles.count}>{draft.blocks[block]?.length ?? 0} 条设定</span><span className={styles.chevron}>›</span></summary>
+                  <div className={styles.blockBody}>
+                  {(draft.blocks[block] ?? []).length === 0 && <div className={styles.emptyBlock}>暂无设定</div>}
                   {(draft.blocks[block] ?? []).map((setting, index) => (
-                    <div key={setting.id} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                      <textarea value={setting.text} onChange={(e) => updateDraftBlock(block, (items) => items.map((s, i) => i === index ? { ...s, text: e.target.value } : s))} rows={2} style={{ ...textareaStyle, marginBottom: 0 }} />
-                      <button onClick={() => updateDraftBlock(block, (items) => items.filter((_, i) => i !== index))} style={{ ...dangerBtnStyle, alignSelf: "stretch" }}>删除</button>
+                    <div key={setting.id} className={styles.setting}>
+                      <div className={styles.settingHeader}><span>设定 {index + 1}</span><button disabled={!canEdit} hidden={!editing} aria-label={`删除${BLOCK_LABELS[block]}第 ${index + 1} 条设定`} onClick={() => updateDraftBlock(block, (items) => items.filter((_, i) => i !== index))}>删除</button></div>
+                      <AutoHeightTextarea readOnly={!canEdit} aria-label={`${BLOCK_LABELS[block]}第 ${index + 1} 条设定`} placeholder={`补充${BLOCK_LABELS[block]}…`} value={setting.text} onChange={(e) => updateDraftBlock(block, (items) => items.map((s, i) => i === index ? { ...s, text: e.target.value } : s))} rows={3} style={textareaStyle} />
                     </div>
                   ))}
-                </section>
+                  <button hidden={!editing} disabled={!canEdit} className={styles.addSetting} onClick={() => updateDraftBlock(block, (items) => [...items, { id: `local_${crypto.randomUUID()}`, text: "", createdAt: new Date().toISOString() }])}>+ 添加设定</button>
+                  </div>
+                </details>
               ))}
+              </>}
             </div>
           )}
         </main>
@@ -515,13 +540,16 @@ const inputStyle: CSSProperties = {
   marginBottom: 0,
   padding: "10px 12px",
   border: "1px solid var(--border)",
-  borderRadius: 11,
-  background: "color-mix(in srgb, var(--bg) 88%, var(--bg-panel))",
+  borderRadius: 5,
+  background: "var(--bg)",
   color: "var(--text)",
-  fontSize: 12,
-  lineHeight: 1.4,
+  fontSize: 13,
+  fontWeight: 400,
+  fontFamily: "inherit",
+  minWidth: 0,
+  lineHeight: 1.6,
   outlineOffset: 2,
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
+
 };
 
 const selectStyle: CSSProperties = {
@@ -541,7 +569,7 @@ const createPanelStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   gap: 10,
-  background: "linear-gradient(180deg, var(--bg-panel) 0%, color-mix(in srgb, var(--bg-panel) 88%, var(--bg)) 100%)",
+  background: "var(--bg-panel)",
 };
 
 const createHeaderStyle: CSSProperties = {
@@ -559,7 +587,7 @@ const scopeBadgeStyle: CSSProperties = {
   border: "1px solid var(--border)",
   background: "color-mix(in srgb, var(--bg-panel) 78%, var(--bg))",
   fontSize: 10,
-  fontWeight: 750,
+  fontWeight: 500,
   lineHeight: 1.2,
 };
 
@@ -568,7 +596,7 @@ const fieldLabelStyle: CSSProperties = {
   flexDirection: "column",
   gap: 2,
   fontSize: 11,
-  fontWeight: 750,
+  fontWeight: 500,
   color: "var(--text-muted)",
 };
 
@@ -589,56 +617,70 @@ const helperTextStyle: CSSProperties = {
 
 const textareaStyle: CSSProperties = {
   ...inputStyle,
-  resize: "vertical",
+  resize: "none",
+  overflow: "hidden",
   lineHeight: 1.5,
   fontFamily: "inherit",
-};
-
-const labelStyle: CSSProperties = {
-  display: "block",
-  fontSize: 12,
-  fontWeight: 700,
-  color: "var(--text-muted)",
 };
 
 const primaryBtnStyle: CSSProperties = {
   padding: "8px 12px",
   border: "none",
-  borderRadius: 9,
+  borderRadius: 5,
   background: "var(--accent)",
   color: "#fff",
   cursor: "pointer",
   fontSize: 12,
-  fontWeight: 700,
-};
-
-const secondaryBtnStyle: CSSProperties = {
-  padding: "7px 10px",
-  border: "1px solid var(--border)",
-  borderRadius: 8,
-  background: "var(--bg)",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: 12,
+  fontWeight: 550,
 };
 
 const dangerBtnStyle: CSSProperties = {
+  whiteSpace: "nowrap",
+  flexShrink: 0,
   padding: "7px 10px",
   border: "1px solid rgba(239,68,68,0.35)",
-  borderRadius: 8,
+  borderRadius: 5,
   background: "rgba(239,68,68,0.06)",
   color: "#ef4444",
   cursor: "pointer",
   fontSize: 12,
 };
 
-const closeBtnStyle: CSSProperties = {
-  width: 30,
-  height: 30,
-  borderRadius: 9,
-  border: "1px solid var(--border)",
-  background: "transparent",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: 18,
-};
+/** Re-measure on content changes, width changes, and collapsed sections opening. */
+function AutoHeightTextarea({ value, style, ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const resize = useCallback(() => {
+    const element = ref.current;
+    if (!element || element.getClientRects().length === 0) return;
+    element.style.height = "auto";
+    const borderHeight = element.offsetHeight - element.clientHeight;
+    element.style.height = `${element.scrollHeight + borderHeight}px`;
+  }, []);
+
+  useLayoutEffect(resize, [value, resize]);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    let lastWidth = -1;
+    const observer = new ResizeObserver(([entry]) => {
+      const width = entry.contentRect.width;
+      if (width === lastWidth) return;
+      lastWidth = width;
+      resize();
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [resize]);
+
+  return <textarea {...props} ref={ref} value={value} rows={1} style={{ ...style, resize: "none", overflow: "hidden" }} />;
+}
+
+function RoleActionIcon({ action }: { action: "edit" | "save" | "close" | "prompt" }) {
+  const paths = {
+    edit: "M16 3a2.1 2.1 0 0 1 3 3L8 17l-4 1 1-4L16 3Z M14 5l3 3",
+    save: "M5 3h12l4 4v14H3V3h2Z M7 3v6h9V3 M7 21v-8h10v8",
+    close: "m6 6 12 12 M18 6 6 18",
+    prompt: "M8 4H4v16h16v-4 M12 4h8v8 M13 11l7-7 M8 12h2 M8 16h8",
+  };
+  return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[action]} /></svg>;
+}
