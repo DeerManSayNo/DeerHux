@@ -10,6 +10,7 @@ import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImag
 import { CompactionConfirmModal } from "./CompactionConfirmModal";
 import { useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
+import { AiFileLinkMenu } from "./AiFileLinkMenu";
 import { SessionLoading } from "./SessionLoading";
 import { useAgentSession, type AgentPhase, type RetryInfo, type StreamRenderPriority, type WatchdogInfo } from "@/hooks/useAgentSession";
 import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
@@ -1606,6 +1607,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   }
 
   return (
+    <AiFileLinkMenu cwd={session?.cwd ?? newSessionCwd}>
     <div
       className="chat-window-wrap relative flex h-full flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
@@ -2164,5 +2166,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       </>
       )}
     </div>
+    </AiFileLinkMenu>
   );
 }
