@@ -19,6 +19,7 @@ import type { LlmRequestKind } from "../llm-gateway";
 import type { McpRuntimeLease } from "../mcp-runtime";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "../parallel-agent/subagent-tool";
 import { createStandardCodingTools, STANDARD_CODING_TOOL_NAMES } from "./coding-tools";
+import { buildWorkerProcessEnvironment } from "./worker-process-environment";
 import { getContextDir } from "./context-archive";
 import { deerLoopEngineFactory } from "./deer-loop-engine-factory";
 import {
@@ -57,7 +58,7 @@ export interface DeerLoopCompositionDependencies {
   getDefaultModel(cwd: string): ModelSelectionRef | undefined;
   acquireMcpRuntime(cwd: string): Promise<McpRuntimeLease>;
   loadSystemPrompt(cwd: string, includeSkills: boolean): Promise<string>;
-  createStandardTools(cwd: string, sessionId: string): AnyToolDefinition[];
+  createStandardTools(cwd: string, sessionId: string, processEnv?: Readonly<NodeJS.ProcessEnv>): AnyToolDefinition[];
   createCodeGraphTools(cwd: string): Promise<AnyToolDefinition[]>;
   hasCodeIndex(cwd: string): boolean;
   createSubagentTool: typeof createSubagentTool;
@@ -140,7 +141,7 @@ const defaultCompositionDependencies: DeerLoopCompositionDependencies = {
   },
   acquireMcpRuntime: (cwd) => import("../mcp-runtime").then(({ acquireMcpRuntime }) => acquireMcpRuntime(cwd)),
   loadSystemPrompt: loadBaseSystemPrompt,
-  createStandardTools: (cwd, sessionId) => createStandardCodingTools(cwd, { sessionId }),
+  createStandardTools: (cwd, sessionId, processEnv) => createStandardCodingTools(cwd, { sessionId, processEnv }),
   createCodeGraphTools,
   hasCodeIndex: indexExists,
   createSubagentTool,
@@ -191,7 +192,8 @@ export async function composeDeerLoopEngine(
   }
 
   const realSessionId = sessionManager.getSessionId();
-  const standardCodingTools = dependencies.createStandardTools(options.cwd, realSessionId);
+  const standardCodingTools = dependencies.createStandardTools(options.cwd, realSessionId,
+    options.requestKind === "subagent" ? buildWorkerProcessEnvironment() : undefined);
   try {
     addAllowedRoot(getContextDir(realSessionId));
   } catch {

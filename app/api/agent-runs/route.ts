@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { listCollaborationRuns, startCollaborationRun } from "@/lib/parallel-agent/collaboration-orchestrator";
 import { sanitizeCollaborationRun } from "@/lib/parallel-agent/collaboration-sanitize";
 import type { CollaborationRunMode, CollaborationWorkerSpec, SubagentWorkflow } from "@/lib/parallel-agent/collaboration-types";
+import { MAX_WORKERS_PER_RUN } from "@/lib/parallel-agent/subagent-planner";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -41,7 +42,6 @@ export async function POST(request: Request) {
       workers?: unknown;
       parentSessionId?: unknown;
       parentEntryId?: unknown;
-      allowDirtyWorktree?: unknown;
     };
 
     if (typeof body.cwd !== "string" || !body.cwd.trim()) {
@@ -57,8 +57,8 @@ export async function POST(request: Request) {
     if (!workers) {
       return NextResponse.json({ error: "workers must be a non-empty array of { name, task }" }, { status: 400 });
     }
-    if (workers.length > 10) {
-      return NextResponse.json({ error: "Maximum 10 workers allowed" }, { status: 400 });
+    if (workers.length > MAX_WORKERS_PER_RUN) {
+      return NextResponse.json({ error: `Maximum ${MAX_WORKERS_PER_RUN} workers allowed` }, { status: 400 });
     }
 
     const state = await startCollaborationRun({
@@ -69,10 +69,15 @@ export async function POST(request: Request) {
       workflow: normalizeWorkflow(body.workflow),
       parentSessionId: typeof body.parentSessionId === "string" && body.parentSessionId.trim() ? body.parentSessionId.trim() : undefined,
       parentEntryId: typeof body.parentEntryId === "string" && body.parentEntryId.trim() ? body.parentEntryId.trim() : undefined,
-      allowDirtyWorktree: body.allowDirtyWorktree === true,
     });
-    return NextResponse.json(state);
+    return NextResponse.json(sanitizeCollaborationRun(state));
   } catch (error) {
+    if (error instanceof Error && error.message === "WORKTREE_V2_DISABLED") {
+      return NextResponse.json({ error: "New isolated runs are disabled", errorCode: "WORKTREE_V2_DISABLED" }, { status: 503 });
+    }
+    if (error instanceof Error && /Worker (names|dependency)/.test(error.message)) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

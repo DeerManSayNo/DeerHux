@@ -1,11 +1,8 @@
-import path from "path";
-
 export const SUBAGENT_TOOL_NAME = "subagent";
 export const MAX_SUBAGENT_TOOL_CALLS_PER_TURN = 1;
-export const GLOBAL_SUBAGENT_WORKER_LIMIT = 10;
-export const PROJECT_SUBAGENT_WORKER_LIMIT = 5;
+export const GLOBAL_SUBAGENT_WORKER_LIMIT = 30;
 
-type SubagentConcurrencyRejectionScope = "tool_call" | "global_workers" | "project_workers";
+type SubagentConcurrencyRejectionScope = "tool_call" | "global_workers";
 
 export interface SubagentConcurrencyRejectionDetails {
   scope: SubagentConcurrencyRejectionScope;
@@ -15,20 +12,16 @@ export interface SubagentConcurrencyRejectionDetails {
   activeRuns: number;
   activeWorkers: number;
   rejectedWorkers: number;
-  projectKey?: string;
-  activeProjectWorkers?: number;
   suggestion: string;
 }
 
 interface ActiveRunReservation {
-  projectKey: string;
   workerSlots: number;
 }
 
 interface SubagentConcurrencyState {
   activeRuns: Map<string, ActiveRunReservation>;
   activeWorkers: number;
-  activeProjectWorkers: Map<string, number>;
   rejectedWorkers: number;
   timeoutOrAbortCount: number;
 }
@@ -49,7 +42,6 @@ export class SubagentConcurrencyLimitError extends Error {
 
 export interface SubagentWorkerReservation {
   runId: string;
-  projectKey: string;
   workerSlots: number;
   release: () => void;
 }
@@ -59,7 +51,6 @@ function getState(): SubagentConcurrencyState {
     globalThis.__deerhuxSubagentConcurrency = {
       activeRuns: new Map(),
       activeWorkers: 0,
-      activeProjectWorkers: new Map(),
       rejectedWorkers: 0,
       timeoutOrAbortCount: 0,
     };
@@ -67,18 +58,13 @@ function getState(): SubagentConcurrencyState {
   return globalThis.__deerhuxSubagentConcurrency;
 }
 
-export function normalizeSubagentProjectKey(cwd: string): string {
-  return path.resolve(cwd || process.cwd());
-}
-
-export function getSubagentConcurrencySnapshot(projectKey?: string) {
+export function getSubagentConcurrencySnapshot() {
   const state = getState();
   return {
     activeRuns: state.activeRuns.size,
     activeWorkers: state.activeWorkers,
     rejectedWorkers: state.rejectedWorkers,
     timeoutOrAbortCount: state.timeoutOrAbortCount,
-    ...(projectKey ? { activeProjectWorkers: state.activeProjectWorkers.get(projectKey) ?? 0 } : {}),
   };
 }
 
@@ -93,9 +79,7 @@ export function reserveSubagentWorkerCapacity(params: {
   workerSlots: number;
 }): SubagentWorkerReservation {
   const workerSlots = Math.max(0, params.workerSlots);
-  const projectKey = normalizeSubagentProjectKey(params.cwd);
   const state = getState();
-  const activeProjectWorkers = state.activeProjectWorkers.get(projectKey) ?? 0;
   const suggestion = "请拆分 subagent 任务，或稍后在当前子任务完成后重试。";
 
   if (state.activeWorkers + workerSlots > GLOBAL_SUBAGENT_WORKER_LIMIT) {
@@ -117,41 +101,16 @@ export function reserveSubagentWorkerCapacity(params: {
     );
   }
 
-  if (activeProjectWorkers + workerSlots > PROJECT_SUBAGENT_WORKER_LIMIT) {
-    state.rejectedWorkers += workerSlots;
-    const details = {
-      scope: "project_workers" as const,
-      current: activeProjectWorkers,
-      maxAllowed: PROJECT_SUBAGENT_WORKER_LIMIT,
-      requested: workerSlots,
-      activeRuns: state.activeRuns.size,
-      activeWorkers: state.activeWorkers,
-      rejectedWorkers: state.rejectedWorkers,
-      projectKey,
-      activeProjectWorkers,
-      suggestion,
-    };
-    logSubagentConcurrency("reject_project_workers", details);
-    throw new SubagentConcurrencyLimitError(
-      `subagent worker limit exceeded: project active workers ${activeProjectWorkers}/${PROJECT_SUBAGENT_WORKER_LIMIT}, requested ${workerSlots}. ${suggestion}`,
-      details,
-    );
-  }
-
-  state.activeRuns.set(params.runId, { projectKey, workerSlots });
+  state.activeRuns.set(params.runId, { workerSlots });
   state.activeWorkers += workerSlots;
-  state.activeProjectWorkers.set(projectKey, activeProjectWorkers + workerSlots);
   logSubagentConcurrency("reserve_workers", {
-    runId: params.runId,
-    projectKey,
     workerSlots,
-    ...getSubagentConcurrencySnapshot(projectKey),
+    ...getSubagentConcurrencySnapshot(),
   });
 
   let released = false;
   return {
     runId: params.runId,
-    projectKey,
     workerSlots,
     release: () => {
       if (released) return;
@@ -167,15 +126,9 @@ export function releaseSubagentWorkerCapacity(runId: string): void {
   if (!reservation) return;
   state.activeRuns.delete(runId);
   state.activeWorkers = Math.max(0, state.activeWorkers - reservation.workerSlots);
-  const activeProjectWorkers = state.activeProjectWorkers.get(reservation.projectKey) ?? 0;
-  const nextProjectWorkers = Math.max(0, activeProjectWorkers - reservation.workerSlots);
-  if (nextProjectWorkers === 0) state.activeProjectWorkers.delete(reservation.projectKey);
-  else state.activeProjectWorkers.set(reservation.projectKey, nextProjectWorkers);
   logSubagentConcurrency("release_workers", {
-    runId,
-    projectKey: reservation.projectKey,
     workerSlots: reservation.workerSlots,
-    ...getSubagentConcurrencySnapshot(reservation.projectKey),
+    ...getSubagentConcurrencySnapshot(),
   });
 }
 
@@ -204,5 +157,11 @@ export function isSubagentConcurrencyLimitError(error: unknown): error is Subage
 }
 
 function logSubagentConcurrency(event: string, payload: Record<string, unknown>): void {
-  console.info("[subagent-concurrency]", event, payload);
+  // Keep console diagnostics low-cardinality and free of paths, prompts and ids.
+  const safe: Record<string, number> = {};
+  for (const key of ["workerSlots", "activeRuns", "activeWorkers", "rejectedWorkers", "timeoutOrAbortCount", "current", "maxAllowed", "requested"]) {
+    const value = payload[key];
+    if (typeof value === "number" && Number.isFinite(value)) safe[key] = value;
+  }
+  console.info("[subagent-concurrency]", event, safe);
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CollaborationRunSnapshot, CollaborationWorkerState, CollaborationRunStatus, CollaborationWorkerStatus, SubagentWorkflow, WorkerToolActivity } from "@/lib/parallel-agent/collaboration-types";
+import { SubagentRunActions } from "./SubagentRunActions";
 
 interface Props {
   run: CollaborationRunSnapshot;
@@ -19,6 +20,8 @@ function statusColor(status?: AnyRunStatus): string {
     case "error":
     case "aborted":
       return "#f87171";
+    case "recoverable":
+      return "#d97706";
     case "running":
     case "setting_up":
     case "applying":
@@ -38,6 +41,7 @@ function statusLabel(status?: AnyRunStatus): string {
     case "setting_up": return "准备中";
     case "applying": return "应用中";
     case "pending": return "等待中";
+    case "recoverable": return "需要恢复";
     default: return status ?? "未知";
   }
 }
@@ -46,8 +50,7 @@ function statusLabel(status?: AnyRunStatus): string {
  * 在触发 subagent 的消息下方展示 subagent 小卡片。
  *
  * 每个 subagent 一张卡片：实时展示状态 + 当前工具调用 + 输出摘要，
- * 可点击跳转打开对应 worker session（在新 tab 查看完整对话）。
- * worker session 仍不在左侧 session 列表展示。
+ * isolated coding 的成果由受控的 Run/Worker 操作入口审阅，不暴露内部 Session ID。
  */
 // 注入工具活动脉动动画（仅一次）
 let toolPulseStyleInjected = false;
@@ -71,7 +74,7 @@ function injectToolPulseStyle() {
   document.head.appendChild(style);
 }
 
-export function SubagentRunCard({ run, onOpenSession }: Props) {
+export function SubagentRunCard({ run, onOpenSession, onRunUpdate }: Props) {
   // 注入 CSS 动画
   useEffect(() => { injectToolPulseStyle(); }, []);
 
@@ -115,7 +118,13 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
 
   return (
     <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
-      <RunSummaryTag title={latest.title ?? "Subagents"} status={latest.status} text={`Subagents ${doneCount}/${workers.length}`} workflow={latest.workflow} />
+      <RunSummaryTag title={latest.title ?? "Subagents"} status={latest.status} text={`${statusLabel(latest.status)} · Subagents ${doneCount}/${workers.length}`} workflow={latest.workflow} />
+      {latest.mode === "isolated_coding" && (
+        <div style={{ color: "var(--text-dim)", fontSize: 12, overflowWrap: "anywhere" }}>
+          {latest.status === "running" ? "正在执行与捕获成果" : latest.captureState === "captured" ? "成果已捕获，可审阅" : latest.captureState === "failed" ? "捕获失败，工作树已保留" : latest.captureState === "preserved" ? "成果已保留，需核验后继续" : "等待捕获成果"}
+          {" · 源码协作隔离，不是系统安全沙箱"}
+        </div>
+      )}
       {/* 横向单行排列，不换行；宽度不足时横向滚动；只在可滚动方向做边缘渐隐 */}
       <div
         ref={cardsScrollRef}
@@ -135,11 +144,13 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
         {workers.map((worker) => (
           <WorkerCard
             key={worker.workerId ?? worker.name}
+            runId={latest.runId}
             worker={worker}
             onOpenSession={onOpenSession}
           />
         ))}
       </div>
+      {latest.mode === "isolated_coding" && <SubagentRunActions run={latest} onRunUpdate={onRunUpdate} />}
     </div>
   );
 }
@@ -194,7 +205,8 @@ const WORKFLOW_LABELS: Record<SubagentWorkflow, string> = {
 };
 
 /** 单个 subagent 卡牌：竖向卡牌布局，实时展示状态 + 任务 + 工具调用 + 输出 */
-function WorkerCard({ worker, onOpenSession }: {
+function WorkerCard({ runId, worker, onOpenSession }: {
+  runId: string;
   worker: CollaborationWorkerState;
   onOpenSession?: (sessionId: string) => void;
 }) {
@@ -202,11 +214,17 @@ function WorkerCard({ worker, onOpenSession }: {
   const label = worker.title ?? worker.name;
   const isRunning = worker.status === "running";
   const isTerminal = worker.status === "complete" || worker.status === "error" || worker.status === "aborted";
-  // sessionId 只会在服务端确认 prompt 已 accepted、设定消息已持久化后暴露。
-  // 在此之前必须阻断点击，避免打开 (no messages) 的空 worker 会话。
-  const canClick = Boolean(onOpenSession && worker.sessionId);
-  const modeLabel = worker.agentType ? MODE_LABELS[worker.agentType] : undefined;
   const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string>();
+  const canOpen = Boolean(onOpenSession && worker.workerSessionState)
+    && worker.workerSessionState !== "deleted"
+    && worker.workerSessionState !== "expired";
+  const modeLabel = worker.agentType ? MODE_LABELS[worker.agentType] : undefined;
+  const counts = worker as CollaborationWorkerState & { changedFileCount?: number; binaryFileCount?: number };
+  const changedCount = worker.changeStats ? Math.min(Number.MAX_SAFE_INTEGER, worker.changeStats.newFiles + worker.changeStats.modifiedFiles + worker.changeStats.deletedFiles + worker.changeStats.renamedFiles + worker.changeStats.typechangedFiles) : worker.changedFiles?.length ?? counts.changedFileCount;
+  const binaryCount = worker.changeStats?.binaryFiles ?? worker.binaryFiles?.length ?? counts.binaryFileCount ?? 0;
 
   // 任务描述（instructions 优先，回退 task）
   const taskText = (worker.instructions?.trim() || worker.task?.trim() || "").slice(0, 280);
@@ -219,26 +237,61 @@ function WorkerCard({ worker, onOpenSession }: {
   // 完成态展示的工具简史（最近 3 条）
   const history = isTerminal ? (worker.recentTools ?? []).slice(0, 3) : [];
 
+  const openWorkerSession = async () => {
+    if (!canOpen || opening || !onOpenSession) return;
+    setOpening(true);
+    setOpenError(undefined);
+    try {
+      const response = await fetch(
+        `/api/agent-runs/${encodeURIComponent(runId)}/workers/${encodeURIComponent(worker.workerId)}/session`,
+        { cache: "no-store" },
+      );
+      const payload = await response.json().catch(() => ({})) as { sessionId?: unknown; error?: unknown };
+      if (!response.ok || typeof payload.sessionId !== "string" || !payload.sessionId) {
+        throw new Error(typeof payload.error === "string" ? payload.error : "Worker Session 暂不可用");
+      }
+      onOpenSession(payload.sessionId);
+    } catch (error) {
+      setOpenError(error instanceof Error ? error.message : "Worker Session 暂不可用");
+    } finally {
+      setOpening(false);
+    }
+  };
+
   return (
     <div
-      onClick={canClick ? () => onOpenSession!(worker.sessionId!) : undefined}
+      role={canOpen ? "button" : undefined}
+      tabIndex={canOpen ? 0 : undefined}
+      aria-label={canOpen ? `打开 ${label} 的完整会话` : undefined}
+      aria-busy={opening || undefined}
+      onClick={canOpen ? () => void openWorkerSession() : undefined}
+      onKeyDown={canOpen ? (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        void openWorkerSession();
+      } : undefined}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
       style={{
-        width: 288,
+        width: "min(288px, 100%)",
         minHeight: 208,
         flexShrink: 0,
         borderRadius: 12,
-        border: `1px solid ${hovered && canClick ? "color-mix(in srgb, var(--accent) 55%, var(--border))" : "var(--border)"}`,
+        border: `1px solid ${(hovered || focused) && canOpen ? "color-mix(in srgb, var(--accent) 55%, var(--border))" : "var(--border)"}`,
         background: "var(--bg-hover)",
         padding: "12px 14px",
         display: "flex",
         flexDirection: "column",
         gap: 8,
-        cursor: canClick ? "pointer" : "default",
+        cursor: canOpen ? (opening ? "progress" : "pointer") : "default",
         transition: "border-color 0.14s, box-shadow 0.14s, transform 0.14s",
-        boxShadow: hovered && canClick ? "0 6px 18px rgba(0,0,0,0.14)" : "0 1px 3px rgba(0,0,0,0.05)",
-        transform: hovered && canClick ? "translateY(-2px)" : "none",
+        boxShadow: focused && canOpen
+          ? "0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent)"
+          : hovered && canOpen ? "0 6px 18px rgba(0,0,0,0.14)" : "0 1px 3px rgba(0,0,0,0.05)",
+        transform: hovered && canOpen ? "translateY(-2px)" : "none",
+        outline: "none",
       }}
     >
       {/* header：状态点 + 名称 + 模式 + 状态 */}
@@ -264,6 +317,13 @@ function WorkerCard({ worker, onOpenSession }: {
         )}
         <span style={{ flex: 1 }} />
         <span style={{ color, fontWeight: 700, fontSize: 11, flexShrink: 0 }}>{statusLabel(worker.status)}</span>
+      </div>
+
+      <div style={{ fontSize: 10, color: "var(--text-dim)", overflowWrap: "anywhere" }}>
+        Worker {worker.workerId.slice(-14)}
+        {changedCount !== undefined && ` · ${changedCount} 个文件 · ${binaryCount} 个二进制`}
+        {worker.changeStats ? ` · 新建 ${worker.changeStats.newFiles} / 修改 ${worker.changeStats.modifiedFiles} / 删除 ${worker.changeStats.deletedFiles} / 重命名 ${worker.changeStats.renamedFiles} / 类型变更 ${worker.changeStats.typechangedFiles} · 文本 +${worker.changeStats.addedLines}/−${worker.changeStats.deletedLines} 行` : changedCount !== undefined ? " · 增删统计未知" : ""}
+        {changedCount !== undefined && (worker.appliedFiles?.length ? ` · 已应用 ${worker.appliedFiles.length} 个文件` : " · 未应用")}
       </div>
 
       {/* 任务描述 */}
@@ -307,9 +367,12 @@ function WorkerCard({ worker, onOpenSession }: {
 
         {/* 完成：结果摘要 + 工具简史 + 变更统计 */}
         {isTerminal && worker.result && (
-          <span style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.55, display: "-webkit-box", WebkitLineClamp: 4, WebkitBoxOrient: "vertical", overflow: "hidden", wordBreak: "break-word" }}>
-            {worker.result}
-          </span>
+          <details onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} style={{ fontSize: 11.5, color: "var(--text-muted)", minWidth: 0 }}>
+            <summary style={{ cursor: "pointer", lineHeight: 1.55, overflowWrap: "anywhere" }}>
+              {worker.result.slice(0, 160)}{worker.result.length > 160 ? "…" : ""} · 展开结果
+            </summary>
+            <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 280, overflowY: "auto", marginTop: 8 }}>{worker.result}</div>
+          </details>
         )}
         {isTerminal && history.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
@@ -318,20 +381,18 @@ function WorkerCard({ worker, onOpenSession }: {
             ))}
           </div>
         )}
-        {worker.diffStats && (
-          <span style={{ fontSize: 10.5, color: "#16a34a", fontWeight: 600, marginTop: 2 }}>📊 {worker.diffStats}</span>
-        )}
+        {worker.captureErrorCode && <span style={{ fontSize: 11, color: "#d97706", overflowWrap: "anywhere" }}>捕获失败 · {worker.captureErrorCode}</span>}
         {worker.appliedFiles && worker.appliedFiles.length > 0 && (
           <span style={{ fontSize: 10.5, color: "#16a34a", fontWeight: 600 }}>✓ 已应用 {worker.appliedFiles.length} 个文件</span>
         )}
       </div>
 
-      {/* footer：跳转提示 */}
-      {Boolean(onOpenSession && (canClick || worker.status === "pending" || isRunning)) && (
-        <span style={{ fontSize: 10.5, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 3, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
-          {canClick ? "↗ 点击查看完整会话" : "正在整理并发送任务…"}
+      {onOpenSession && (
+        <span style={{ fontSize: 10.5, color: openError ? "#f87171" : "var(--text-dim)", display: "flex", alignItems: "center", gap: 3, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+          {openError ?? (opening ? "正在打开完整会话…" : canOpen ? "↗ 点击查看完整会话" : "完整会话已不可用")}
         </span>
       )}
+
     </div>
   );
 }

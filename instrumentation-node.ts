@@ -10,10 +10,11 @@ type InstrumentationGlobal = typeof globalThis & {
   __deerhuxMaintenanceByHome?: Map<string, Promise<void>>;
 };
 
-function startBackgroundMaintenance(home: string): void {
+function startBackgroundMaintenance(home: string): Promise<void> {
   const globals = globalThis as InstrumentationGlobal;
   const maintenanceByHome = globals.__deerhuxMaintenanceByHome ??= new Map();
-  if (maintenanceByHome.has(home)) return;
+  const existing = maintenanceByHome.get(home);
+  if (existing) return existing;
 
   // Keep the settled promise on globalThis so Next.js HMR cannot repeat the
   // filesystem scan/cleanup. Convert every failure to a resolved promise to
@@ -61,13 +62,32 @@ function startBackgroundMaintenance(home: string): void {
     }
 
     try {
-      const { cleanupOrphanedRuns } = await import("./lib/parallel-agent/worktree");
-      const result = cleanupOrphanedRuns();
-      if (result.removedDirs > 0 || result.pruned) {
-        console.log(`[init] Cleaned orphaned subagent runs: ${result.removedDirs} dir(s), worktree prune ${result.pruned ? "done" : "skipped"}`);
+      const fs = await import("fs");
+      const os = await import("os");
+      const { getIsolatedRunsRoot } = await import("./lib/parallel-agent/worktree");
+      const { getGitProcessStartMarker } = await import("./lib/parallel-agent/git-lock");
+      const { reconcileRuns } = await import("./lib/parallel-agent/worktree-reconciler");
+      const runsRoot = getIsolatedRunsRoot();
+      if (fs.existsSync(runsRoot)) {
+        const result = await reconcileRuns({
+          runsRoot,
+          instanceId: `startup-${process.pid}`,
+          processStartIdentity: getGitProcessStartMarker(),
+          isProcessAlive(pid, identity) {
+            try {
+              process.kill(pid, 0);
+              return fs.readFileSync(`${os.tmpdir()}/deerhux-git-${pid}.start`, "utf8") === identity;
+            } catch {
+              return false;
+            }
+          },
+        });
+        if (result.recovered.length > 0 || result.issues.length > 0) {
+          console.warn(`[init] Coordinated ${result.recovered.length} subagent run(s); ${result.issues.length} item(s) require manual review`);
+        }
       }
-    } catch (error) {
-      console.error("[init] Orphaned subagent cleanup failed:", error);
+    } catch {
+      console.error("[init] Subagent recovery inspection failed (WORKTREE_RECOVERY_FAILED)");
     }
   })().catch((error) => {
     // Defensive final handler: individual maintenance steps already isolate
@@ -75,6 +95,7 @@ function startBackgroundMaintenance(home: string): void {
     console.error("[init] Background maintenance failed:", error);
   });
   maintenanceByHome.set(home, maintenance);
+  return maintenance;
 }
 
 export async function registerNodeInstrumentation(): Promise<void> {
@@ -105,5 +126,5 @@ export async function registerNodeInstrumentation(): Promise<void> {
   const { startScheduler } = await import("./lib/scheduler/engine");
   startScheduler();
 
-  if (home) startBackgroundMaintenance(home);
+  if (home) await startBackgroundMaintenance(home);
 }

@@ -40,6 +40,7 @@ assert.deepEqual(buffer.diagnostics(), {
 
 const state: CollaborationRunState = {
   runId: "run-1",
+  version: 0,
   parentSessionId: "secret-parent",
   cwd: "/secret/worktree",
   title: "Review",

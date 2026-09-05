@@ -265,7 +265,11 @@ session header
   → 父 Session custom entry（best-effort 关联/展示快照）
 ```
 
-当前 `isolated_coding` 产品路径要求 Git 仓库，并在默认情况下拒绝 dirty worktree，避免 Worker 基于 `HEAD` 的隔离副本覆盖父工作区的未提交变更。底层 Worktree 模块仍保留非 Git 的临时目录复制能力，但该 fallback 尚未构成可审核 Diff、回收策略完整的稳定产品契约。父 Session 协作快照写入是 best-effort，失败不会中止协作运行。
+当前 `isolated_coding` v2 新 Run 由服务端 `SUBAGENT_WORKTREE_V2=1` 显式启用，默认关闭；启用后要求 clean Git 仓库，不使用非 Git 复制 fallback。创建时固定 repository/common-dir、baseCommit 与稳定 Worker ID，写入 format v1 manifest（新文件显式记录 implementationVersion 2；已有无该可选字段的 v1 manifest 仍使用 v2）。开关改变不把现存 Run 降级到 legacy。父 Session 展示快照仍为 best-effort；关键 Run 状态则必须先持久化，失败不启动 Worker 或宣称成功。
+
+capture 通过私有临时 index 生成相对固定基线、含二进制与 untracked 的 artifact；Apply 通过 journal、前置条件和幂等键执行整体事务，Store 投影失败进入恢复状态。重启 reconciliation 不因保留 Worktree 而降低 captured/applied/discarded 事实；未完成捕获保留资源。Continue 从真实 JSONL Session 及 registry 验证绑定，Session 浏览本身仍直接读 JSONL，不新建运行时 Wrapper。Discard preview/token 与独立 Store 仓库身份绑定；自动清理无独立创建授权时不删除任何现存 Worktree/branch，不执行全局 prune。
+
+前端审阅与操作能力由服务端快照提供；`SUBAGENT_WORKTREE_V2_APPLY=0` 停止新 Apply，保留 artifact 读取与已验证历史幂等结果。legacy 只有脱敏恢复元数据与人工基线核验指引，不伪造 manifest。诊断采用固定维度进程指标、有界 manifest 声明盘点与显式只读 Git 核对。默认环境 none、可信配置 Node hook 均不等于 OS 沙箱；生产 Loop 仍是 `DeerLoopEngine`，Pi 只承担既有传输、SessionManager、上下文转换和压缩相关能力。验证证据与尚未执行的灰度/24 小时/Tauri 发布门禁见 `docs/subagent-worktree-reliability/`。
 
 源码证据：[`lib/parallel-agent/collaboration-orchestrator.ts`](../lib/parallel-agent/collaboration-orchestrator.ts)、[`lib/parallel-agent/worktree.ts`](../lib/parallel-agent/worktree.ts)、[`lib/parallel-agent/subagent-tool.ts`](../lib/parallel-agent/subagent-tool.ts)。
 

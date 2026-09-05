@@ -5,6 +5,7 @@ const TERMINAL_RUN_STATUSES = new Set<CollaborationRunState["status"]>([
   "aborted",
   "error",
   "applied",
+  "recoverable",
 ]);
 
 const TERMINAL_RUN_EVENTS = new Set<CollaborationRunEvent["type"]>([
@@ -15,7 +16,6 @@ const TERMINAL_RUN_EVENTS = new Set<CollaborationRunEvent["type"]>([
 
 export interface ForegroundRunWaitOptions {
   runId: string;
-  timeoutMs: number;
   signal?: AbortSignal;
   getRun: (runId: string) => CollaborationRunState | undefined;
   subscribe: (runId: string, listener: (event: CollaborationRunEvent) => void) => () => void;
@@ -25,23 +25,21 @@ export interface ForegroundRunWaitOptions {
 
 /**
  * Foreground collaboration is a lifecycle barrier for its parent tool call.
- * It may resolve only with a terminal run. On timeout/abort we first stop and
- * join the workers; returning a still-running snapshot would detach them from
+ * It may resolve only with a terminal run. On abort we first stop and join the
+ * workers; returning a still-running snapshot would detach them from
  * the parent loop and let the parent emit a false successful completion.
  */
 export function waitForForegroundRun(options: ForegroundRunWaitOptions): Promise<CollaborationRunState> {
-  const { runId, timeoutMs, signal, getRun, subscribe, abortRun, onProgress } = options;
+  const { runId, signal, getRun, subscribe, abortRun, onProgress } = options;
 
   return new Promise((resolve, reject) => {
     let settled = false;
     let aborting = false;
-    const timeoutRef: { current?: ReturnType<typeof setTimeout> } = {};
     let unsubscribe = () => {};
 
     const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
       signal?.removeEventListener("abort", handleSignalAbort);
       unsubscribe();
       fn();
@@ -106,10 +104,6 @@ export function waitForForegroundRun(options: ForegroundRunWaitOptions): Promise
     // the listener was installed. Reading state after subscription covers both
     // sides without missing a terminal transition.
     if (resolveTerminal("Run not found while waiting for foreground completion")) return;
-
-    timeoutRef.current = setTimeout(() => {
-      abortAndJoin(new Error("Timed out waiting for subagent task; workers were stopped"));
-    }, timeoutMs);
 
     if (signal?.aborted) handleSignalAbort();
     else signal?.addEventListener("abort", handleSignalAbort, { once: true });

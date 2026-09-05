@@ -5,6 +5,7 @@ import type { CollaborationRunEvent, CollaborationRunState } from "../lib/parall
 function makeRun(status: CollaborationRunState["status"]): CollaborationRunState {
   return {
     runId: "run-test",
+    version: 0,
     cwd: process.cwd(),
     title: "test",
     message: "test",
@@ -21,14 +22,16 @@ function makeRun(status: CollaborationRunState["status"]): CollaborationRunState
   };
 }
 
-async function testTimeoutAbortsAndJoins(): Promise<void> {
+async function testSignalAbortJoinsWorkers(): Promise<void> {
   let state = makeRun("running");
   let listener: ((event: CollaborationRunEvent) => void) | undefined;
   let abortFinished = false;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 5);
 
   const result = await waitForForegroundRun({
     runId: state.runId,
-    timeoutMs: 5,
+    signal: controller.signal,
     getRun: () => state,
     subscribe: (_runId, next) => {
       listener = next;
@@ -44,7 +47,7 @@ async function testTimeoutAbortsAndJoins(): Promise<void> {
   });
 
   assert.equal(abortFinished, true, "foreground wait must join worker abort before settling");
-  assert.equal(result.status, "aborted", "timeout must never return a running snapshot");
+  assert.equal(result.status, "aborted", "abort must never return a running snapshot");
 }
 
 async function testAlreadyCompleteSubscriptionRace(): Promise<void> {
@@ -52,7 +55,6 @@ async function testAlreadyCompleteSubscriptionRace(): Promise<void> {
   let unsubscribed = false;
   const result = await waitForForegroundRun({
     runId: state.runId,
-    timeoutMs: 50,
     getRun: () => state,
     subscribe: () => () => { unsubscribed = true; },
     abortRun: async () => false,
@@ -66,7 +68,6 @@ async function testRejectsNonTerminalTerminalEvent(): Promise<void> {
   await assert.rejects(
     waitForForegroundRun({
       runId: state.runId,
-      timeoutMs: 50,
       getRun: () => state,
       subscribe: (_runId, listener) => {
         queueMicrotask(() => listener({ type: "run_complete", runId: state.runId, summary: "invalid" }));
@@ -83,7 +84,6 @@ async function testSynchronousReplayUnsubscribes(): Promise<void> {
   let unsubscribed = false;
   const result = await waitForForegroundRun({
     runId: state.runId,
-    timeoutMs: 50,
     getRun: () => state,
     subscribe: (_runId, listener) => {
       listener({ type: "run_complete", runId: state.runId, summary: "done" });
@@ -95,8 +95,20 @@ async function testSynchronousReplayUnsubscribes(): Promise<void> {
   assert.equal(unsubscribed, true, "synchronous terminal replay must release the installed listener");
 }
 
-await testTimeoutAbortsAndJoins();
+async function testRecoveryIsStoppedWork(): Promise<void> {
+  const state = makeRun("recoverable");
+  const result = await waitForForegroundRun({
+    runId: state.runId,
+    getRun: () => state,
+    subscribe: () => () => {},
+    abortRun: async () => false,
+  });
+  assert.equal(result.status, "recoverable", "manual recovery must release the parent wait without claiming success");
+}
+
+await testSignalAbortJoinsWorkers();
 await testAlreadyCompleteSubscriptionRace();
 await testRejectsNonTerminalTerminalEvent();
 await testSynchronousReplayUnsubscribes();
+await testRecoveryIsStoppedWork();
 console.log("subagent foreground wait tests passed");
