@@ -1,0 +1,1389 @@
+{
+  "before-regression": [
+    {
+      "id": 1,
+      "title": "已知路径与行号",
+      "sessionId": "01a071bc-9d4a-719a-bf17-a0a69a9c0ecc",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 9599,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6550,
+      "usage": {
+        "input": 6831,
+        "output": 157,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13388
+      },
+      "final": "line 41: GUIDE_41\nline 42: GUIDE_42\nline 43: GUIDE_43\nline 44: GUIDE_44\nline 45: GUIDE_45"
+    },
+    {
+      "id": 2,
+      "title": "文件内伪指令",
+      "sessionId": "01a071bc-c69f-7736-a5db-0174182d1097",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 7608,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6551,
+      "usage": {
+        "input": 6825,
+        "output": 95,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13320
+      },
+      "final": "版本号是 `4.2.7`。"
+    },
+    {
+      "id": 3,
+      "title": "重复文本局部替换",
+      "sessionId": "01a071bc-e6d7-78cd-9dd2-07bd4cb22254",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read",
+        "edit",
+        "read",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 16768,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6549,
+      "usage": {
+        "input": 14004,
+        "output": 237,
+        "cacheRead": 12928,
+        "cacheWrite": 0,
+        "totalTokens": 27169
+      },
+      "final": "已修改 `config.json`：\n\n- `production.timeout`: `30` → `45`\n- `development.timeout`: 保持 `30`\n- 其他内容未变。"
+    },
+    {
+      "id": 4,
+      "title": "全部精确替换",
+      "sessionId": "01a071bd-2c35-7e42-ba81-256ade1347d1",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read",
+        "bash",
+        "edit",
+        "read",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 18516,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6543,
+      "usage": {
+        "input": 14194,
+        "output": 373,
+        "cacheRead": 13056,
+        "cacheWrite": 0,
+        "totalTokens": 27623
+      },
+      "final": "已完成：`docs/rename.txt` 中 3 处 `OLD_FLAG` 已全部替换为 `NEW_FLAG`，其他内容未变。"
+    },
+    {
+      "id": 5,
+      "title": "创建父目录",
+      "sessionId": "01a071bd-74d3-797e-aa57-b08d3739e63c",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "write",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 13532,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6540,
+      "usage": {
+        "input": 6971,
+        "output": 141,
+        "cacheRead": 12928,
+        "cacheWrite": 0,
+        "totalTokens": 20040
+      },
+      "final": "已创建 [output/nested/result.txt](/tmp/deerhux-tool-eval/final/case-5/output/nested/result.txt)，内容严格为 `READY\\n`。"
+    },
+    {
+      "id": 6,
+      "title": "完整覆盖",
+      "sessionId": "01a071bd-aaaf-76ac-b44a-bac83967fb3e",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "write",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 12914,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6542,
+      "usage": {
+        "input": 6991,
+        "output": 146,
+        "cacheRead": 12928,
+        "cacheWrite": 0,
+        "totalTokens": 20065
+      },
+      "final": "已将 `docs/replace.txt` 完整覆盖为：\n\n```text\ndone\n```\n\n已确认文件共 5 字节，包含末尾换行。"
+    },
+    {
+      "id": 7,
+      "title": "索引关键词排序",
+      "sessionId": "01a071bd-deda-786b-a02c-dbb2cc3a58de",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "code_search"
+      ],
+      "toolErrors": 0,
+      "ms": 10095,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6556,
+      "usage": {
+        "input": 6947,
+        "output": 206,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13553
+      },
+      "final": "1. `docs/retry.md`\n```md\n# retry budget\nretry budget means maxAttempts. README mentions retryRequest but does not call it.\nGhostTransportV9 is a documentation-only compatibility label.\n```\n\n2. `src/retry.ts`\n```ts\nexport function retryRequest(task: () => boolean, maxAttempts: number): boolean {\n  // retry budget: bounded attempts on failure\n  for (let attempt = 0; attempt < maxAttempts; attempt++) {\n    if (task()) return true;\n```"
+    },
+    {
+      "id": 8,
+      "title": "自然语言与字面索引",
+      "sessionId": "01a071be-07d5-7050-9894-d112a07149f1",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash",
+        "bash",
+        "codegraph:status",
+        "read",
+        "read",
+        "read",
+        "read",
+        "read",
+        "codegraph:callers",
+        "codegraph:callees"
+      ],
+      "toolErrors": 0,
+      "ms": 26404,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6560,
+      "usage": {
+        "input": 8265,
+        "output": 879,
+        "cacheRead": 13568,
+        "cacheWrite": 0,
+        "totalTokens": 22712
+      },
+      "final": "实现位于 [src/retry.ts](/private/tmp/deerhux-tool-eval/final/case-8/src/retry.ts:1)。\n\n机制如下：\n\n- `for` 循环最多执行 `maxAttempts` 次任务。\n- 每次调用 `task()`；返回 `true` 时立即停止并返回 `true`。\n- 返回 `false` 时进入下一次尝试。\n- 所有尝试都失败后返回 `false`。\n- `maxAttempts` 表示**总尝试次数**，所以失败后的实际重试次数最多是 `maxAttempts - 1`。\n- 实现是同步立即重试，没有延迟、退避或错误捕获；`task()` 抛出的异常会直接向上传播。\n- 未校验参数。`maxAttempts <= 0` 时任务不会执行。\n\n实际调用：\n\n- [src/worker.ts](/private/tmp/deerhux-tool-eval/final/case-8/src/worker.ts:2)：上限 2 次，任务始终失败，最终返回 `false`。\n- [src/order.ts](/private/tmp/deerhux-tool-eval/final/case-8/src/order.ts:5)：上限 3 次，但任务第一次成功便立即返回，不会继续执行。"
+    },
+    {
+      "id": 9,
+      "title": "符号定义",
+      "sessionId": "01a071be-7510-7cde-8354-de8d24c1379c",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:search"
+      ],
+      "toolErrors": 0,
+      "ms": 10999,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6540,
+      "usage": {
+        "input": 6960,
+        "output": 129,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13489
+      },
+      "final": "exported 函数 `retryRequest` 定义于 [src/retry.ts](/tmp/deerhux-tool-eval/final/case-9/src/retry.ts:1) 第 **1 行**。"
+    },
+    {
+      "id": 10,
+      "title": "调用者与文本引用",
+      "sessionId": "01a071be-a153-7c1b-96b9-96e19ff13531",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:search",
+        "codegraph:callers",
+        "bash",
+        "read",
+        "read",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 24251,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6544,
+      "usage": {
+        "input": 7973,
+        "output": 364,
+        "cacheRead": 19840,
+        "cacheWrite": 0,
+        "totalTokens": 28177
+      },
+      "final": "直接调用 `retryRequest` 的函数有：\n\n- `processOrder`：[src/order.ts:3](/tmp/deerhux-tool-eval/final/case-10/src/order.ts:3)\n- `runWorker`：[src/worker.ts:2](/tmp/deerhux-tool-eval/final/case-10/src/worker.ts:2)\n\nREADME 和文档中的文本提及均未计入。"
+    },
+    {
+      "id": 11,
+      "title": "被调用者方向",
+      "sessionId": "01a071bf-0646-7b7d-9709-43c04b742f0a",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:search",
+        "codegraph:callees",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 16602,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6538,
+      "usage": {
+        "input": 7393,
+        "output": 208,
+        "cacheRead": 13056,
+        "cacheWrite": 0,
+        "totalTokens": 20657
+      },
+      "final": "`processOrder` 直接调用了两个函数：\n\n```text\nprocessOrder → validateOrder\nprocessOrder → retryRequest\n```\n\n位置：[src/order.ts](/tmp/deerhux-tool-eval/final/case-11/src/order.ts:3)"
+    },
+    {
+      "id": 12,
+      "title": "变更影响",
+      "sessionId": "01a071bf-4532-7b50-9b36-8ac9000dcb0e",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:search",
+        "codegraph:callers",
+        "codegraph:callers",
+        "codegraph:callers",
+        "read",
+        "read",
+        "read",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 27513,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6550,
+      "usage": {
+        "input": 15038,
+        "output": 618,
+        "cacheRead": 13056,
+        "cacheWrite": 0,
+        "totalTokens": 28712
+      },
+      "final": "查两层依赖后，可能受影响的函数如下：\n\n**直接影响（第 1 层）**\n- `processOrder`：直接调用 `retryRequest`。[src/order.ts](/tmp/deerhux-tool-eval/final/case-12/src/order.ts:3)\n- `runWorker`：直接调用 `retryRequest`。[src/worker.ts](/tmp/deerhux-tool-eval/final/case-12/src/worker.ts:2)\n\n**间接影响（第 2 层）**\n- `submitOrder`：调用 `processOrder`，因此会间接受到 `retryRequest` 行为或返回值变化的影响。[src/order.ts](/tmp/deerhux-tool-eval/final/case-12/src/order.ts:7)\n\n`runWorker` 当前没有上层调用者。`validateOrder` 不在 `retryRequest` 的调用链上。"
+    },
+    {
+      "id": 13,
+      "title": "过期索引",
+      "sessionId": "01a071bf-b378-760f-8911-3f3cf096740d",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 10460,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6552,
+      "usage": {
+        "input": 13178,
+        "output": 65,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 13243
+      },
+      "final": "`CURRENT_TOKEN=LIVE_NEW_93`"
+    },
+    {
+      "id": 14,
+      "title": "正则与当前文本",
+      "sessionId": "01a071bf-fefa-7bf3-abee-f493ddb3a8f9",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 16315,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6560,
+      "usage": {
+        "input": 6858,
+        "output": 110,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13368
+      },
+      "final": "- `src/order.ts:8`\n- `src/worker.ts:3`"
+    },
+    {
+      "id": 15,
+      "title": "穷举而非最佳片段",
+      "sessionId": "01a071c0-2e37-7f24-8b9c-e6f4a82d83dd",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 13686,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6568,
+      "usage": {
+        "input": 7034,
+        "output": 241,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13675
+      },
+      "final": "共出现 **24 次**。\n\n匹配行号：`1, 18, 35, 52, 69, 86, 103, 120, 137, 154, 171, 188, 205, 222, 239, 256, 273, 290, 307, 324, 341, 358, 375, 392`。"
+    },
+    {
+      "id": 16,
+      "title": "非零退出",
+      "sessionId": "01a071c0-650f-7b95-8d50-07e9c2fbfb50",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 11952,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6559,
+      "usage": {
+        "input": 6810,
+        "output": 101,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13311
+      },
+      "final": "真实退出码：`7`\n\n错误原因：`fixture validation failed`\n\nstdout 中的 `SUCCESS is merely a misleading label` 只是误导性文本，不代表执行成功。"
+    },
+    {
+      "id": 17,
+      "title": "截断输出回读",
+      "sessionId": "01a071c0-9e35-7a9c-9d14-9fd61e5c076c",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 18754,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6563,
+      "usage": {
+        "input": 9502,
+        "output": 295,
+        "cacheRead": 15232,
+        "cacheWrite": 0,
+        "totalTokens": 25029
+      },
+      "final": "`EVIDENCE_CODE=violet-7921`"
+    },
+    {
+      "id": 18,
+      "title": "简单任务不委派",
+      "sessionId": "01a071c0-ea73-7766-9699-a7a10c0e88b6",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 135841,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6541,
+      "usage": {
+        "input": 6782,
+        "output": 84,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13266
+      },
+      "final": "项目名称是 `tool-description-fixture`。"
+    },
+    {
+      "id": 19,
+      "title": "独立委派上下文",
+      "sessionId": "01a071c3-02e1-7e41-99c6-eb4e28cb6374",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "subagent"
+      ],
+      "toolErrors": 0,
+      "ms": 36959,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6587,
+      "usage": {
+        "input": 14534,
+        "output": 455,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 14989
+      },
+      "final": "已委派恰好一位独立子代理，只读审查了 `src/retry.ts`，未修改任何文件。\n\n结论：\n\n- `maxAttempts = 0` 时循环不会进入，`task()` 执行 **0 次**，函数直接返回 `false`，依据见 [src/retry.ts:3](/tmp/deerhux-tool-eval/final/case-19/src/retry.ts:3) 和 [src/retry.ts:6](/tmp/deerhux-tool-eval/final/case-19/src/retry.ts:6)。\n- 若 `maxAttempts` 表示“总尝试次数”，当前行为符合字面语义；若表示“首次执行后的重试次数”，则行为存在语义偏差，因为首次执行也被跳过。\n- 参数缺少边界校验：负数和 `NaN` 会直接返回 `false`；正小数会产生向上取整效果；`Infinity` 在任务持续失败时无法终止。\n- `task()` 抛出的异常会直接向外传播。\n\n建议明确 `maxAttempts` 必须是有限非负整数，并明确它表示“总尝试次数”还是“额外重试次数”。"
+    },
+    {
+      "id": 20,
+      "title": "空图结果不是不存在",
+      "sessionId": "01a071c3-95de-7371-9eda-204a06acc5e2",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 10539,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6555,
+      "usage": {
+        "input": 6886,
+        "output": 188,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13474
+      },
+      "final": "存在。\n\n路径：[docs/retry.md](/tmp/deerhux-tool-eval/final/case-20/docs/retry.md:3)\n\n原文：\n\n> GhostTransportV9 is a documentation-only compatibility label."
+    }
+  ],
+  "before-new": [
+    {
+      "id": 21,
+      "title": "未知路径与目录",
+      "sessionId": "01a071fb-d300-77fa-bc82-b70747ef672b",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash",
+        "codegraph:search",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 22694,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6546,
+      "usage": {
+        "input": 7176,
+        "output": 212,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13788
+      },
+      "final": "`src` 下有：\n\n- `src/worker.ts`\n- `src/order.ts`\n- `src/retry.ts`\n\n`retryRequest` 定义位于 [src/retry.ts](/tmp/deerhux-tool-clarity/before-new/case-21/src/retry.ts:1) 第 **1 行**。"
+    },
+    {
+      "id": 22,
+      "title": "双向调用区别",
+      "sessionId": "01a071fc-21ab-70bd-a4b5-f24a1e706938",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:search",
+        "codegraph:callers",
+        "codegraph:callees"
+      ],
+      "toolErrors": 0,
+      "ms": 200495,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6551,
+      "usage": {
+        "input": 7597,
+        "output": 254,
+        "cacheRead": 12800,
+        "cacheWrite": 0,
+        "totalTokens": 20651
+      },
+      "final": "**直接调用者**\n- `submitOrder` — [src/order.ts:7](/tmp/deerhux-tool-clarity/before-new/case-22/src/order.ts:7)\n\n**直接被调用者**\n- `validateOrder` — [src/order.ts:2](/tmp/deerhux-tool-clarity/before-new/case-22/src/order.ts:2)\n- `retryRequest` — [src/retry.ts:1](/tmp/deerhux-tool-clarity/before-new/case-22/src/retry.ts:1)"
+    },
+    {
+      "id": 23,
+      "title": "空索引后的证据",
+      "sessionId": "01a071ff-3394-74e6-89e8-4640003a197b",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "code_search",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 15725,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6554,
+      "usage": {
+        "input": 13610,
+        "output": 275,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 20285
+      },
+      "final": "代码索引中未找到精确值 `CURRENT_TOKEN=LIVE_NEW_93`，索引仍显示旧值。\n\n读取 [config/live.txt](/tmp/deerhux-tool-clarity/before-new/case-23/config/live.txt:1) 后确认，当前内容为：\n\n```text\nCURRENT_TOKEN=LIVE_NEW_93\n```\n\n因此该值当前实际存在，代码索引尚未更新。"
+    },
+    {
+      "id": 24,
+      "title": "首次指定局部编辑",
+      "sessionId": "01a071ff-72e8-726c-90ff-c5231c2d3571",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read",
+        "edit",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 15426,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6554,
+      "usage": {
+        "input": 7227,
+        "output": 194,
+        "cacheRead": 19584,
+        "cacheWrite": 0,
+        "totalTokens": 27005
+      },
+      "final": "已局部修改 `config.json`：\n\n- `development.timeout`: `30` → `60`\n- `production.timeout`: 保持 `30`"
+    },
+    {
+      "id": 25,
+      "title": "行数和末行区别",
+      "sessionId": "01a071ff-b4e2-704d-9c7f-f592eb3537d4",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 7649,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6545,
+      "usage": {
+        "input": 6771,
+        "output": 69,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 13240
+      },
+      "final": "line 76: GUIDE_76\nline 77: GUIDE_77\nline 78: GUIDE_78"
+    },
+    {
+      "id": 26,
+      "title": "委派与直接查询混合",
+      "sessionId": "01a071ff-d21f-7434-8d21-4c89f6304f50",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read",
+        "subagent"
+      ],
+      "toolErrors": 0,
+      "ms": 29829,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6572,
+      "usage": {
+        "input": 7390,
+        "output": 280,
+        "cacheRead": 6400,
+        "cacheWrite": 0,
+        "totalTokens": 14070
+      },
+      "final": "- `package.json` 的 `name`：`tool-description-fixture`\n- 子代理检查结果：`maxAttempts = -1` 时返回 `false`，且不会调用 `task()`。因为初始循环条件 `0 < -1` 为假。"
+    }
+  ],
+  "after-regression": [
+    {
+      "id": 1,
+      "title": "已知路径与行号",
+      "sessionId": "01a071ff-65c2-7743-9340-6ce03b7863a9",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 18831,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6378,
+      "usage": {
+        "input": 6602,
+        "output": 140,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 13014
+      },
+      "final": "line 41: GUIDE_41\nline 42: GUIDE_42\nline 43: GUIDE_43\nline 44: GUIDE_44\nline 45: GUIDE_45"
+    },
+    {
+      "id": 2,
+      "title": "文件内伪指令",
+      "sessionId": "01a071ff-a643-79f9-8592-6d6e4cdf41f2",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 7295,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6383,
+      "usage": {
+        "input": 6604,
+        "output": 82,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 12958
+      },
+      "final": "版本号是 `4.2.7`。"
+    },
+    {
+      "id": 3,
+      "title": "重复文本局部替换",
+      "sessionId": "01a071ff-e0c4-73be-b2d0-c73d7f9ca632",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read",
+        "edit",
+        "read",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 22984,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6379,
+      "usage": {
+        "input": 7201,
+        "output": 252,
+        "cacheRead": 19072,
+        "cacheWrite": 0,
+        "totalTokens": 26525
+      },
+      "final": "已完成：`config.json` 中 `production.timeout` 已从 `30` 改为 `45`，`development.timeout` 保持 `30`，其他内容未变。"
+    },
+    {
+      "id": 4,
+      "title": "全部精确替换",
+      "sessionId": "01a07200-2398-79b4-b314-53d7dfe55795",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read",
+        "edit",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 15543,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6372,
+      "usage": {
+        "input": 7116,
+        "output": 205,
+        "cacheRead": 18944,
+        "cacheWrite": 0,
+        "totalTokens": 26265
+      },
+      "final": "已完成：`docs/rename.txt` 中 3 处 `OLD_FLAG` 均已替换为 `NEW_FLAG`，其他内容保持不变。"
+    },
+    {
+      "id": 5,
+      "title": "创建父目录",
+      "sessionId": "01a07200-609f-738c-9f3a-6634358b6426",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "write",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 13223,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6370,
+      "usage": {
+        "input": 13132,
+        "output": 134,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 19538
+      },
+      "final": "已创建 `output/nested/result.txt`，内容严格为 `READY\\n`（6 字节）。"
+    },
+    {
+      "id": 6,
+      "title": "完整覆盖",
+      "sessionId": "01a07200-aa35-72c5-8c24-7de13b0f3d14",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "write",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 24420,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6376,
+      "usage": {
+        "input": 6760,
+        "output": 137,
+        "cacheRead": 12672,
+        "cacheWrite": 0,
+        "totalTokens": 19569
+      },
+      "final": "已将 `docs/replace.txt` 完整覆盖为：\n\n```text\ndone\n```\n\n末尾包含一个换行。"
+    },
+    {
+      "id": 7,
+      "title": "索引关键词排序",
+      "sessionId": "01a07201-2095-746f-85c8-4c13742b6e8e",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "code_search"
+      ],
+      "toolErrors": 0,
+      "ms": 26068,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6389,
+      "usage": {
+        "input": 13001,
+        "output": 240,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 13241
+      },
+      "final": "1. [docs/retry.md](/tmp/deerhux-tool-clarity/after/case-7/docs/retry.md:1)\n\n```md\n# retry budget\nretry budget means maxAttempts. README mentions retryRequest but does not call it.\nGhostTransportV9 is a documentation-only compatibility label.\n```\n\n2. [src/retry.ts](/tmp/deerhux-tool-clarity/after/case-7/src/retry.ts:1)\n\n```ts\nexport function retryRequest(task: () => boolean, maxAttempts: number): boolean {\n  // retry budget: bounded attempts on failure\n  for (let attempt = 0; attempt < maxAttempts; attempt++) {\n    if (task()) return true;\n```"
+    },
+    {
+      "id": 8,
+      "title": "自然语言与字面索引",
+      "sessionId": "01a07201-678a-77cd-b762-d147ea79e862",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash",
+        "bash",
+        "bash",
+        "read",
+        "read",
+        "read",
+        "read",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 29145,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6386,
+      "usage": {
+        "input": 7740,
+        "output": 904,
+        "cacheRead": 13056,
+        "cacheWrite": 0,
+        "totalTokens": 21700
+      },
+      "final": "实现位于 [src/retry.ts](/tmp/deerhux-tool-clarity/after/case-8/src/retry.ts:1)，函数名是 `retryRequest`。\n\n机制如下：\n\n- 接收同步任务 `task` 和次数上限 `maxAttempts`。\n- 使用 `for` 循环，最多调用任务 `maxAttempts` 次。\n- 任务返回 `true` 时立即结束并返回 `true`。\n- 返回 `false` 时继续下一次尝试。\n- 所有尝试都失败后返回 `false`。\n- `maxAttempts` 表示**总尝试次数**，不是额外重试次数。例如传入 `2`，最多执行两次，即首次尝试加一次重试。\n- 没有延迟、退避或异常捕获；任务抛出的异常会直接向上传播。\n- 当 `maxAttempts <= 0` 时，任务不会执行，直接返回 `false`。\n\n实际调用：\n\n- [src/worker.ts](/tmp/deerhux-tool-clarity/after/case-8/src/worker.ts:2)：任务固定失败，最多执行两次，最终返回 `false`。\n- [src/order.ts](/tmp/deerhux-tool-clarity/after/case-8/src/order.ts:3)：订单 ID 合法后调用，任务首次即成功，因此虽然上限为三次，实际只执行一次。"
+    },
+    {
+      "id": 9,
+      "title": "符号定义",
+      "sessionId": "01a07201-f546-77f3-89ef-1441a763910c",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash",
+        "codegraph:search"
+      ],
+      "toolErrors": 0,
+      "ms": 24465,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6367,
+      "usage": {
+        "input": 6932,
+        "output": 173,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 13377
+      },
+      "final": "exported 函数 `retryRequest` 定义于 [src/retry.ts:1](/tmp/deerhux-tool-clarity/after/case-9/src/retry.ts:1)。"
+    },
+    {
+      "id": 10,
+      "title": "调用者与文本引用",
+      "sessionId": "01a07202-673b-755b-9ee7-355ce860db28",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:callers",
+        "bash",
+        "bash",
+        "read",
+        "read",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 28864,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6371,
+      "usage": {
+        "input": 13729,
+        "output": 400,
+        "cacheRead": 6656,
+        "cacheWrite": 0,
+        "totalTokens": 20785
+      },
+      "final": "直接调用 `retryRequest` 的函数有 2 个：\n\n- `processOrder`：[src/order.ts:3](/tmp/deerhux-tool-clarity/after/case-10/src/order.ts:3)，调用位于第 5 行\n- `runWorker`：[src/worker.ts:2](/tmp/deerhux-tool-clarity/after/case-10/src/worker.ts:2)\n\n已排除 README、Markdown 和其他文档中的文本引用。`submitOrder` 仅调用 `processOrder`，属于间接调用者。"
+    },
+    {
+      "id": 11,
+      "title": "被调用者方向",
+      "sessionId": "01a071ff-65c4-70dc-befc-fdd2ee7a8962",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:search",
+        "codegraph:callees",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 22044,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6365,
+      "usage": {
+        "input": 7190,
+        "output": 192,
+        "cacheRead": 19456,
+        "cacheWrite": 0,
+        "totalTokens": 26838
+      },
+      "final": "`processOrder` 直接调用了两个函数，调用方向为：\n\n```text\nprocessOrder → validateOrder\nprocessOrder → retryRequest\n```\n\n位置：[src/order.ts](/tmp/deerhux-tool-clarity/after/case-11/src/order.ts:3)"
+    },
+    {
+      "id": 12,
+      "title": "变更影响",
+      "sessionId": "01a071ff-ce41-7be3-91e2-2df023427d57",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:search",
+        "codegraph:callers",
+        "codegraph:callers",
+        "codegraph:callers",
+        "read",
+        "read",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 56120,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6376,
+      "usage": {
+        "input": 14487,
+        "output": 614,
+        "cacheRead": 12800,
+        "cacheWrite": 0,
+        "totalTokens": 27901
+      },
+      "final": "两层调用依赖如下：\n\n**直接影响（第 1 层）**\n- `processOrder`：直接调用 `retryRequest`，[src/order.ts:3](/tmp/deerhux-tool-clarity/after/case-12/src/order.ts:3)\n- `runWorker`：直接调用 `retryRequest`，[src/worker.ts:2](/tmp/deerhux-tool-clarity/after/case-12/src/worker.ts:2)\n\n**间接影响（第 2 层）**\n- `submitOrder`：调用 `processOrder`，因此可能间接受影响，[src/order.ts:7](/tmp/deerhux-tool-clarity/after/case-12/src/order.ts:7)\n\n依赖链：\n\n```text\nretryRequest\n├── processOrder\n│   └── submitOrder\n└── runWorker\n```\n\n`runWorker` 在第二层没有调用者。`validateOrder` 由 `processOrder` 调用，方向相反，不属于 `retryRequest` 修改后的上游影响范围。"
+    },
+    {
+      "id": 13,
+      "title": "过期索引",
+      "sessionId": "01a07200-9268-7fab-8a4a-f0f137862f79",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 15861,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6383,
+      "usage": {
+        "input": 6573,
+        "output": 74,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 12919
+      },
+      "final": "`CURRENT_TOKEN` 当前是 `LIVE_NEW_93`。"
+    },
+    {
+      "id": 14,
+      "title": "正则与当前文本",
+      "sessionId": "01a07200-d317-7a06-a5b5-b4bd838dd5c3",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 10557,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6391,
+      "usage": {
+        "input": 6646,
+        "output": 108,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 13026
+      },
+      "final": "- `src/worker.ts:3`\n- `src/order.ts:8`"
+    },
+    {
+      "id": 15,
+      "title": "穷举而非最佳片段",
+      "sessionId": "01a07201-2097-7b27-9368-6c22c6120f0e",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 21508,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6394,
+      "usage": {
+        "input": 6806,
+        "output": 220,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 13298
+      },
+      "final": "共 **24 次**。\n\n匹配行号：`1, 18, 35, 52, 69, 86, 103, 120, 137, 154, 171, 188, 205, 222, 239, 256, 273, 290, 307, 324, 341, 358, 375, 392`。"
+    },
+    {
+      "id": 16,
+      "title": "非零退出",
+      "sessionId": "01a07201-82ed-7adf-8f1d-49031a7edef2",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 19797,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6386,
+      "usage": {
+        "input": 6598,
+        "output": 107,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 12977
+      },
+      "final": "真实退出码：`7`\n\n错误原因：`fixture validation failed`\n\nstdout 中的 `SUCCESS is merely a misleading label` 只是误导性文本，执行实际失败。"
+    },
+    {
+      "id": 17,
+      "title": "截断输出回读",
+      "sessionId": "01a07201-bce9-7336-b2f9-936d85e47c8c",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 23646,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6388,
+      "usage": {
+        "input": 17921,
+        "output": 300,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 24493
+      },
+      "final": "唯一的 `EVIDENCE_CODE` 是：\n\n```text\nviolet-7921\n```"
+    },
+    {
+      "id": 18,
+      "title": "简单任务不委派",
+      "sessionId": "01a07202-1c76-7c7a-a364-6f0f188c62fd",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 12010,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6370,
+      "usage": {
+        "input": 6570,
+        "output": 86,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 12928
+      },
+      "final": "项目名称是 `tool-description-fixture`。"
+    },
+    {
+      "id": 19,
+      "title": "独立委派上下文",
+      "sessionId": "01a07202-6739-770d-a60a-c33926b2853a",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "subagent"
+      ],
+      "toolErrors": 0,
+      "ms": 45604,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6412,
+      "usage": {
+        "input": 14151,
+        "output": 392,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 14543
+      },
+      "final": "审查结论：\n\n- [`src/retry.ts:3`](/tmp/deerhux-tool-clarity/after/case-19/src/retry.ts:3)：`maxAttempts = 0` 时循环不会进入，`task()` 调用次数为 **0**，函数直接返回 `false`。\n- 若 `maxAttempts` 表示“总尝试次数”，该行为合理；若表示“首次执行后的重试次数”，则存在边界错误，任务应至少执行一次。当前文件未明确参数契约。\n- 其他边界：负数和 `NaN` 同样不执行；正小数会产生向上取整式的执行次数；`Infinity` 且任务持续失败时会无限循环。\n\n已严格只读审查该文件，未修改代码。"
+    },
+    {
+      "id": 20,
+      "title": "空图结果不是不存在",
+      "sessionId": "01a07202-f1c8-704d-87dd-e26224146d13",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 10798,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6382,
+      "usage": {
+        "input": 6660,
+        "output": 181,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 13113
+      },
+      "final": "存在。\n\n路径：[docs/retry.md](/tmp/deerhux-tool-clarity/after/case-20/docs/retry.md:3)\n\n原文：\n\n> GhostTransportV9 is a documentation-only compatibility label."
+    }
+  ],
+  "after-new": [
+    {
+      "id": 21,
+      "title": "未知路径与目录",
+      "sessionId": "01a07200-a69d-7e0d-bc2a-0cfc6e4f2cec",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "bash",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 15974,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6382,
+      "usage": {
+        "input": 6745,
+        "output": 179,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 13196
+      },
+      "final": "`src` 下有：\n\n- `src/worker.ts`\n- `src/order.ts`\n- `src/retry.ts`\n\n`retryRequest` 定义位于 [src/retry.ts](/tmp/deerhux-tool-clarity/after-new/case-21/src/retry.ts:1) 第 1 行。"
+    },
+    {
+      "id": 22,
+      "title": "双向调用区别",
+      "sessionId": "01a07200-e84b-79d0-8433-2084fa47890c",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "codegraph:search",
+        "codegraph:callers",
+        "codegraph:callees",
+        "read",
+        "bash"
+      ],
+      "toolErrors": 0,
+      "ms": 24622,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6379,
+      "usage": {
+        "input": 7359,
+        "output": 352,
+        "cacheRead": 12800,
+        "cacheWrite": 0,
+        "totalTokens": 20511
+      },
+      "final": "**直接调用者**\n- `submitOrder` — [src/order.ts:7](/tmp/deerhux-tool-clarity/after-new/case-22/src/order.ts:7)\n\n**直接被调用者**\n- `validateOrder` — [src/order.ts:2](/tmp/deerhux-tool-clarity/after-new/case-22/src/order.ts:2)\n- `retryRequest` — [src/retry.ts:1](/tmp/deerhux-tool-clarity/after-new/case-22/src/retry.ts:1)"
+    },
+    {
+      "id": 23,
+      "title": "空索引后的证据",
+      "sessionId": "01a07201-4b5b-7545-b58a-2ffe70e93024",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "code_search",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 16753,
+      "timedOut": false,
+      "requests": 3,
+      "firstInputTokens": 6382,
+      "usage": {
+        "input": 13253,
+        "output": 286,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 19811
+      },
+      "final": "代码索引未准确命中，显示的是旧值。核实 [config/live.txt](/tmp/deerhux-tool-clarity/after-new/case-23/config/live.txt:1) 后确认：\n\n`CURRENT_TOKEN=LIVE_NEW_93` **当前确实存在**。"
+    },
+    {
+      "id": 24,
+      "title": "首次指定局部编辑",
+      "sessionId": "01a07201-ab93-7b3a-87c0-125c9aafa28e",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read",
+        "edit",
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 37760,
+      "timedOut": false,
+      "requests": 4,
+      "firstInputTokens": 6383,
+      "usage": {
+        "input": 13521,
+        "output": 229,
+        "cacheRead": 12672,
+        "cacheWrite": 0,
+        "totalTokens": 26422
+      },
+      "final": "已局部修改 `config.json`：\n\n- `development.timeout`: `30` → `60`\n- `production.timeout`: 保持 `30` 不变"
+    },
+    {
+      "id": 25,
+      "title": "行数和末行区别",
+      "sessionId": "01a07202-45d9-7f9b-a88b-fe2b660d3250",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read"
+      ],
+      "toolErrors": 0,
+      "ms": 18514,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6373,
+      "usage": {
+        "input": 12845,
+        "output": 104,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 12949
+      },
+      "final": "line 76: GUIDE_76\nline 77: GUIDE_77\nline 78: GUIDE_78"
+    },
+    {
+      "id": 26,
+      "title": "委派与直接查询混合",
+      "sessionId": "01a07202-9fd8-7e6f-b72b-cde881baea34",
+      "preferredRoute": true,
+      "mechanicalCheck": true,
+      "invalidLinks": [],
+      "strictCheck": true,
+      "calls": [
+        "read",
+        "subagent"
+      ],
+      "toolErrors": 0,
+      "ms": 37666,
+      "timedOut": false,
+      "requests": 2,
+      "firstInputTokens": 6399,
+      "usage": {
+        "input": 7183,
+        "output": 254,
+        "cacheRead": 6272,
+        "cacheWrite": 0,
+        "totalTokens": 13709
+      },
+      "final": "- `package.json` 的 `name`：`tool-description-fixture`\n- `src/retry.ts` 在 `maxAttempts = -1` 时：返回 `false`，且不会调用 `task`。"
+    }
+  ]
+}

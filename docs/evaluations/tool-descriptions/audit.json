@@ -1,0 +1,17 @@
+{
+  "sessionSnapshots": 120,
+  "models": [
+    [
+      "gpt",
+      "5.6gggg"
+    ]
+  ],
+  "thinkingLevels": [
+    "off"
+  ],
+  "nonToolPromptHashes": [
+    "4f6d23ac6e6a9a2ce76d679f799f3946bbe326473211c32bf0d36e963640301e"
+  ],
+  "unexpectedTrackedFileChanges": [],
+  "finalCitationTargetsExist": true
+}

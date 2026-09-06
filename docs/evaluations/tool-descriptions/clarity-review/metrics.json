@@ -1,0 +1,69 @@
+{
+  "before": {
+    "tasks": 26,
+    "correct": 26,
+    "preferredRoute": 26,
+    "toolCalls": 67,
+    "toolErrors": 0,
+    "firstInputMedian": 6551.0,
+    "parentReportedTokens": 478299,
+    "timeouts": 0
+  },
+  "after": {
+    "tasks": 26,
+    "correct": 26,
+    "preferredRoute": 26,
+    "toolCalls": 64,
+    "toolErrors": 0,
+    "firstInputMedian": 6382.0,
+    "parentReportedTokens": 465606,
+    "timeouts": 0
+  },
+  "groups": {
+    "before-regression": {
+      "tasks": 20,
+      "correct": 20,
+      "preferredRoute": 20,
+      "toolCalls": 53,
+      "toolErrors": 0,
+      "firstInputMedian": 6550.5,
+      "parentReportedTokens": 369260,
+      "timeouts": 0
+    },
+    "before-new": {
+      "tasks": 6,
+      "correct": 6,
+      "preferredRoute": 6,
+      "toolCalls": 14,
+      "toolErrors": 0,
+      "firstInputMedian": 6552.5,
+      "parentReportedTokens": 109039,
+      "timeouts": 0
+    },
+    "after-regression": {
+      "tasks": 20,
+      "correct": 20,
+      "preferredRoute": 20,
+      "toolCalls": 49,
+      "toolErrors": 0,
+      "firstInputMedian": 6380.5,
+      "parentReportedTokens": 359008,
+      "timeouts": 0
+    },
+    "after-new": {
+      "tasks": 6,
+      "correct": 6,
+      "preferredRoute": 6,
+      "toolCalls": 15,
+      "toolErrors": 0,
+      "firstInputMedian": 6382.0,
+      "parentReportedTokens": 106598,
+      "timeouts": 0
+    }
+  },
+  "toolTextChars": {
+    "before": 6932,
+    "after": 6032,
+    "scope": "7 summary lines + model tools JSON + newly added shared rule; unchanged cwd/citation/read-only rules omitted on both sides; fixed session archive placeholder"
+  }
+}

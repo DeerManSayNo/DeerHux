@@ -1,6 +1,10 @@
 import path from "path";
 import { cacheSessionPath, forceRefreshSessionList } from "./session-reader";
 import type { AgentEnginePort, ToolInfo } from "./engine/port";
+import { buildLiveToolsSection, orderToolNames } from "./engine/tool-prompt";
+import { codeIndexLifecycle } from "./code-index/lifecycle";
+import { indexExists } from "./code-index/database";
+import { createCodeSearchTool } from "./code-index/tool";
 import type { AgentSessionPort } from "./session/port";
 import type { ModelCatalogPort, RuntimeModel } from "./model/port";
 import type { ProjectResourcePort } from "./project-resource/port";
@@ -280,19 +284,6 @@ const TOOL_SECTION_INSERT_MARKERS = [
   "\n\n# Global Memory",
 ];
 
-function buildLiveToolsSection(allTools: ToolInfo[], activeToolNames: string[]): string | null {
-  const byName = new Map(allTools.map((tool) => [tool.name, tool]));
-  const activeTools = activeToolNames
-    .map((name) => byName.get(name))
-    .filter((tool): tool is ToolInfo => Boolean(tool));
-  if (activeTools.length === 0) return null;
-
-  return [
-    "Available tools:",
-    ...activeTools.map((tool) => `- ${tool.name}: ${tool.description || "Available tool"}`),
-  ].join("\n");
-}
-
 function upsertToolsSection(prompt: string, toolsSection: string | null): string {
   if (!toolsSection) return prompt;
 
@@ -373,6 +364,8 @@ export class AgentSessionWrapper {
   private sawAssistantEventInTurn = false;
   /** When true, the subagent tool is kept in the active tool set. */
   private _subagentEnabled = false;
+  private codeIndexLease: ReturnType<ReturnType<typeof codeIndexLifecycle>["acquire"]> | null = null;
+  private codeSearchAllowed = true;
 
   constructor(
     public readonly inner: AgentEnginePort,
@@ -394,6 +387,28 @@ export class AgentSessionWrapper {
 
   private get mcpRuntime(): McpRuntime | null {
     return this.mcpRuntimeLease?.runtime ?? null;
+  }
+
+  startCodeIndexing(enableCodeSearch = true): void {
+    if (this.codeIndexLease || !this._alive) return;
+    this.codeSearchAllowed = enableCodeSearch;
+    this.codeIndexLease = codeIndexLifecycle().acquire(this.session.cwd, () => this.syncCodeSearchTool());
+    this.syncCodeSearchTool();
+  }
+
+  private syncCodeSearchTool(): void {
+    if (!this.codeIndexLease || !this._alive || this._turnActive || this._isRunning
+      || this.pendingPromptController || this.freshTurnAdmissionController
+      || this.inner.isStreaming || this.inner.isCompacting) return;
+    if (this.inner.getAllTools().some(tool => tool.name === "code_search") || !indexExists(this.session.cwd)) return;
+    const active = this.inner.getActiveToolNames();
+    this.inner.replaceCustomTools({
+      removeNames: [],
+      addTools: [createCodeSearchTool(this.session.cwd)],
+      extraAllowedNames: [],
+      activeToolNames: this.codeSearchAllowed ? [...active, "code_search"] : active,
+    });
+    this.applyRolePrompt();
   }
 
   private syncRoleMcpActiveTools(targetRuntime: McpRuntime | null = this.mcpRuntime): void {
@@ -475,9 +490,14 @@ export class AgentSessionWrapper {
         if (throwOnFailure) throw syncErr;
         console.error("syncRoleMcpActiveTools failed, MCP tools unchanged:", syncErr);
       }
+      const activeTools = this.inner.getActiveToolNames();
+      const orderedTools = orderToolNames(activeTools);
+      if (orderedTools.some((name, index) => name !== activeTools[index])) {
+        this.inner.setActiveToolsByName(orderedTools);
+      }
       const promptWithTools = upsertToolsSection(
         this.baseSystemPrompt,
-        buildLiveToolsSection(this.inner.getAllTools(), this.inner.getActiveToolNames()),
+        buildLiveToolsSection(this.inner.getAllTools(), this.inner.getActiveToolNames(), this.session.cwd),
       );
       const configuredPrompt = applyRolePromptConfigToPrompt(promptWithTools, this.roleId);
       const shouldApplyModePrompt = this.modePromptEnabled && isRoleSystemPromptSectionEnabled(this.roleId, "mode_control");
@@ -509,6 +529,7 @@ export class AgentSessionWrapper {
 
   private async setAgentMode(mode: AgentMode, persist = true): Promise<void> {
     this.agentMode = normalizeAgentMode(mode);
+    this.codeSearchAllowed = true;
     this.modePromptEnabled = true;
     if (this.agentMode === "agent" && this.mcpRuntime) {
       this.inner.setActiveToolsByName([...new Set([...getToolNamesForAgentMode(this.agentMode), ...this.mcpRuntime.toolNames])]);
@@ -651,6 +672,7 @@ export class AgentSessionWrapper {
   }
 
   private captureTurnAdmission(command: Record<string, unknown>): TurnAdmissionSnapshot {
+    this.syncCodeSearchTool();
     const commandRoleId = typeof command.roleId === "string" ? command.roleId : undefined;
     if (commandRoleId) this.setRole(commandRoleId);
     this.applyTurnCapabilities(command);
@@ -1565,6 +1587,7 @@ export class AgentSessionWrapper {
   async send(command: Record<string, unknown>, requestSignal?: AbortSignal): Promise<unknown> {
     this.touch();
     this.checkIdleLazily();
+    this.syncCodeSearchTool();
     const type = command.type as string;
 
     switch (type) {
@@ -1993,6 +2016,7 @@ export class AgentSessionWrapper {
           return null;
         }
         const isFullPreset = isFullToolPreset(requested);
+        this.codeSearchAllowed = isFullPreset || requested.includes("code_search");
         if (isFullPreset || includesMcpTool(requested)) {
           await this.ensureMcpRuntimeLoaded({ activateMcp: true });
         }
@@ -2057,6 +2081,8 @@ export class AgentSessionWrapper {
     this._turnActive = false;
     this._isRunning = false;
     this._alive = false;
+    this.codeIndexLease?.release();
+    this.codeIndexLease = null;
     this.pendingPromptController?.abort(new DOMException("Session destroyed", "AbortError"));
     this.pendingPromptController = null;
     this.freshTurnAdmissionController?.abort(new DOMException("Session destroyed", "AbortError"));
@@ -2467,6 +2493,7 @@ async function startDeerLoopSession(
       options?.requestKind === "subagent" ? "subagent" : "main",
     );
     wrapper.start();
+    wrapper.startCodeIndexing(toolNames === undefined || toolNames.includes("code_search") || isFullToolPreset(toolNames));
 
     const sessionAliases = sessionId && sessionId !== realSessionId ? [sessionId] : [];
     if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile, sessionAliases);

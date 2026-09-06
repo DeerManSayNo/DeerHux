@@ -9,9 +9,6 @@ export function SessionLoading() {
           <div className={`${styles.bubble} ${styles.assistant}`}><span /><span /><span /></div>
           <div className={`${styles.bubble} ${styles.reply}`}><span /></div>
         </div>
-        <div className={styles.caption}>
-          正在加载会话<span className={styles.dots}><i /><i /><i /></span>
-        </div>
       </div>
     </div>
   );

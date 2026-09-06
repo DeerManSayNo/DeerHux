@@ -1,0 +1,37 @@
+[
+  {
+    "name": "read",
+    "description": "Read current text from any local file; prefer for known paths. Relative paths resolve from cwd. offset is a 1-based starting line; limit is a line count (default 400), not an ending line.",
+    "active": true
+  },
+  {
+    "name": "write",
+    "description": "Create or fully overwrite a workspace/global Skill text file; creates parent directories. Prefer over shell redirection. Use edit for targeted changes.",
+    "active": true
+  },
+  {
+    "name": "edit",
+    "description": "Replace exact text in a workspace/global Skill file; prefer over shell patches. Read the relevant content first. oldString must match uniquely unless replaceAll=true; use surrounding text to select one occurrence.",
+    "active": true
+  },
+  {
+    "name": "bash",
+    "description": "Run commands in cwd; return stdout, stderr and exit_code. Use for tests, git, or rg (current text, regex, exhaustive matches). Prefer read/edit/write for file operations. Check exit_code. If output is truncated, use read or bash to inspect the reported Full output path instead of rerunning the command. Also readable: session context archive at /Users/deerman/.deerhux/agent/context/01a071bc-9d4a-719a-bf17-a0a69a9c0ecc (compacted history + spilled tool outputs).",
+    "active": true
+  },
+  {
+    "name": "code_search",
+    "description": "Rank literal keyword matches in an indexed snapshot; return one snippet per file with path and lines. No embedding/semantic matching; translate intent into likely code keywords. Empty results do not prove absence. For current or exhaustive matches use bash with rg; for symbol definitions and calls prefer codegraph.",
+    "active": true
+  },
+  {
+    "name": "codegraph",
+    "description": "Query indexed symbols: search locates definitions; callers finds direct callers; callees finds direct callees. impact lists affected nodes to depth, including the target and file nodes; it does not label each node's call depth. For exact call layers use callers. status is diagnostic. Use source/text search when graph evidence is insufficient.",
+    "active": true
+  },
+  {
+    "name": "subagent",
+    "description": "Delegate a focused task to isolated workers; they do not see this conversation. Include context, constraints and expected output. Use direct tools for simple lookups or quick edits.",
+    "active": true
+  }
+]

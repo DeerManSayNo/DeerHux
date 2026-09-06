@@ -365,13 +365,13 @@ export function createStandardCodingTools(
     defineTool({
       name: "read",
       label: "Read File",
-      description: "Read a text file anywhere on the local filesystem. Relative paths resolve from the current workspace. Supports optional 1-based offset and line limit.",
-      promptSnippet: "read: Read any local text file by path. Relative paths resolve from cwd. Use filePath/path, optional offset and limit.",
+      description: "Read current text from a file, not a directory. Use for known paths.",
+      promptSnippet: "read: Read current file contents or selected lines.",
       parameters: Type.Object({
-        filePath: Type.Optional(Type.String({ description: "Local file path; relative paths resolve from cwd and absolute paths may point anywhere" })),
+        filePath: Type.Optional(Type.String({ description: "Required file path (or path alias); relative to cwd or absolute anywhere" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
-        offset: Type.Optional(Type.Number({ description: "1-based line offset" })),
-        limit: Type.Optional(Type.Number({ description: "Maximum number of lines" })),
+        offset: Type.Optional(Type.Number({ description: "Starting line, 1-based; default 1" })),
+        limit: Type.Optional(Type.Number({ description: "Line count, not ending line; default 400" })),
       }),
       executionMode: "parallel" as const,
       execute: async (_toolCallId, raw) => {
@@ -390,16 +390,12 @@ export function createStandardCodingTools(
     defineTool({
       name: "write",
       label: "Write File",
-      description: unrestricted
-        ? "Create or overwrite a text file anywhere on the local filesystem. Relative paths resolve from the default DeerHux workspace."
-        : "Create or overwrite a text file under the current workspace or a global Skill directory.",
-      promptSnippet: unrestricted
-        ? "write: Create or overwrite any local file. Relative paths resolve from the default DeerHux cwd. Use filePath/path and content."
-        : "write: Create or overwrite a file in cwd or a global Skill directory. Use filePath/path and content.",
+      description: "Create or fully overwrite a text file, creating parent directories. For partial changes use edit.",
+      promptSnippet: "write: Create or fully overwrite a text file.",
       parameters: Type.Object({
         filePath: Type.Optional(Type.String({ description: unrestricted
-          ? "Local file path; relative paths resolve from cwd and absolute paths may point anywhere"
-          : "File path to write, relative to cwd or absolute under cwd/global Skill directories" })),
+          ? "Required file path (or path alias); relative to cwd or absolute anywhere"
+          : "Required file path or path alias; relative to cwd, within cwd/global Skill directories" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
         content: Type.String({ description: "Complete file content" }),
       }),
@@ -417,20 +413,16 @@ export function createStandardCodingTools(
     defineTool({
       name: "edit",
       label: "Edit File",
-      description: unrestricted
-        ? "Replace text in a file anywhere on the local filesystem. Relative paths resolve from the default DeerHux workspace."
-        : "Replace text in a file under the current workspace or a global Skill directory.",
-      promptSnippet: unrestricted
-        ? "edit: Replace text in any local file. Relative paths resolve from the default DeerHux cwd. Use filePath/path, oldString, newString, optional replaceAll."
-        : "edit: Replace text in a file in cwd or a global Skill directory. Use filePath/path, oldString, newString, optional replaceAll.",
+      description: "Replace exact text in a file. Read the target first; include surrounding text to distinguish duplicate matches.",
+      promptSnippet: "edit: Replace exact text within a file.",
       parameters: Type.Object({
         filePath: Type.Optional(Type.String({ description: unrestricted
-          ? "Local file path; relative paths resolve from cwd and absolute paths may point anywhere"
-          : "File path to edit, relative to cwd or absolute under cwd/global Skill directories" })),
+          ? "Required file path (or path alias); relative to cwd or absolute anywhere"
+          : "Required file path or path alias; relative to cwd, within cwd/global Skill directories" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
-        oldString: Type.Optional(Type.String({ description: "Text to replace" })),
-        newString: Type.Optional(Type.String({ description: "Replacement text" })),
-        replaceAll: Type.Optional(Type.Boolean({ description: "Replace all occurrences instead of requiring a unique match" })),
+        oldString: Type.Optional(Type.String({ description: "Required nonempty text; must match once unless replaceAll=true" })),
+        newString: Type.Optional(Type.String({ description: "Replacement text; empty or omitted deletes the match" })),
+        replaceAll: Type.Optional(Type.Boolean({ description: "Replace every exact match; default false" })),
       }),
       executionMode: "sequential" as const,
       execute: async (_toolCallId, raw) => {
@@ -453,8 +445,8 @@ export function createStandardCodingTools(
     defineTool({
       name: "bash",
       label: "Run Shell Command",
-      description: `Run a shell command in the current workspace and return stdout, stderr, and exit code. Long output may be truncated in-context with a Full output path under the session context archive — use read/grep/tail to recover details.${contextHint}`,
-      promptSnippet: "bash: Run a shell command in cwd. Use command, optional timeoutMs. Long output spills to context archive.",
+      description: `Run shell commands in cwd. Returns stdout, stderr and exit_code; check the exit code. For truncated output, read the reported Full output path instead of rerunning.${contextHint}`,
+      promptSnippet: "bash: Run shell commands; use rg for current text, regex, or all matches.",
       parameters: Type.Object({
         command: Type.String({ description: "Shell command to run" }),
         timeoutMs: Type.Optional(Type.Number({ description: "Timeout in milliseconds" })),

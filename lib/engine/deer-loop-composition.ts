@@ -2,7 +2,6 @@ import {
   AuthStorage,
   buildSessionContext,
   DefaultResourceLoader,
-  defineTool,
   formatSkillsForPrompt,
   getAgentDir,
   ModelRegistry,
@@ -10,10 +9,9 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Message as PiMessage, ThinkingLevel } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
 import { getToolNamesForAgentMode, normalizeAgentMode, type AgentMode } from "../agent-modes";
 import { indexExists } from "../code-index/database";
-import { searchIndex } from "../code-index/search";
+import { createCodeSearchTool } from "../code-index/tool";
 import { createCodeGraphTools, normalizeCodeGraphToolNames } from "../codegraph/tools";
 import type { LlmRequestKind } from "../llm-gateway";
 import type { McpRuntimeLease } from "../mcp-runtime";
@@ -201,29 +199,7 @@ export async function composeDeerLoopEngine(
   }
 
   const hasCodeIndex = dependencies.hasCodeIndex(options.cwd);
-  const codeSearchTool = hasCodeIndex ? defineTool({
-    name: "code_search",
-    label: "Code Search",
-    description: "Search the codebase using a pre-built index. Returns file paths, line ranges, and concise code snippets.",
-    promptSnippet: "code_search: Search the indexed codebase by keywords and get file paths, line ranges, and snippets.",
-    parameters: Type.Object({
-      query: Type.String({ description: "Search query keywords" }),
-      path: Type.Optional(Type.String({ description: "Restrict to files under this relative path" })),
-      limit: Type.Optional(Type.Number({ description: "Maximum results, default 20" })),
-    }),
-    executionMode: "parallel" as const,
-    execute: async (_toolCallId, params, signal) => {
-      const results = await searchIndex(options.cwd, params.query, {
-        path: params.path,
-        limit: params.limit ?? 20,
-        signal,
-      });
-      const text = results.length
-        ? results.map((result) => `${result.path}:${result.startLine}-${result.endLine} (score ${result.score})\n${result.snippet}`).join("\n\n")
-        : `No indexed results for: ${params.query}`;
-      return { content: [{ type: "text" as const, text }], details: undefined };
-    },
-  }) : null;
+  const codeSearchTool = hasCodeIndex ? createCodeSearchTool(options.cwd) : null;
   const codeGraphTools = await dependencies.createCodeGraphTools(options.cwd);
 
   const sessionContext: { engine?: AgentEnginePort } = {};

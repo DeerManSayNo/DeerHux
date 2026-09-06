@@ -1,0 +1,128 @@
+[
+  {
+    "round": "baseline",
+    "label": "基线",
+    "contentChecks": 20,
+    "strictChecks": 16,
+    "preferredRoute": 17,
+    "calls": 49,
+    "toolErrors": 0,
+    "timeouts": 0,
+    "invalidCitationCases": 4,
+    "medianMs": 12035,
+    "q1InputTokens": 6476,
+    "toolDirectoryChars": 1301,
+    "inputWithCache": 343238,
+    "outputTokens": 4950,
+    "model": {
+      "id": "5.6gggg",
+      "provider": "gpt"
+    },
+    "thinkingLevel": "off"
+  },
+  {
+    "round": "round1",
+    "label": "第1轮",
+    "contentChecks": 20,
+    "strictChecks": 16,
+    "preferredRoute": 19,
+    "calls": 49,
+    "toolErrors": 0,
+    "timeouts": 0,
+    "invalidCitationCases": 4,
+    "medianMs": 16524,
+    "q1InputTokens": 6571,
+    "toolDirectoryChars": 805,
+    "inputWithCache": 360608,
+    "outputTokens": 4911,
+    "model": {
+      "id": "5.6gggg",
+      "provider": "gpt"
+    },
+    "thinkingLevel": "off"
+  },
+  {
+    "round": "round2-verified",
+    "label": "第2轮",
+    "contentChecks": 20,
+    "strictChecks": 20,
+    "preferredRoute": 20,
+    "calls": 53,
+    "toolErrors": 0,
+    "timeouts": 0,
+    "invalidCitationCases": 0,
+    "medianMs": 13907,
+    "q1InputTokens": 6540,
+    "toolDirectoryChars": 830,
+    "inputWithCache": 372977,
+    "outputTokens": 4854,
+    "model": {
+      "id": "5.6gggg",
+      "provider": "gpt"
+    },
+    "thinkingLevel": "off"
+  },
+  {
+    "round": "round3",
+    "label": "第3轮",
+    "contentChecks": 20,
+    "strictChecks": 19,
+    "preferredRoute": 20,
+    "calls": 49,
+    "toolErrors": 0,
+    "timeouts": 1,
+    "invalidCitationCases": 0,
+    "medianMs": 15962,
+    "q1InputTokens": 6537,
+    "toolDirectoryChars": 819,
+    "inputWithCache": 360060,
+    "outputTokens": 4939,
+    "model": {
+      "id": "5.6gggg",
+      "provider": "gpt"
+    },
+    "thinkingLevel": "off"
+  },
+  {
+    "round": "confirm",
+    "label": "同版复验",
+    "contentChecks": 20,
+    "strictChecks": 20,
+    "preferredRoute": 20,
+    "calls": 54,
+    "toolErrors": 1,
+    "timeouts": 0,
+    "invalidCitationCases": 0,
+    "medianMs": 13888,
+    "q1InputTokens": 6536,
+    "toolDirectoryChars": 819,
+    "inputWithCache": 379268,
+    "outputTokens": 5044,
+    "model": {
+      "id": "5.6gggg",
+      "provider": "gpt"
+    },
+    "thinkingLevel": "off"
+  },
+  {
+    "round": "final",
+    "label": "参数修正复验",
+    "contentChecks": 20,
+    "strictChecks": 20,
+    "preferredRoute": 20,
+    "calls": 53,
+    "toolErrors": 0,
+    "timeouts": 0,
+    "invalidCitationCases": 0,
+    "medianMs": 15000,
+    "q1InputTokens": 6550,
+    "toolDirectoryChars": 819,
+    "inputWithCache": 364168,
+    "outputTokens": 5092,
+    "model": {
+      "id": "5.6gggg",
+      "provider": "gpt"
+    },
+    "thinkingLevel": "off"
+  }
+]

@@ -1,0 +1,280 @@
+{
+  "normalization": "Project mode, fixed context archive placeholder; schema structure included. Character counts are not tokens.",
+  "tools": [
+    {
+      "name": "read",
+      "description": "Read current text from a file, not a directory. Use for known paths.",
+      "promptSnippet": "read: Read current file contents or selected lines.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filePath": {
+            "type": "string",
+            "description": "Required file path (or path alias); relative to cwd or absolute anywhere"
+          },
+          "path": {
+            "type": "string",
+            "description": "Alias for filePath"
+          },
+          "offset": {
+            "type": "number",
+            "description": "Starting line, 1-based; default 1"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Line count, not ending line; default 400"
+          }
+        }
+      }
+    },
+    {
+      "name": "bash",
+      "description": "Run shell commands in cwd. Returns stdout, stderr and exit_code; check the exit code. For truncated output, read the reported Full output path instead of rerunning. Also readable: session context archive at /SESSION_CONTEXT (compacted history + spilled tool outputs).",
+      "promptSnippet": "bash: Run shell commands; use rg for current text, regex, or all matches.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Shell command to run"
+          },
+          "timeoutMs": {
+            "type": "number",
+            "description": "Timeout in milliseconds"
+          }
+        }
+      }
+    },
+    {
+      "name": "edit",
+      "description": "Replace exact text in a file. Read the target first; include surrounding text to distinguish duplicate matches.",
+      "promptSnippet": "edit: Replace exact text within a file.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filePath": {
+            "type": "string",
+            "description": "Required file path or path alias; relative to cwd, within cwd/global Skill directories"
+          },
+          "path": {
+            "type": "string",
+            "description": "Alias for filePath"
+          },
+          "oldString": {
+            "type": "string",
+            "description": "Required nonempty text; must match once unless replaceAll=true"
+          },
+          "newString": {
+            "type": "string",
+            "description": "Replacement text; empty or omitted deletes the match"
+          },
+          "replaceAll": {
+            "type": "boolean",
+            "description": "Replace every exact match; default false"
+          }
+        }
+      }
+    },
+    {
+      "name": "write",
+      "description": "Create or fully overwrite a text file, creating parent directories. For partial changes use edit.",
+      "promptSnippet": "write: Create or fully overwrite a text file.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "filePath": {
+            "type": "string",
+            "description": "Required file path or path alias; relative to cwd, within cwd/global Skill directories"
+          },
+          "path": {
+            "type": "string",
+            "description": "Alias for filePath"
+          },
+          "content": {
+            "type": "string",
+            "description": "Complete file content"
+          }
+        }
+      }
+    },
+    {
+      "name": "code_search",
+      "description": "Search a potentially stale index by literal keywords, not semantic similarity. Returns ranked paths, line ranges and one snippet per file. Empty results do not prove absence; use rg for current or exhaustive matches.",
+      "promptSnippet": "code_search: Find relevant files by indexed keywords, with ranked snippets.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Literal code keywords; translate natural-language intent into likely identifiers or terms"
+          },
+          "path": {
+            "type": "string",
+            "description": "Restrict to files under this relative path"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum results, default 20"
+          }
+        }
+      }
+    },
+    {
+      "name": "codegraph",
+      "description": "Query the code graph. Known symbol names can be used directly, without search/status first. impact includes the target and file nodes but no per-node depth; traverse callers for exact call layers. Verify incomplete graph evidence against source.",
+      "promptSnippet": "codegraph: Find indexed symbol definitions, callers, callees, and change impact.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "status"
+              },
+              {
+                "type": "string",
+                "const": "search"
+              },
+              {
+                "type": "string",
+                "const": "callers"
+              },
+              {
+                "type": "string",
+                "const": "callees"
+              },
+              {
+                "type": "string",
+                "const": "impact"
+              }
+            ],
+            "description": "search: definitions; callers: who directly calls a symbol; callees: what it directly calls; impact: affected nodes; status: index diagnostics"
+          },
+          "query": {
+            "type": "string",
+            "description": "Search query; required for action=search"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Required for callers/callees/impact: symbol name (node.name), not node.id"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Optional search kind, e.g. function, class, method, interface, component"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum results for search/callers/callees"
+          },
+          "depth": {
+            "type": "number",
+            "description": "Impact traversal depth, default 2, max 5"
+          }
+        }
+      }
+    },
+    {
+      "name": "subagent",
+      "description": "Delegate tasks to isolated agents that do not share this conversation. Use direct tools for simple lookups or quick edits.",
+      "promptSnippet": "subagent: Delegate research, coding, or review to other agents.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Self-contained task: goal, context, constraints and expected output."
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "type": "string",
+                "const": "code"
+              },
+              {
+                "type": "string",
+                "const": "parallel"
+              },
+              {
+                "type": "string",
+                "const": "review"
+              }
+            ],
+            "description": "ask = read-only research; code = isolated coding with diff; parallel = multiple independent attempts (default 3); review = dedicated review pass. Omit to auto-infer."
+          },
+          "workflow": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "parallel"
+              },
+              {
+                "type": "string",
+                "const": "sequential"
+              },
+              {
+                "type": "string",
+                "const": "pipeline"
+              }
+            ],
+            "description": "parallel: concurrent (default); sequential: ordered, sharing prior conclusions; pipeline: each output feeds the next. Omit to auto-infer."
+          },
+          "workers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "task"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Short label for the worker, e.g. '方案 A' / 'Security Review'."
+                },
+                "task": {
+                  "type": "string",
+                  "description": "Self-contained instructions for this worker. Include the goal and any constraints."
+                },
+                "dependsOn": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Names of prior workers this one depends on (pipeline/sequential). Omit to infer sequential order."
+                }
+              }
+            },
+            "description": "Custom worker breakdown. Maximum 5 workers. Omit to let the planner auto-build workers from the mode."
+          }
+        }
+      }
+    }
+  ],
+  "summary": "- read: Read current file contents or selected lines.\n- bash: Run shell commands; use rg for current text, regex, or all matches.\n- edit: Replace exact text within a file.\n- write: Create or fully overwrite a text file.\n- code_search: Find relevant files by indexed keywords, with ranked snippets.\n- codegraph: Find indexed symbol definitions, callers, callees, and change impact.\n- subagent: Delegate research, coding, or review to other agents.",
+  "counts": {
+    "summaryChars": 446,
+    "descriptionChars": 1126,
+    "parameterSchemaChars": 4037,
+    "modelToolsChars": 5502
+  }
+}

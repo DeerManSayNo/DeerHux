@@ -1,10 +1,12 @@
 import fs from "fs/promises";
 import fsSync from "fs";
+import { randomUUID } from "crypto";
 import { ensureIndexDir, getIndexPath } from "./paths";
 
 export interface IndexedFile {
   path: string;
   mtime: number;
+  ctime?: number;
   size: number;
   hash: string;
   content: string;
@@ -34,7 +36,14 @@ export async function readIndex(cwd: string): Promise<CodeIndexData | null> {
 
 export async function writeIndex(data: CodeIndexData): Promise<void> {
   ensureIndexDir();
-  await fs.writeFile(getIndexPath(data.cwd), JSON.stringify(data), "utf8");
+  const target = getIndexPath(data.cwd);
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, JSON.stringify(data), "utf8");
+    await fs.rename(temporary, target);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
 }
 
 export async function getIndexStatus(cwd: string): Promise<{ exists: boolean; path: string; fileCount: number; updatedAt: string | null }> {

@@ -1,0 +1,8 @@
+Available tools:
+- read: Read a text file anywhere on the local filesystem. Relative paths resolve from the current workspace. Supports optional 1-based offset and line limit.
+- bash: Run a shell command in the current workspace and return stdout, stderr, and exit code. Long output may be truncated in-context with a Full output path under the session context archive — use read/grep/tail to recover details. Also readable: session context archive at /Users/deerman/.deerhux/agent/context/01a07192-7ac2-7b1e-89d6-a7be7610fd09 (compacted history + spilled tool outputs).
+- edit: Replace text in a file under the current workspace or a global Skill directory.
+- write: Create or overwrite a text file under the current workspace or a global Skill directory.
+- code_search: Search the codebase using a pre-built index. Returns file paths, line ranges, and concise code snippets.
+- codegraph: Query the semantic code graph: inspect index status, search symbols, trace callers/callees, or analyze change impact. Prefer this for code symbols and call relationships.
+- subagent: Delegate a focused, self-contained task to isolated subagents for parallel alternatives, scoped coding, or review/research. Use direct tools for simple lookups or quick edits. Workers do not share this conversation; include all required context.

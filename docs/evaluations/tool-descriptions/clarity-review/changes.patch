@@ -1,0 +1,161 @@
+--- before/lib/engine/coding-tools.ts
++++ after/lib/engine/coding-tools.ts
+@@ -365,13 +365,13 @@
+     defineTool({
+       name: "read",
+       label: "Read File",
+-      description: "Read current text from any local file; prefer for known paths. Relative paths resolve from cwd. offset is a 1-based starting line; limit is a line count (default 400), not an ending line.",
+-      promptSnippet: "read: Read current local text files by path, optionally by line range.",
+-      parameters: Type.Object({
+-        filePath: Type.Optional(Type.String({ description: "Local file path; relative paths resolve from cwd and absolute paths may point anywhere" })),
++      description: "Read current text from a file, not a directory. Use for known paths.",
++      promptSnippet: "read: Read current file contents or selected lines.",
++      parameters: Type.Object({
++        filePath: Type.Optional(Type.String({ description: "Required file path (or path alias); relative to cwd or absolute anywhere" })),
+         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
+-        offset: Type.Optional(Type.Number({ description: "1-based line offset" })),
+-        limit: Type.Optional(Type.Number({ description: "Maximum number of lines" })),
++        offset: Type.Optional(Type.Number({ description: "Starting line, 1-based; default 1" })),
++        limit: Type.Optional(Type.Number({ description: "Line count, not ending line; default 400" })),
+       }),
+       executionMode: "parallel" as const,
+       execute: async (_toolCallId, raw) => {
+@@ -390,16 +390,12 @@
+     defineTool({
+       name: "write",
+       label: "Write File",
+-      description: unrestricted
+-        ? "Create or fully overwrite a local text file; creates parent directories. Prefer over shell redirection. Use edit for targeted changes. Relative paths resolve from cwd."
+-        : "Create or fully overwrite a workspace/global Skill text file; creates parent directories. Prefer over shell redirection. Use edit for targeted changes.",
+-      promptSnippet: unrestricted
+-        ? "write: Create or fully overwrite local text files; creates parent directories. Prefer over shell redirection."
+-        : "write: Create or fully overwrite workspace/global Skill text files; creates parent directories. Prefer over shell redirection.",
++      description: "Create or fully overwrite a text file, creating parent directories. For partial changes use edit.",
++      promptSnippet: "write: Create or fully overwrite a text file.",
+       parameters: Type.Object({
+         filePath: Type.Optional(Type.String({ description: unrestricted
+-          ? "Local file path; relative paths resolve from cwd and absolute paths may point anywhere"
+-          : "File path to write, relative to cwd or absolute under cwd/global Skill directories" })),
++          ? "Required file path (or path alias); relative to cwd or absolute anywhere"
++          : "Required file path or path alias; relative to cwd, within cwd/global Skill directories" })),
+         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
+         content: Type.String({ description: "Complete file content" }),
+       }),
+@@ -417,20 +413,16 @@
+     defineTool({
+       name: "edit",
+       label: "Edit File",
+-      description: unrestricted
+-        ? "Replace exact text in a local file; prefer over shell patches. Read the relevant content first. oldString must match uniquely unless replaceAll=true; use surrounding text to select one occurrence. Relative paths resolve from cwd."
+-        : "Replace exact text in a workspace/global Skill file; prefer over shell patches. Read the relevant content first. oldString must match uniquely unless replaceAll=true; use surrounding text to select one occurrence.",
+-      promptSnippet: unrestricted
+-        ? "edit: Make exact, targeted replacements in local files; use replaceAll for all occurrences. Prefer over shell patches."
+-        : "edit: Make exact, targeted replacements in workspace/global Skill files; use replaceAll for all occurrences. Prefer over shell patches.",
++      description: "Replace exact text in a file. Read the target first; include surrounding text to distinguish duplicate matches.",
++      promptSnippet: "edit: Replace exact text within a file.",
+       parameters: Type.Object({
+         filePath: Type.Optional(Type.String({ description: unrestricted
+-          ? "Local file path; relative paths resolve from cwd and absolute paths may point anywhere"
+-          : "File path to edit, relative to cwd or absolute under cwd/global Skill directories" })),
++          ? "Required file path (or path alias); relative to cwd or absolute anywhere"
++          : "Required file path or path alias; relative to cwd, within cwd/global Skill directories" })),
+         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
+-        oldString: Type.Optional(Type.String({ description: "Text to replace" })),
+-        newString: Type.Optional(Type.String({ description: "Replacement text" })),
+-        replaceAll: Type.Optional(Type.Boolean({ description: "Replace all occurrences instead of requiring a unique match" })),
++        oldString: Type.Optional(Type.String({ description: "Required nonempty text; must match once unless replaceAll=true" })),
++        newString: Type.Optional(Type.String({ description: "Replacement text; empty or omitted deletes the match" })),
++        replaceAll: Type.Optional(Type.Boolean({ description: "Replace every exact match; default false" })),
+       }),
+       executionMode: "sequential" as const,
+       execute: async (_toolCallId, raw) => {
+@@ -453,8 +445,8 @@
+     defineTool({
+       name: "bash",
+       label: "Run Shell Command",
+-      description: `Run commands in cwd; return stdout, stderr and exit_code. Use for tests, git, or rg (current text, regex, exhaustive matches). Prefer read/edit/write for file operations. Check exit_code. If output is truncated, use read or bash to inspect the reported Full output path instead of rerunning the command.${contextHint}`,
+-      promptSnippet: "bash: Run commands, tests, git, or rg searches of current contents. Prefer read/edit/write for file operations.",
++      description: `Run shell commands in cwd. Returns stdout, stderr and exit_code; check the exit code. For truncated output, read the reported Full output path instead of rerunning.${contextHint}`,
++      promptSnippet: "bash: Run shell commands; use rg for current text, regex, or all matches.",
+       parameters: Type.Object({
+         command: Type.String({ description: "Shell command to run" }),
+         timeoutMs: Type.Optional(Type.Number({ description: "Timeout in milliseconds" })),
+--- before/lib/engine/deer-loop-composition.ts
++++ after/lib/engine/deer-loop-composition.ts
+@@ -204,10 +204,10 @@
+   const codeSearchTool = hasCodeIndex ? defineTool({
+     name: "code_search",
+     label: "Code Search",
+-    description: "Rank literal keyword matches in an indexed snapshot; return one snippet per file with path and lines. No embedding/semantic matching; translate intent into likely code keywords. Empty results do not prove absence. For current or exhaustive matches use bash with rg; for symbol definitions and calls prefer codegraph.",
+-    promptSnippet: "code_search: Find ranked keyword matches in an indexed snapshot; returns file paths and snippets, not all matching lines.",
++    description: "Search a potentially stale index by literal keywords, not semantic similarity. Returns ranked paths, line ranges and one snippet per file. Empty results do not prove absence; use rg for current or exhaustive matches.",
++    promptSnippet: "code_search: Find relevant files by indexed keywords, with ranked snippets.",
+     parameters: Type.Object({
+-      query: Type.String({ description: "Search query keywords" }),
++      query: Type.String({ description: "Literal code keywords; translate natural-language intent into likely identifiers or terms" }),
+       path: Type.Optional(Type.String({ description: "Restrict to files under this relative path" })),
+       limit: Type.Optional(Type.Number({ description: "Maximum results, default 20" })),
+     }),
+--- before/lib/codegraph/tools.ts
++++ after/lib/codegraph/tools.ts
+@@ -91,8 +91,8 @@
+   return [defineTool({
+     name: CODEGRAPH_TOOL_NAME,
+     label: "CodeGraph",
+-    description: "Query indexed symbols: search locates definitions; callers finds direct callers; callees finds direct callees. impact lists affected nodes to depth, including the target and file nodes; it does not label each node's call depth. For exact call layers use callers. status is diagnostic. Use source/text search when graph evidence is insufficient.",
+-    promptSnippet: "codegraph: Prefer for symbol definitions, callers/callees and change impact. For known symbols, call the matching action directly.",
++    description: "Query the code graph. Known symbol names can be used directly, without search/status first. impact includes the target and file nodes but no per-node depth; traverse callers for exact call layers. Verify incomplete graph evidence against source.",
++    promptSnippet: "codegraph: Find indexed symbol definitions, callers, callees, and change impact.",
+     parameters: Type.Object({
+       action: Type.Union([
+         Type.Literal("status"),
+@@ -100,9 +100,9 @@
+         Type.Literal("callers"),
+         Type.Literal("callees"),
+         Type.Literal("impact"),
+-      ], { description: "CodeGraph operation to run" }),
++      ], { description: "search: definitions; callers: who directly calls a symbol; callees: what it directly calls; impact: affected nodes; status: index diagnostics" }),
+       query: Type.Optional(Type.String({ description: "Search query; required for action=search" })),
+-      symbol: Type.Optional(Type.String({ description: "Symbol name (the search result's node.name, NOT its opaque node.id); required for callers, callees, and impact" })),
++      symbol: Type.Optional(Type.String({ description: "Required for callers/callees/impact: symbol name (node.name), not node.id" })),
+       kind: Type.Optional(Type.String({ description: "Optional search kind, e.g. function, class, method, interface, component" })),
+       limit: Type.Optional(Type.Number({ description: "Maximum results for search/callers/callees" })),
+       depth: Type.Optional(Type.Number({ description: "Impact traversal depth, default 2, max 5" })),
+--- before/lib/parallel-agent/subagent-tool.ts
++++ after/lib/parallel-agent/subagent-tool.ts
+@@ -38,11 +38,11 @@
+   return defineTool({
+     name: SUBAGENT_TOOL_NAME,
+     label: "Subagent",
+-    description: "Delegate a focused task to isolated workers; they do not see this conversation. Include context, constraints and expected output. Use direct tools for simple lookups or quick edits.",
+-    promptSnippet: "subagent: Delegate focused work to isolated workers; include context. Use direct tools for simple lookups.",
++    description: "Delegate tasks to isolated agents that do not share this conversation. Use direct tools for simple lookups or quick edits.",
++    promptSnippet: "subagent: Delegate research, coding, or review to other agents.",
+     parameters: Type.Object({
+       message: Type.String({
+-        description: "Complete, self-contained instructions for the workers. Include the goal, relevant context, constraints, and expected output; workers do not share this conversation.",
++        description: "Self-contained task: goal, context, constraints and expected output.",
+       }),
+       mode: Type.Optional(Type.Union(
+         [
+@@ -59,7 +59,7 @@
+           Type.Literal("sequential"),
+           Type.Literal("pipeline"),
+         ],
+-        { description: "How workers are scheduled. parallel = all at once (default). sequential = one after another, each sees prior workers' conclusions. pipeline = chained, prior output feeds next (for 调研→实现→审查 flows). Omit to auto-infer." },
++        { description: "parallel: concurrent (default); sequential: ordered, sharing prior conclusions; pipeline: each output feeds the next. Omit to auto-infer." },
+       )),
+       workers: Type.Optional(Type.Array(
+         Type.Object({
+--- before/lib/engine/tool-prompt.ts
++++ after/lib/engine/tool-prompt.ts
+@@ -18,6 +18,9 @@
+   return [
+     "Available tools:",
+     ...lines,
++    ...(activeToolNames.includes("bash") && ["read", "edit", "write"].some(name => activeToolNames.includes(name))
++      ? ["Prefer the available read/edit/write tools over shell commands for file operations."]
++      : []),
+     ...(cwd ? [
+       // The role prompt decomposer ends this section at a blank line.
+       `Workspace (cwd): ${JSON.stringify(cwd)}`,

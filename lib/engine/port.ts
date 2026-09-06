@@ -12,6 +12,7 @@ export interface ContextUsage {
 export interface ToolInfo {
   name: string;
   description: string;
+  promptSnippet?: string;
 }
 
 export type AgentEngineModel = Model<Api>;

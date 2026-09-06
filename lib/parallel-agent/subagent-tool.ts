@@ -38,11 +38,11 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
   return defineTool({
     name: SUBAGENT_TOOL_NAME,
     label: "Subagent",
-    description: "Delegate a focused, self-contained task to isolated subagents for parallel alternatives, scoped coding, or review/research. Use direct tools for simple lookups or quick edits. Workers do not share this conversation; include all required context.",
-    promptSnippet: "subagent: Delegate a focused task to isolated subagents for parallel alternatives, scoped coding, or review/research.",
+    description: "Delegate tasks to isolated agents that do not share this conversation. Use direct tools for simple lookups or quick edits.",
+    promptSnippet: "subagent: Delegate research, coding, or review to other agents.",
     parameters: Type.Object({
       message: Type.String({
-        description: "Complete, self-contained instructions for the workers. Include the goal, relevant context, constraints, and expected output; workers do not share this conversation.",
+        description: "Self-contained task: goal, context, constraints and expected output.",
       }),
       mode: Type.Optional(Type.Union(
         [
@@ -59,7 +59,7 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
           Type.Literal("sequential"),
           Type.Literal("pipeline"),
         ],
-        { description: "How workers are scheduled. parallel = all at once (default). sequential = one after another, each sees prior workers' conclusions. pipeline = chained, prior output feeds next (for 调研→实现→审查 flows). Omit to auto-infer." },
+        { description: "parallel: concurrent (default); sequential: ordered, sharing prior conclusions; pipeline: each output feeds the next. Omit to auto-infer." },
       )),
       workers: Type.Optional(Type.Array(
         Type.Object({

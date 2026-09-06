@@ -1,0 +1,8 @@
+Available tools:
+- read: Read current local text files by path, optionally by line range.
+- bash: Run commands, tests, git, or rg searches of current contents. Prefer read/edit/write for file operations.
+- edit: Make exact, targeted replacements in workspace/global Skill files; use replaceAll for all occurrences. Prefer over shell patches.
+- write: Create or fully overwrite workspace/global Skill text files; creates parent directories. Prefer over shell redirection.
+- code_search: Find ranked keyword matches in an indexed snapshot; returns file paths and snippets, not all matching lines.
+- codegraph: Find symbols, callers (who calls it), callees (what it calls), change impact, or index status.
+- subagent: Delegate a focused task to isolated subagents for parallel alternatives, scoped coding, or review/research.

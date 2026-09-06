@@ -11,20 +11,21 @@ export interface AgentModeConfig {
 }
 
 export const READ_ONLY_TOOL_NAMES = [
+  "code_search",
+  "codegraph",
   "read",
   "grep",
   "find",
   "ls",
-  "code_search",
-  "codegraph",
 ];
 
 export const AGENT_TOOL_NAMES = [
+  "code_search",
+  "codegraph",
   "read",
   "bash",
   "edit",
   "write",
-  "codegraph",
 ];
 
 export const MODE_PROMPT_START = "<deerhux_mode>";

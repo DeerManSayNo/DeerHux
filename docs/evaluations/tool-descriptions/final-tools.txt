@@ -1,0 +1,11 @@
+Available tools:
+- read: Read current local text files by path, optionally by line range.
+- bash: Run commands, tests, git, or rg searches of current contents. Prefer read/edit/write for file operations.
+- edit: Make exact, targeted replacements in workspace/global Skill files; use replaceAll for all occurrences. Prefer over shell patches.
+- write: Create or fully overwrite workspace/global Skill text files; creates parent directories. Prefer over shell redirection.
+- code_search: Find ranked keyword matches in an indexed snapshot; returns file paths and snippets, not all matching lines.
+- codegraph: Prefer for symbol definitions, callers/callees and change impact. For known symbols, call the matching action directly.
+- subagent: Delegate focused work to isolated workers; include context. Use direct tools for simple lookups.
+Workspace (cwd): "/tmp/deerhux-tool-eval/final/case-1"
+Resolve relative tool-result paths against this cwd when citing files; do not invent absolute path prefixes.
+For read-only questions, expand the search only to resolve missing or conflicting evidence.

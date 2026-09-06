@@ -2712,10 +2712,11 @@ export class DeerLoopEngine implements AgentEnginePort {
   }
 
   /** ★ M2：返回全部已注册工具的 name/description（给 get_state 命令用）。 */
-  getAllTools(): { name: string; description: string }[] {
+  getAllTools(): { name: string; description: string; promptSnippet?: string }[] {
     return this.registry.getAll().map((t) => ({
       name: t.name,
       description: t.description,
+      promptSnippet: t.promptSnippet,
     }));
   }
 

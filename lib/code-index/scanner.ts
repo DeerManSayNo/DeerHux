@@ -2,11 +2,13 @@ import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { DEFAULT_IGNORES, IGNORED_EXTENSIONS, MAX_FILE_SIZE } from "./config";
+import type { IndexedFile } from "./database";
 
 export interface ScannedFile {
   path: string;
   absPath: string;
   mtime: number;
+  ctime: number;
   size: number;
   hash: string;
   content: string;
@@ -41,7 +43,7 @@ function matchesIgnore(rel: string, name: string, gitignore: string[]): boolean 
   });
 }
 
-export async function scanFiles(cwd: string): Promise<ScannedFile[]> {
+export async function scanFiles(cwd: string, previous = new Map<string, IndexedFile>()): Promise<ScannedFile[]> {
   const root = path.resolve(cwd);
   const gitignore = await readGitignore(root);
   const files: ScannedFile[] = [];
@@ -53,23 +55,36 @@ export async function scanFiles(cwd: string): Promise<ScannedFile[]> {
       const rel = path.relative(root, absPath).split(path.sep).join("/");
       if (matchesIgnore(rel, entry.name, gitignore)) continue;
       if (entry.isDirectory()) {
-        await walk(absPath);
+        try { await walk(absPath); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
         continue;
       }
       if (!entry.isFile()) continue;
-      const stat = await fs.stat(absPath);
-      if (stat.size > MAX_FILE_SIZE) continue;
-      const buffer = await fs.readFile(absPath);
-      if (isBinary(buffer)) continue;
-      const content = buffer.toString("utf8");
-      files.push({
-        path: rel,
-        absPath,
-        mtime: stat.mtimeMs,
-        size: stat.size,
-        hash: crypto.createHash("sha256").update(buffer).digest("hex"),
-        content,
-      });
+      try {
+        const stat = await fs.stat(absPath);
+        if (stat.size > MAX_FILE_SIZE) continue;
+        const cached = previous.get(rel);
+        if (cached && cached.mtime === stat.mtimeMs && cached.ctime === stat.ctimeMs && cached.size === stat.size) {
+          files.push({ ...cached, ctime: stat.ctimeMs, absPath });
+          continue;
+        }
+        const buffer = await fs.readFile(absPath);
+        if (isBinary(buffer)) continue;
+        const content = buffer.toString("utf8");
+        files.push({
+          path: rel,
+          absPath,
+          mtime: stat.mtimeMs,
+          ctime: stat.ctimeMs,
+          size: stat.size,
+          hash: crypto.createHash("sha256").update(buffer).digest("hex"),
+          content,
+        });
+      } catch (error) {
+        // Editors commonly replace files by rename while a scan is in progress.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
   }
 

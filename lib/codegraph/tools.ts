@@ -91,8 +91,8 @@ export async function createCodeGraphTools(cwd: string): Promise<ToolDefinition[
   return [defineTool({
     name: CODEGRAPH_TOOL_NAME,
     label: "CodeGraph",
-    description: "Query the semantic code graph: inspect index status, search symbols, trace callers/callees, or analyze change impact. Prefer this for code symbols and call relationships.",
-    promptSnippet: "codegraph: Search symbols, trace callers/callees, inspect index status, or analyze change impact.",
+    description: "Query the code graph. Known symbol names can be used directly, without search/status first. impact includes the target and file nodes but no per-node depth; traverse callers for exact call layers. Verify incomplete graph evidence against source.",
+    promptSnippet: "codegraph: Query indexed code symbols and call relationships. Prefer for definitions, callers/callees, and change impact.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("status"),
@@ -100,9 +100,9 @@ export async function createCodeGraphTools(cwd: string): Promise<ToolDefinition[
         Type.Literal("callers"),
         Type.Literal("callees"),
         Type.Literal("impact"),
-      ], { description: "CodeGraph operation to run" }),
+      ], { description: "search: definitions; callers: who directly calls a symbol; callees: what it directly calls; impact: affected nodes; status: index diagnostics" }),
       query: Type.Optional(Type.String({ description: "Search query; required for action=search" })),
-      symbol: Type.Optional(Type.String({ description: "Symbol name; required for callers, callees, and impact" })),
+      symbol: Type.Optional(Type.String({ description: "Required for callers/callees/impact: symbol name (node.name), not node.id" })),
       kind: Type.Optional(Type.String({ description: "Optional search kind, e.g. function, class, method, interface, component" })),
       limit: Type.Optional(Type.Number({ description: "Maximum results for search/callers/callees" })),
       depth: Type.Optional(Type.Number({ description: "Impact traversal depth, default 2, max 5" })),

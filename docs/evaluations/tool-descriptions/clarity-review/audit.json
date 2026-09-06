@@ -1,0 +1,30 @@
+{
+  "snapshots": 52,
+  "nonToolPromptHashes": [
+    "f3dcf1bd3aaf713c32d5a92a284d4fdc28a78077f1a775b93fe43efce4d522c4"
+  ],
+  "models": [
+    [
+      "gpt",
+      "5.6gggg"
+    ]
+  ],
+  "thinking": [
+    "off"
+  ],
+  "parameterStructureUnchanged": true,
+  "invalidCitationTargets": [],
+  "unexpectedTrackedFixtureChanges": [],
+  "baselineSourceMatchesPreviousFinal": true,
+  "candidateSourceMatchesWorkingTree": true,
+  "productionRuntimeVerification": {
+    "url": "http://localhost:30141",
+    "sessionId": "01a07204-4aa1-73f2-a458-42dbfbcc4504",
+    "allSevenSummariesAndSharedRuleMatch": true
+  },
+  "validation": {
+    "tsc": "passed",
+    "lint": "0 errors, 36 existing warnings",
+    "toolPromptIntegrationTest": "passed"
+  }
+}

@@ -14,6 +14,7 @@ import { AiFileLinkMenu } from "./AiFileLinkMenu";
 import { SessionLoading } from "./SessionLoading";
 import { useAgentSession, type AgentPhase, type RetryInfo, type StreamRenderPriority, type WatchdogInfo } from "@/hooks/useAgentSession";
 import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
+import { useCodeIndex } from "@/hooks/useCodeIndex";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
@@ -877,6 +878,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   );
 
   const currentCwd = session?.cwd ?? newSessionCwd ?? undefined;
+  useCodeIndex(currentCwd);
   const selectableProjectOptions = useMemo(() => {
     const byCwd = new Map<string, string>();
     for (const project of projectOptions) byCwd.set(project.cwd, project.displayName);
