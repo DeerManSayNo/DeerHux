@@ -4,7 +4,13 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import type { SkillSearchResult } from "@/app/api/skills/search/route";
 
+import type { SkillCliDependency } from "@/lib/skill-cli-types";
+
+import { SystemCliList, SystemCliDetail } from "./SystemCliManager";
+import type { SystemCli } from "@/lib/system-cli-types";
+
 interface Skill {
+  cliDependencies?: SkillCliDependency[];
   name: string;
   description: string;
   filePath: string;
@@ -140,6 +146,95 @@ function SkillModeSwitch({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function cliLabel(dependencies: SkillCliDependency[]): string {
+  if (dependencies.some((dependency) => dependency.status === "unsupported")) return "CLI 不支持此系统";
+  return dependencies.some((dependency) => dependency.status === "missing") ? "缺少 CLI" : "CLI 已就绪";
+}
+
+function SkillCliPanel({ skill, cwd, onChecked }: { skill: Skill; cwd?: string; onChecked: (dependencies: SkillCliDependency[]) => void }) {
+  const [checking, setChecking] = useState(false);
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [installMessage, setInstallMessage] = useState<string | null>(null);
+  const [installOutput, setInstallOutput] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const dependencies = skill.cliDependencies ?? [];
+  if (!dependencies.length) return null;
+  const check = async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      const response = await fetch(skillsApiUrl(cwd), { cache: "no-store" });
+      const data = await response.json() as { skills?: Skill[]; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error || "检测失败，请重试");
+      const current = data.skills?.find((item) => item.filePath === skill.filePath);
+      if (!current) throw new Error("此技能已不存在，请刷新技能列表");
+      onChecked(current.cliDependencies ?? []);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "检测失败，请重试");
+    } finally { setChecking(false); }
+  };
+  const install = async (command: string) => {
+    if (installing) return;
+    setInstalling(command);
+    setError(null);
+    setInstallMessage(null);
+    setInstallOutput("");
+    try {
+      const response = await fetch("/api/skills/cli/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command }),
+      });
+      const result = await response.json() as { available?: boolean; output?: string; error?: string };
+      setInstallOutput(result.output ?? "");
+      if (!response.ok || result.error) throw new Error(result.error || "安装失败，请重试");
+      onChecked(dependencies.map((dependency) => dependency.command === command ? { ...dependency, status: result.available ? "available" : "missing" } : dependency));
+      setInstallMessage(result.available ? "安装完成，CLI 已就绪。" : "安装命令已完成，但尚未找到 CLI。请检查安装输出和 PATH，必要时重启 DeerHux 后重新检测。");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "安装失败，请重试");
+    } finally { setInstalling(null); }
+  };
+  const ready = dependencies.every((dependency) => dependency.status === "available");
+  if (ready && !installing && !error) {
+    const commands = dependencies.map((dependency) => dependency.command).join(" · ");
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", marginTop: 18, minWidth: 0 }}>
+        <span role="status" style={{ flexShrink: 0, fontSize: 12, color: "var(--accent)", whiteSpace: "nowrap" }}>✓ CLI 已就绪</span>
+        <span title={commands} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{commands}</span>
+        <button type="button" disabled={checking} onClick={check} style={{ flexShrink: 0, fontSize: 12, color: "var(--accent)", whiteSpace: "nowrap", cursor: checking ? "wait" : "pointer" }}>
+          {checking ? "检测中…" : "重新检测"}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12, marginTop: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <span style={{ fontSize: 12, color: "var(--text)" }}>{cliLabel(dependencies)}</span>
+        <button type="button" disabled={checking || installing !== null} onClick={check} style={{ fontSize: 12, color: "var(--accent)", cursor: checking ? "wait" : "pointer" }}>
+          {checking ? "检测中…" : "重新检测"}
+        </button>
+      </div>
+      {dependencies.map((dependency, index) => (
+        <div key={`${dependency.command}-${index}`} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 10, fontSize: 12 }}>
+          <code>{dependency.command}</code>
+          <span style={{ color: "var(--text-dim)" }}>{dependency.status === "available" ? "已找到" : dependency.status === "unsupported" ? "当前系统不受支持" : "未找到可执行文件"}</span>
+          {dependency.status === "missing" && (dependency.installCommand ? (
+            <button type="button" title={dependency.installCommand} disabled={installing !== null || checking} onClick={() => void install(dependency.command)} style={{ color: "var(--accent)", cursor: installing ? "wait" : "pointer", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 10px" }}>
+              {installing === dependency.command ? "下载中…" : "下载"}
+            </button>
+          ) : <span style={{ color: "var(--text-dim)" }}>暂不支持自动安装，请查看下方 Skill 安装说明</span>)}
+        </div>
+      ))}
+      <p style={{ margin: "10px 0 0", fontSize: 11, color: "var(--text-dim)" }}>检测 DeerHux 运行环境中的命令是否存在；安装完成后可重新检测。此状态不代表版本、登录或服务连接已验证。</p>
+      {installing && <div role="status" style={{ marginTop: 8, fontSize: 12, color: "var(--text-dim)" }}>正在下载并安装 {installing}，可能需要几分钟…</div>}
+      {installMessage && <div role="status" style={{ marginTop: 8, fontSize: 12 }}>{installMessage}</div>}
+      {error && <div role="alert" style={{ color: "#f87171", marginTop: 8, fontSize: 12 }}>{error}</div>}
+      {installOutput && <details style={{ marginTop: 8, fontSize: 11 }}><summary>安装输出</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 180, overflowY: "auto" }}>{installOutput}</pre></details>}
     </div>
   );
 }
@@ -1094,6 +1189,28 @@ export function SkillsConfig({
   onClose: () => void;
 }) {
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [collapsedSkillGroups, setCollapsedSkillGroups] = useState<Set<string>>(() => new Set());
+  const [clis, setClis] = useState<SystemCli[]>([]);
+  const [cliLoading, setCliLoading] = useState(false);
+  const [cliError, setCliError] = useState<string | null>(null);
+  const [selectedCli, setSelectedCli] = useState<SystemCli | null>(null);
+  const cliRequest = useRef(0);
+  const loadClis = useCallback(async () => {
+    const request = ++cliRequest.current;
+    setCliLoading(true); setCliError(null);
+    try {
+      const response = await fetch("/api/system-clis", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "扫描失败");
+      if (request !== cliRequest.current) return;
+      const items: SystemCli[] = data.clis ?? [];
+      setClis(items);
+      setSelectedCli((current) => current ? items.find((item) => item.path === current.path) ?? null : null);
+    } catch (error) {
+      if (request === cliRequest.current) setCliError(error instanceof Error ? error.message : "扫描失败");
+    } finally { if (request === cliRequest.current) setCliLoading(false); }
+  }, []);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -1176,6 +1293,11 @@ export function SkillsConfig({
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
   }, [selectedProjectCwd]);
+
+  useEffect(() => {
+    setSelectedCli(null);
+    if (!selectedProjectCwd) void loadClis();
+  }, [selectedProjectCwd, loadClis]);
 
   useEffect(() => {
     loadSkills();
@@ -1496,8 +1618,24 @@ export function SkillsConfig({
                   }
                   return scopeGroups.map(({ label: scopeLabel, subGroups }) => (
                     <div key={scopeLabel} style={{ marginBottom: 6 }}>
-                      <div
+                      <button
+                        type="button"
+                        aria-expanded={!collapsedSkillGroups.has(scopeLabel)}
+                        onClick={() => setCollapsedSkillGroups((current) => {
+                          const next = new Set(current);
+                          if (next.has(scopeLabel)) next.delete(scopeLabel);
+                          else next.add(scopeLabel);
+                          return next;
+                        })}
                         style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 5,
+                          width: "100%",
+                          border: "none",
+                          background: "transparent",
+                          textAlign: "left",
+                          cursor: "pointer",
                           padding: "4px 8px 3px",
                           fontSize: 10,
                           fontWeight: 600,
@@ -1506,9 +1644,10 @@ export function SkillsConfig({
                           letterSpacing: "0.06em",
                         }}
                       >
+                        <span aria-hidden="true">{collapsedSkillGroups.has(scopeLabel) ? "▸" : "▾"}</span>
                         {scopeLabel}
-                      </div>
-                      {subGroups.map(({ label: sgLabel, skills: sgSkills }) => {
+                      </button>
+                      {!collapsedSkillGroups.has(scopeLabel) && subGroups.map(({ label: sgLabel, skills: sgSkills }) => {
                         // Only show sub-group header when there are multiple sub-groups
                         const showHeader = subGroups.length > 1;
                         return (
@@ -1533,18 +1672,21 @@ export function SkillsConfig({
                             )}
                             {sgSkills.map((skill) => {
                               const isSelected =
-                                !addMode && selected === skill.filePath;
+                                !addMode && !selectedCli && selected === skill.filePath;
                               const mode = skill.disableModelInvocation ? "主动" : "被动";
+                              const cliNotReady = skill.cliDependencies?.some((item) => item.status !== "available") ?? false;
                               return (
                                 <div
                                   key={skill.filePath}
                                   onClick={() => {
+                                    setSelectedCli(null);
                                     setSelected(skill.filePath);
                                     setAddMode(false);
                                   }}
                                   onContextMenu={(event) => {
                                     event.preventDefault();
                                     event.stopPropagation();
+                                    setSelectedCli(null);
                                     setSelected(skill.filePath);
                                     setAddMode(false);
                                     setContextMenu({
@@ -1594,7 +1736,7 @@ export function SkillsConfig({
                                     style={{
                                       fontSize: 12,
                                       fontWeight: isSelected ? 600 : 400,
-                                      color: "var(--text)",
+                                      color: cliNotReady ? "var(--text-dim)" : "var(--text)",
                                       fontFamily: "var(--font-mono)",
                                       flex: 1,
                                       overflow: "hidden",
@@ -1604,6 +1746,11 @@ export function SkillsConfig({
                                   >
                                     {skill.name}
                                   </span>
+                                  {skill.cliDependencies?.some((item) => item.status !== "available") && (
+                                    <span title={cliLabel(skill.cliDependencies)} style={{ fontSize: 9, flexShrink: 0, color: "#d97706", border: "1px solid currentColor", borderRadius: 4, padding: "1px 4px" }}>
+                                      {cliLabel(skill.cliDependencies)}
+                                    </span>
+                                  )}
                                   <span
                                     style={{
                                       flexShrink: 0,
@@ -1625,6 +1772,7 @@ export function SkillsConfig({
                   ));
                 })()
               )}
+              {!selectedProjectCwd && <SystemCliList items={clis} selected={selectedCli?.path ?? null} loading={cliLoading} error={cliError} onRefresh={() => void loadClis()} onSelect={(cli) => { setSelectedCli(cli); setAddMode(false); }} />}
             </div>
             {/* Add skill button */}
             <div
@@ -1635,7 +1783,7 @@ export function SkillsConfig({
               }}
             >
               <div
-                onClick={() => setAddMode(true)}
+                onClick={() => { setSelectedCli(null); setAddMode(true); }}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -1682,6 +1830,8 @@ export function SkillsConfig({
                   loadSkills();
                 }}
               />
+            ) : selectedCli ? (
+              <SystemCliDetail key={selectedCli.path} cli={selectedCli} onDeleted={() => { setSelectedCli(null); void loadClis(); loadSkills(); }} />
             ) : loading ? null : selectedSkill ? (
               <>
                 <SkillDetail
@@ -1700,6 +1850,10 @@ export function SkillsConfig({
                   saveError={saveError}
                 />
                 {selectedSkill.name === "tavily-search" && <TavilyKeyConfig />}
+                <SkillCliPanel key={`${selectedProjectCwd}:${selectedSkill.filePath}`} skill={selectedSkill} cwd={selectedProjectCwd || undefined} onChecked={(cliDependencies) => {
+                  setSkills((current) => current.map((item) => item.filePath === selectedSkill.filePath ? { ...item, cliDependencies } : item));
+                  if (!selectedProjectCwd) void loadClis();
+                }} />
               </>
             ) : (
               <div

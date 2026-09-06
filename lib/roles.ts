@@ -354,9 +354,6 @@ export function composeRolePrompt(roleId?: string | null, temporarySettings: str
     for (const item of temporarySettings) if (item.trim()) lines.push(`- ${item.trim()}`);
   }
 
-  lines.push("", "# Role Profile Persistence Rules");
-  lines.push("- 如果用户要求为角色新增、修改或删除长期设定，必须先用自然语言向用户确认，不要声称已经保存，除非用户明确确认。客户端也会提供确认写入入口。");
-  lines.push("- 区分仅本次对话的临时要求与跨 session 生效的角色设定库。");
   return lines.join("\n");
 }
 

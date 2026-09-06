@@ -1,3 +1,4 @@
+import { builtinSkillPaths, builtinSkillPath, MANAGED_BUILTIN_SKILLS } from "../builtin-skills";
 import path from "path";
 import { DefaultResourceLoader, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync } from "fs";
@@ -40,6 +41,17 @@ const BUILTIN_TOOLS: ToolView[] = [
 // Built-in DeerHux skills — always available
 const BUILTIN_SKILLS_DIR = path.join(process.cwd(), "lib", "builtin-skills");
 const BUILTIN_SKILLS: SkillView[] = [
+  ...MANAGED_BUILTIN_SKILLS.map(({ name, description }): SkillView => ({
+    id: name, name, description,
+    filePath: builtinSkillPath(name),
+    baseDir: path.dirname(builtinSkillPath(name)),
+    enabled: true,
+    disableModelInvocation: false,
+    source: "builtin-deerhux",
+    sourceLabel: "DeerHux 内置",
+    canDelete: false,
+    canImportToDeerHux: false,
+  })),
   {
     id: "tavily-search",
     name: "tavily-search",
@@ -54,11 +66,11 @@ const BUILTIN_SKILLS: SkillView[] = [
     canImportToDeerHux: false,
   },
   {
-    id: "deerhux-scheduler",
-    name: "deerhux-scheduler",
+    id: "create-scheduler",
+    name: "create-scheduler",
     description: "DeerHux 内置定时任务系统。",
-    filePath: path.join(BUILTIN_SKILLS_DIR, "deerhux-scheduler", "SKILL.md"),
-    baseDir: path.join(BUILTIN_SKILLS_DIR, "deerhux-scheduler"),
+    filePath: path.join(BUILTIN_SKILLS_DIR, "create-scheduler", "SKILL.md"),
+    baseDir: path.join(BUILTIN_SKILLS_DIR, "create-scheduler"),
     enabled: true,
     disableModelInvocation: false,
     source: "builtin-deerhux",
@@ -178,7 +190,7 @@ function loadCompatibleSkillSources(cwd: string, existingFilePaths: Set<string>,
 
 export async function loadExtensionsView(cwd: string, options: { includeMcpRuntimeStatus?: boolean } = {}): Promise<LoadedExtensionsView> {
   const diagnostics: ExtensionDiagnostic[] = [];
-  const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
+  const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), additionalSkillPaths: builtinSkillPaths() });
   await loader.reload();
   const skillResult = loader.getSkills() as { skills?: PiSkillLike[]; diagnostics?: unknown[] };
 

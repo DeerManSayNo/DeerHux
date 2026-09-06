@@ -1,3 +1,4 @@
+import { builtinSkillPath, MANAGED_BUILTIN_SKILLS } from "@/lib/builtin-skills";
 import { NextResponse } from "next/server";
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, rmdirSync, unlinkSync } from "fs";
 import { DefaultResourceLoader, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
@@ -6,6 +7,9 @@ import { readdirSync } from "fs";
 import { migrateProjectAgentsDir } from "@/lib/legacy-migration";
 import { deerhuxManagedSkillDirs, isManagedDeerHuxSkillFile, isPathInside } from "@/lib/extensions/config";
 import { addAllowedRoot } from "@/lib/file-access";
+
+import { setSkillInvocationMode, SkillInvocationModeError } from "@/lib/skill-invocation-mode";
+import { readSkillCliDependencies } from "@/lib/skill-cli";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +29,14 @@ interface SkillWithMeta {
 // Built-in skills — always available, never deletable
 const BUILTIN_SKILLS_DIR = path.join(process.cwd(), "lib", "builtin-skills");
 const BUILTIN_SKILLS: SkillWithMeta[] = [
+  ...MANAGED_BUILTIN_SKILLS.map(({ name, description }): SkillWithMeta => ({
+    name, description,
+    filePath: builtinSkillPath(name),
+    baseDir: path.dirname(builtinSkillPath(name)),
+    disableModelInvocation: false,
+    sourceInfo: { source: "builtin-deerhux", scope: "builtin" },
+    canDelete: false,
+  })),
   {
     name: "tavily-search",
     description: "Search the web with LLM-optimized results via the Tavily CLI.",
@@ -35,10 +47,10 @@ const BUILTIN_SKILLS: SkillWithMeta[] = [
     canDelete: false,
   },
   {
-    name: "deerhux-scheduler",
+    name: "create-scheduler",
     description: "DeerHux 内置定时任务系统。",
-    filePath: path.join(BUILTIN_SKILLS_DIR, "deerhux-scheduler", "SKILL.md"),
-    baseDir: path.join(BUILTIN_SKILLS_DIR, "deerhux-scheduler"),
+    filePath: path.join(BUILTIN_SKILLS_DIR, "create-scheduler", "SKILL.md"),
+    baseDir: path.join(BUILTIN_SKILLS_DIR, "create-scheduler"),
     disableModelInvocation: false,
     sourceInfo: { source: "builtin-deerhux", scope: "builtin" },
     canDelete: false,
@@ -111,7 +123,11 @@ export async function GET(req: Request) {
     const visibleSkills = injectBuiltinSkills(skillsWithMeta);
     visibleSkills.forEach((skill) => addAllowedRoot(skill.baseDir));
 
-    return NextResponse.json({ skills: visibleSkills, diagnostics });
+    const enrichedSkills = await Promise.all(visibleSkills.map(async (skill) => ({
+      ...skill,
+      cliDependencies: await readSkillCliDependencies(skill.filePath),
+    })));
+    return NextResponse.json({ skills: enrichedSkills, diagnostics });
   } catch (_e) {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
@@ -245,27 +261,15 @@ export async function PATCH(req: Request) {
     }
 
     const content = readFileSync(filePath, "utf8");
-    const key = "disable-model-invocation";
-
-    // Use parseFrontmatter to check current value, then do a surgical line edit
-    // to preserve the original YAML formatting of all other fields.
-    const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
-    const alreadySet = Boolean(frontmatter[key]);
-
-    let updated = content;
-    if (disableModelInvocation && !alreadySet) {
-      // Add key after the opening --- line
-      updated = content.replace(/^---\r?\n/, `---\n${key}: true\n`);
-      // If no frontmatter exists, create one
-      if (updated === content) updated = `---\n${key}: true\n---\n${content}`;
-    } else if (!disableModelInvocation && alreadySet) {
-      // Remove the key line entirely
-      updated = content.replace(new RegExp(`^${key}\\s*:.*\\r?\\n`, "m"), "");
-    }
+    const updated = setSkillInvocationMode(content, disableModelInvocation);
 
     writeFileSync(filePath, updated, "utf8");
     return NextResponse.json({ success: true });
-  } catch (_e) {
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  } catch (error) {
+    if (error instanceof SkillInvocationModeError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    console.error("[api/skills] Failed to update skill:", error);
+    return NextResponse.json({ error: "保存 Skill 失败，请检查文件权限或服务端日志。" }, { status: 500 });
   }
 }

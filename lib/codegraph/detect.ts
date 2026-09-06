@@ -1,6 +1,13 @@
 import fs from "fs";
 import path from "path";
-import { runCodeGraph, runCodeGraphJson } from "./cli";
+import { CodeGraphCliError, runCodeGraph, runCodeGraphJson } from "./cli";
+
+function reportFailure(action: string, cwd: string, error: unknown, signal?: AbortSignal) {
+  if (signal?.aborted) return;
+  console.warn(`[codegraph] ${action} failed (${cwd}):`,
+    error instanceof Error ? error.message : String(error),
+    error instanceof CodeGraphCliError ? (error.stderr ?? "").slice(0, 2000) : "");
+}
 
 export interface CodeGraphStatus {
   initialized: boolean;
@@ -21,7 +28,8 @@ export function hasCodeGraphDir(cwd: string): boolean {
 
 export async function ensureCodeGraphInitialized(cwd: string, signal?: AbortSignal): Promise<CodeGraphStatus | null> {
   try {
-    const existing = await getCodeGraphStatus(cwd, signal);
+    // A broken existing index/runtime must not silently trigger reinitialization.
+    const existing = hasCodeGraphDir(cwd) ? await readStatus(cwd, signal) : null;
     if (existing?.initialized) return existing;
 
     await runCodeGraph(["init", "--index", cwd], {
@@ -31,7 +39,8 @@ export async function ensureCodeGraphInitialized(cwd: string, signal?: AbortSign
     });
 
     return await getCodeGraphStatus(cwd, signal);
-  } catch {
+  } catch (error) {
+    reportFailure("tool initialization", cwd, error, signal);
     return null;
   }
 }
@@ -39,15 +48,16 @@ export async function ensureCodeGraphInitialized(cwd: string, signal?: AbortSign
 export async function getCodeGraphStatus(cwd: string, signal?: AbortSignal): Promise<CodeGraphStatus | null> {
   if (!hasCodeGraphDir(cwd)) return null;
   try {
-    const status = await runCodeGraphJson<CodeGraphStatus>(["status", "--json"], {
-      cwd,
-      signal,
-      timeoutMs: 10_000,
-    });
-    return status.initialized ? status : null;
-  } catch {
+    return await readStatus(cwd, signal);
+  } catch (error) {
+    reportFailure("status", cwd, error, signal);
     return null;
   }
+}
+
+async function readStatus(cwd: string, signal?: AbortSignal): Promise<CodeGraphStatus | null> {
+  const status = await runCodeGraphJson<CodeGraphStatus>(["status", "--json"], { cwd, signal, timeoutMs: 10_000 });
+  return status.initialized ? status : null;
 }
 
 export async function isCodeGraphAvailable(cwd: string): Promise<boolean> {

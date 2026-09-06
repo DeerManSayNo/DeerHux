@@ -1,3 +1,4 @@
+import { builtinSkillPaths } from "../builtin-skills";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -6,7 +7,7 @@ import type { ProjectResourcePort, SkillResource } from "./port";
 export class PiProjectResourceAdapter implements ProjectResourcePort {
   async resolveSkill(cwd: string, name: string): Promise<SkillResource | undefined> {
     try {
-      const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
+      const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), additionalSkillPaths: builtinSkillPaths() });
       await loader.reload();
       const skill = loader.getSkills().skills.find((item) => item.name === name);
       if (skill?.filePath && existsSync(skill.filePath)) {

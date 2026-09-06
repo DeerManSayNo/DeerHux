@@ -1,5 +1,6 @@
 ---
-name: deerhux-scheduler
+name: create-scheduler
+disable-model-invocation: false
 description: |
   DeerHux 内置定时任务系统。当用户要求创建、修改、删除、查看定时任务，或说"定时"、"每天几点"、"定期执行"、"自动查询"、"cron"、"计划任务"时，使用本技能。通过 REST API 操作 DeerHux 自带的调度器，任务会显示在客户端的「定时任务」面板中。
 ---

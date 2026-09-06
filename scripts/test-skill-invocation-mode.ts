@@ -1,0 +1,26 @@
+import assert from "node:assert/strict";
+import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { setSkillInvocationMode, SkillInvocationModeError } from "../lib/skill-invocation-mode.ts";
+
+const body = "\n# Guide\ndisable-model-invocation: false\n";
+const original = `---\nname: test\ndisable-model-invocation: false\ndescription: test skill\nmetadata:\n  disable-model-invocation: keep\n---\n${body}`;
+const active = setSkillInvocationMode(original, true);
+assert.equal(parseFrontmatter(active).frontmatter["disable-model-invocation"], true);
+assert.equal((active.split("---")[1].match(/^disable-model-invocation:/gm) ?? []).length, 1);
+assert.ok(active.endsWith(body));
+assert.ok(active.includes("  disable-model-invocation: keep"));
+assert.equal(setSkillInvocationMode(active, true), active);
+const passive = setSkillInvocationMode(active, false);
+assert.equal(parseFrontmatter(passive).frontmatter["disable-model-invocation"], false);
+assert.equal(setSkillInvocationMode(passive, true), active);
+const duplicate = original.replace("name: test", "disable-model-invocation: true\nname: test");
+assert.throws(() => parseFrontmatter(duplicate));
+assert.equal(setSkillInvocationMode(duplicate, true), active);
+const quoted = original.replace("disable-model-invocation: false", '"disable-model-invocation": false');
+assert.equal(setSkillInvocationMode(quoted, true), active);
+const windows = original.replace(/\n/g, "\r\n");
+assert.equal(setSkillInvocationMode(windows, true), active.replace(/\n/g, "\r\n"));
+assert.equal(parseFrontmatter(setSkillInvocationMode("# Plain skill", true)).frontmatter["disable-model-invocation"], true);
+assert.throws(() => setSkillInvocationMode("---\nname: missing-close", true), SkillInvocationModeError);
+assert.throws(() => setSkillInvocationMode("---\nname: one\nname: two\n---\nbody", true), SkillInvocationModeError);
+console.log("Skill invocation mode: explicit false, toggling, duplicate repair, quoted keys, CRLF, body preservation and invalid YAML checks passed");

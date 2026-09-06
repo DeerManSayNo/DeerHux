@@ -1,3 +1,4 @@
+import { builtinSkillPaths } from "../builtin-skills";
 import {
   AuthStorage,
   buildSessionContext,
@@ -115,7 +116,7 @@ function composeBaseSystemPrompt(resources: BaseSystemPromptResources): string {
 }
 
 async function loadBaseSystemPrompt(cwd: string, includeSkills: boolean): Promise<string> {
-  const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
+  const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), additionalSkillPaths: builtinSkillPaths() });
   await loader.reload();
   const skills = includeSkills ? loader.getSkills().skills : [];
   return composeBaseSystemPrompt({

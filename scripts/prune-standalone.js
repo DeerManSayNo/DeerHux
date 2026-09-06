@@ -105,3 +105,12 @@ console.log(
   `✅ Removed ${removedCount} items, freed ${(removedBytes / 1024 / 1024).toFixed(1)}MB ` +
     `from ${path.relative(repoRoot, standaloneDir)}`
 );
+
+// Add spawned dependencies after pruning, preserving their runtime assets.
+require("./bundle-codegraph.js").bundleCodeGraph(repoRoot, standaloneDir);
+
+// Built-in skills are read on demand; import tracing does not include Markdown.
+for (const name of ["create-role", "create-skill", "webcmd-browser"]) {
+  const skillDir = path.join("lib", "builtin-skills", name);
+  fs.cpSync(path.join(repoRoot, skillDir), path.join(standaloneDir, skillDir), { recursive: true });
+}

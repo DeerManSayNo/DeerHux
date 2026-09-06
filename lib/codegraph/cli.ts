@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import path from "path";
+import fs from "fs";
 
 export class CodeGraphCliError extends Error {
   constructor(message: string, readonly code?: number | null, readonly stderr?: string) {
@@ -17,25 +18,32 @@ export interface CodeGraphRunOptions {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_STDIO_BYTES = 2 * 1024 * 1024;
 
-function buildCodeGraphPath(cwd: string): string {
-  return [
-    path.join(process.cwd(), "node_modules", ".bin"),
-    path.join(cwd, "node_modules", ".bin"),
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
-    process.env.PATH,
-  ].filter(Boolean).join(path.delimiter);
+// Use the application's bundled runtime, never a workspace executable or a
+// global installation. Direct execution also makes abort/timeout kill the CLI
+// itself rather than only the npm shim's parent process.
+export function resolveCodeGraphRuntime(appRoot = process.cwd()) {
+  const bundle = path.join(appRoot, "node_modules", "@colbymchenry", `codegraph-${process.platform}-${process.arch}`);
+  const command = path.join(bundle, process.platform === "win32" ? "node.exe" : "node");
+  const entry = path.join(bundle, "lib", "dist", "bin", "codegraph.js");
+  if (!fs.existsSync(command) || !fs.existsSync(entry)) {
+    throw new CodeGraphCliError(`CodeGraph runtime missing for ${process.platform}-${process.arch}: ${bundle}. Rebuild the application with its CodeGraph platform dependency.`);
+  }
+  return { command, entry };
 }
 
 export function runCodeGraph(args: string[], options: CodeGraphRunOptions): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("codegraph", args, {
+    if (options.signal?.aborted) {
+      reject(new DOMException("CodeGraph command aborted", "AbortError"));
+      return;
+    }
+    const runtime = resolveCodeGraphRuntime();
+    const child = spawn(runtime.command, ["--liftoff-only", runtime.entry, ...args], {
       cwd: options.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         NO_COLOR: "1",
-        PATH: buildCodeGraphPath(options.cwd),
       },
     });
 
