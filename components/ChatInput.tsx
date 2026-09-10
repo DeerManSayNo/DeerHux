@@ -66,6 +66,10 @@ const DEFAULT_ROLE_FALLBACK: AgentRole = {
 };
 
 interface Props {
+  /** Restricted remote transport: text input only, no local resource discovery. */
+  textOnly?: boolean;
+  /** Let the parent reading column own width and horizontal spacing. */
+  fitContainer?: boolean;
   onSend: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
   /** 返回 false 则取消本次发送并保留输入（如弹出压缩确认框）。 */
   onBeforeSend?: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => boolean | void;
@@ -162,6 +166,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onBeforeSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, modelCatalogError, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, lastModelError, onClearModelError,
   terminalNotice, onClearTerminalNotice,
+  textOnly = false,
+  fitContainer = false,
   agentMode = "agent", onAgentModeChange, planReady, onBuildPlan,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo,
@@ -193,8 +199,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [imageUploadError, setImageUploadError] = useState<string | null>(null);
   const [fileReferences, setFileReferences] = useState<FileReference[]>(initialInputState?.fileReferences ?? []);
   const [pendingPastes, setPendingPastes] = useState(0);
-  const inputMaxWidth = compact ? 640 : 820;
-  const inputHorizontalPadding = compact ? 12 : 16;
+  const inputMaxWidth = fitContainer ? "100%" : compact ? 640 : 820;
+  const inputHorizontalPadding = fitContainer ? 0 : compact ? 12 : 16;
 
   // Skill picker state
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
@@ -457,6 +463,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [value, selectedSkill, attachedImages, fileReferences, pendingPastes, onSteer, onFollowUp, clearSubmittedInput]);
 
   const fetchSkills = useCallback(async (cwd: string) => {
+    if (textOnly) return;
     if (skillsFetchRef.current) {
       skillsFetchRef.current.abort();
     }
@@ -478,7 +485,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } catch {
       // ignore abort or fetch errors
     }
-  }, []);
+  }, [textOnly]);
 
   const setActiveSkillPickerIndex = useCallback((index: number) => {
     skillPickerIndexRef.current = index;
@@ -776,6 +783,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [cwd, addFileReferences]);
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (textOnly) return;
     const clipboard = e.clipboardData;
     const files = Array.from(clipboard.files);
     const uriList = clipboard.getData("text/uri-list");
@@ -823,7 +831,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } finally {
       setPendingPastes((count) => count - 1);
     }
-  }, [processImageFiles, handleInput, addFileReferences]);
+  }, [processImageFiles, handleInput, addFileReferences, textOnly]);
 
 
 
@@ -902,6 +910,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const loadRoles = useCallback(async () => {
+    if (textOnly) return;
     const requestId = ++rolesRequestIdRef.current;
     const cacheKey = `deerhux.control-plane.roles.v1:${cwd ?? "global"}`;
     const applyRoles = (nextRoles: AgentRole[]) => {
@@ -928,7 +937,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       // Keep cached/current roles. A transient control-plane failure must not
       // remove the selector while the active Agent SSE stream is healthy.
     }
-  }, [onRolesLoaded, cwd]);
+  }, [onRolesLoaded, cwd, textOnly]);
 
   useEffect(() => {
     loadRoles();
@@ -1739,12 +1748,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
           <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 2 }}>
             <button
+              hidden={textOnly}
               onClick={() => { void selectReferenceFiles(); }}
               title="上传文件"
               aria-label="上传文件"
               type="button"
               style={{
-                flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                flexShrink: 0, display: textOnly ? "none" : "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
@@ -1955,7 +1965,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{ flex: 1 }} />
 
           {/* RIGHT: collapsed assistant controls */}
-          <div ref={moreMenuRef} style={{ flex: "0 0 auto", position: "relative", display: "flex", alignItems: "center", marginLeft: "auto" }}>
+          <div ref={moreMenuRef} style={{ flex: "0 0 auto", position: "relative", display: textOnly ? "none" : "flex", alignItems: "center", marginLeft: "auto" }}>
             {onSubagentToggle && (
               <button
                 type="button"

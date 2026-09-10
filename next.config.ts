@@ -16,6 +16,9 @@ const nextConfig: NextConfig = {
   // limit is too small for normal screenshots/photos, causing /api/agent/*
   // POSTs to fail before our route handler sees them.
   experimental: {
+    // Share pages cannot expose the dev HMR socket. Keep RSC debug data inline
+    // so Next 16 hydration does not wait for that private socket in development.
+    reactDebugChannel: false,
     proxyClientMaxBodySize: 25 * 1024 * 1024,
   },
   serverExternalPackages: [

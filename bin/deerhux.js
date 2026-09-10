@@ -33,7 +33,7 @@ const { values: cliArgs } = parseArgs({
 });
 
 const port     = cliArgs.port     ?? process.env.PORT     ?? "30141";
-const hostname = cliArgs.hostname ?? process.env.HOSTNAME ?? null;
+const hostname = cliArgs.hostname ?? "127.0.0.1";
 
 if (!fs.existsSync(nextDir)) {
   console.error("Build artifacts not found. Please report this issue.");

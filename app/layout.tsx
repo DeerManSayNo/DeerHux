@@ -1,14 +1,6 @@
 import type { Metadata } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
-import Script from "next/script";
 import "./globals.css";
-
-const themeInitScript = `
-try {
-  var theme = localStorage.getItem("deerhux-theme") || localStorage.getItem("pi-theme");
-  document.documentElement.classList.toggle("dark", theme === "dark");
-} catch (_) {}
-`;
 
 const notoSansMono = Noto_Sans_Mono({
   subsets: ["latin", "cyrillic"],
@@ -28,13 +20,6 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN" className={notoSansMono.variable} suppressHydrationWarning>
-      <head>
-        <Script
-          id="deerhux-theme-init"
-          strategy="beforeInteractive"
-          dangerouslySetInnerHTML={{ __html: themeInitScript }}
-        />
-      </head>
       <body style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
         {children}
       </body>

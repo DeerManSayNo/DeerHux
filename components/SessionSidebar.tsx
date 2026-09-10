@@ -8,6 +8,7 @@ import type { SessionInfo } from "@/lib/types";
 import type { ProjectMeta } from "@/lib/project-meta";
 import { FileExplorer } from "./FileExplorer";
 import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
+import { ShareManager } from "./ShareManager";
 import { readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 import { getProjectDisplayName } from "@/lib/project-name";
 import { publishVisibleProjects } from "@/lib/visible-projects";
@@ -1483,6 +1484,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </div>
         </div>
       )}
+
+      {!compact && <ShareManager />}
 
       {/* RemoteConnectionsBlock */}
       {!compact && (
