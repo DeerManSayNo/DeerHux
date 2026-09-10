@@ -39,6 +39,51 @@ use windows_sys::Win32::{
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[tauri::command]
+async fn sync_header_controls(window: tauri::WebviewWindow, keep_visible: bool) -> Result<bool, String> {
+    if window.label() != "main" { return Ok(true); }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSAnimatablePropertyContainer, NSAnimationContext, NSWindow, NSWindowButton};
+        use objc2_quartz_core::CAMediaTimingFunction;
+        thread_local! { static LAST_VISIBLE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+        let (send, receive) = std::sync::mpsc::channel();
+        let target = window.clone();
+        window.run_on_main_thread(move || {
+            let result = target.ns_window().map(|pointer| unsafe {
+                let native: &NSWindow = &*pointer.cast();
+                let point = native.mouseLocationOutsideOfEventStream();
+                let height = native.frame().size.height;
+                let hovered = point.x >= 0.0 && point.x <= 246.0 && point.y <= height && point.y >= height - 48.0;
+                let visible = keep_visible || hovered;
+                LAST_VISIBLE.with(|previous| {
+                    let last = previous.replace(Some(visible));
+                    if last == Some(visible) { return; }
+                    NSAnimationContext::beginGrouping();
+                    let context = NSAnimationContext::currentContext();
+                    context.setDuration(0.45);
+                    let timing = CAMediaTimingFunction::functionWithControlPoints(0.42, 0.0, 0.58, 1.0);
+                    context.setTimingFunction(Some(&timing));
+                    for kind in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+                        if let Some(button) = native.standardWindowButton(kind) {
+                            button.setHidden(false);
+                            button.setEnabled(visible);
+                            if last.is_none() { button.setAlphaValue(0.0); }
+                            button.animator().setAlphaValue(if visible { 1.0 } else { 0.0 });
+                        }
+                    }
+                    NSAnimationContext::endGrouping();
+                });
+                hovered
+            }).map_err(|error| error.to_string());
+            let _ = send.send(result);
+        }).map_err(|error| error.to_string())?;
+        receive.recv().map_err(|error| error.to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = keep_visible; Ok(false) }
+}
+
 #[cfg(any(test, all(not(debug_assertions), target_os = "windows")))]
 fn strip_windows_verbatim_prefix(path: &str) -> Cow<'_, str> {
     let Some(verbatim) = path.strip_prefix(r"\\?\") else {
@@ -1097,6 +1142,7 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            sync_header_controls,
             read_clipboard_file_paths,
             hide_quick_session_window,
             mark_quick_session_ready,
@@ -1117,7 +1163,8 @@ pub fn run() {
             let builder = builder
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
-                .traffic_light_position(LogicalPosition::new(14.0, 15.0));
+                // Increase the native titlebar inset by 7pt to align with the header center at y=20.
+                .traffic_light_position(LogicalPosition::new(14.0, 22.0));
             #[cfg(target_os = "windows")]
             let builder = builder.decorations(false);
 

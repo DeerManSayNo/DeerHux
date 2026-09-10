@@ -1,0 +1,23 @@
+.trigger { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0; padding: 0; border: none; border-radius: 7px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.status { position: absolute; right: 2px; bottom: 2px; width: 5px; height: 5px; border-radius: 50%; }
+.connected { background: var(--accent); }
+.warning { background: #d97706; }
+.toolbar { display: flex; justify-content: flex-end; padding: 6px 16px; flex-shrink: 0; }
+.dialog button { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); padding: 5px 9px; font-size: 12px; cursor: pointer; }
+.trigger:hover, .dialog button:hover { background: var(--bg-subtle); }
+.trigger:focus-visible, .dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.trigger:disabled, .dialog button:disabled { opacity: .5; cursor: wait; }
+.dialog { width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 48px); margin: auto; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--text); overflow-y: auto; box-shadow: 0 16px 48px #0003; }
+.dialog::backdrop { background: #0006; }
+.heading, .actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dialog p { font-size: 13px; line-height: 1.7; margin: 12px 0; color: var(--text-muted); }
+.dialog .context { color: var(--text); overflow-wrap: anywhere; }
+.dialog .error { color: #ef4444; }
+.dialog .notice { color: var(--accent); }
+.connections { display: flex; flex-direction: column; margin: 16px 0; }
+.connection { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.connection > div { min-width: 0; flex: 1; }
+.connection strong, .connection small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.connection small { margin-top: 4px; color: var(--text-muted); }
+.connection button { flex-shrink: 0; }
+.actions { justify-content: flex-end; margin-top: 16px; }

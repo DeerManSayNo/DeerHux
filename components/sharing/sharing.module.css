@@ -28,9 +28,6 @@
 .input:hover, .select:hover { border-color: var(--text-dim); }
 .fieldLabel small { color: var(--text-muted); font-weight: 400; }
 /* Owner flow */
-.launcher { display: flex; align-items: center; gap: 9px; margin: 4px 10px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; color: var(--text-muted); background: transparent; text-align: left; font-size: 12px; cursor: pointer; }
-.launcher:hover { color: var(--accent); background: var(--bg-hover); }
-.launcher svg:last-child { margin-left: auto; }
 .dialog { margin: auto; padding: 0; width: min(940px, calc(100vw - 40px)); max-width: none; max-height: min(850px, calc(100dvh - 48px)); color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 20px; box-shadow: 0 28px 100px #0003; overflow: hidden; }
 .dialog::backdrop { background: #080d1a66; backdrop-filter: blur(5px); }
 .modalShell { display: flex; flex-direction: column; max-height: min(850px, calc(100dvh - 48px)); }

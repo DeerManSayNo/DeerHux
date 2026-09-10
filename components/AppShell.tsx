@@ -4,9 +4,12 @@ import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { PointerEvent as PointerEventType, MouseEvent as MouseEventType, ReactNode } from "react";
 import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
+import { ShareManager } from "./ShareManager";
 import { SessionSidebar } from "./SessionSidebar";
 import { CHAT_LAYOUT_COUNTS, ChatWorkspace, type ChatLayoutMode } from "./ChatWorkspace";
 import { FilePreviewPanel } from "./FilePreviewPanel";
+import { WorkspaceExplorer } from "./WorkspaceExplorer";
+import "./workspace-panel.css";
 import { WindowControls, useNeedsWindowControls } from "./WindowControls";
 import type { Tab } from "./TabBar";
 import { getLocalStorageItem } from "@/lib/client-storage";
@@ -211,6 +214,7 @@ export function AppShell() {
   const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "mcp" | "role" | null>(null);
   const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
   const [wechatConfigOpen, setWechatConfigOpen] = useState(false);
+  const [shareManagerOpen, setShareManagerOpen] = useState(false);
   const [wechatStatus, setWechatStatus] = useState<{ connected: boolean; polling: boolean; accountId?: string; activeUserCount?: number } | null>(null);
   const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
   const runningSessionIdsRef = useRef<Set<string>>(new Set());
@@ -230,10 +234,14 @@ export function AppShell() {
   const resizeStartX = useRef(0);
   const resizeStartWidth = useRef(260);
 
-  // Right panel (file viewer) resize
+  // Right workspace: remember explorer and preview widths separately.
   const RIGHT_PANEL_MIN = 250;
   const RIGHT_PANEL_MAX = 1000;
-  const [rightPanelWidth, setRightPanelWidth] = useState<number>(500);
+  const [rightPanelView, setRightPanelView] = useState<"explorer" | "preview">("explorer");
+  const [explorerPanelWidth, setExplorerPanelWidth] = useState(320);
+  const [previewPanelWidth, setPreviewPanelWidth] = useState(500);
+  const rightPanelWidth = rightPanelView === "explorer" ? explorerPanelWidth : previewPanelWidth;
+  const setRightPanelWidth = rightPanelView === "explorer" ? setExplorerPanelWidth : setPreviewPanelWidth;
   const [isResizingRightPanel, setIsResizingRightPanel] = useState(false);
   const rightPanelResizeStartX = useRef(0);
   const rightPanelResizeStartWidth = useRef(500);
@@ -251,10 +259,11 @@ export function AppShell() {
     window.history.replaceState(null, "", url);
   }, []);
 
-  // Right panel — file tabs only
+  // Right workspace and preview tabs
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [rightPanelPinned, setRightPanelPinned] = useState(false);
   const [filePreviewDetached, setFilePreviewDetached] = useState(false);
   const filePreviewChannelRef = useRef<BroadcastChannel | null>(null);
   const filePreviewStateRef = useRef<FilePreviewState>({ tabs: [], activeTabId: null, cwd: null, viewerCwd: null });
@@ -275,9 +284,34 @@ export function AppShell() {
   const [customCwds, setCustomCwds] = useState<string[]>([]);
   const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [headerHovered, setHeaderHovered] = useState(false);
+  const [headerFocused, setHeaderFocused] = useState(false);
+  const headerVisible = sidebarOpen || headerHovered || headerFocused || settingsMenuOpen;
+  useEffect(() => {
+    // macOS uses the same native hit test for both traffic lights and toolbar.
+    if ((window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ && navigator.platform.toUpperCase().includes("MAC")) return;
+    const move = (event: MouseEvent) => setHeaderHovered(event.clientX >= 0 && event.clientX <= 246 && event.clientY >= 0 && event.clientY <= 48);
+    const leave = () => setHeaderHovered(false);
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseleave", leave);
+    return () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseleave", leave); };
+  }, []);
+  useEffect(() => {
+    if (!(window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ || !navigator.platform.toUpperCase().includes("MAC")) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const sync = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const hovered = await invoke<boolean>("sync_header_controls", { keepVisible: sidebarOpen || settingsMenuOpen || headerFocused });
+        if (!cancelled) setHeaderHovered(hovered);
+      } catch { /* Older native hosts retain their existing window controls. */ }
+      if (!cancelled) timer = setTimeout(sync, 100);
+    };
+    void sync();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [sidebarOpen, settingsMenuOpen, headerFocused]);
   const [simpleWaitingIndicator, setSimpleWaitingIndicator] = useState(false);
-  const [topActionBarHovered, setTopActionBarHovered] = useState(false);
-  const topActionBarHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Windows/Linux 无边框主窗口需要在左上角自绘仿 macOS 红绿灯窗口控制按钮。
   const needsWindowControls = useNeedsWindowControls();
 
@@ -343,8 +377,13 @@ export function AppShell() {
     const storedRightWidth = getLocalStorageItem("deerhux.right-panel-width");
     if (storedRightWidth) {
       const parsed = parseInt(storedRightWidth, 10);
-      if (Number.isFinite(parsed)) setRightPanelWidth(Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, parsed)));
+      if (Number.isFinite(parsed)) setPreviewPanelWidth(Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, parsed)));
     }
+    const storedExplorerWidth = Number(getLocalStorageItem("deerhux.explorer-panel-width"));
+    if (Number.isFinite(storedExplorerWidth) && storedExplorerWidth >= RIGHT_PANEL_MIN) {
+      setExplorerPanelWidth(Math.min(RIGHT_PANEL_MAX, storedExplorerWidth));
+    }
+    setRightPanelPinned(getLocalStorageItem("deerhux.right-panel-pinned") === "true");
     setCustomCwds(readCustomCwds());
     setSimpleWaitingIndicator(getLocalStorageItem(SIMPLE_WAITING_INDICATOR_STORAGE_KEY) === "true");
   }, []);
@@ -611,6 +650,9 @@ export function AppShell() {
 
   const occupiedChatSlotCount = chatSlotIds.filter(Boolean).length;
   const chatLayoutMode = layoutModeForSlotCount(occupiedChatSlotCount);
+  const focusedExplorerCwd = chatLayoutMode !== "single" && !chatSlotIds[focusedChatSlotIndex]
+    ? null
+    : effectiveProjectCwd;
   const visibleChatSlotCount = CHAT_LAYOUT_COUNTS[chatLayoutMode];
   const visibleChatSlotIds = chatSlotIds.slice(0, visibleChatSlotCount);
 
@@ -905,7 +947,7 @@ export function AppShell() {
   }, [setSessionRunning]);
 
   // Called by ChatWindow when a new session gets its real id from DeerHux
-  const handleSessionCreated = useCallback((session: SessionInfo, slotIndex = focusedChatSlotIndex, sourceSessionId?: string | null) => {
+  const handleSessionCreated = useCallback((session: SessionInfo, slotIndex = focusedChatSlotIndex, sourceSessionId?: string | null, running = true) => {
     // 回调必须仍属于发起它的槽位身份。仅凭 cwd 不够：同一项目内也可能在
     // 请求期间换了 session；迟到的创建结果绝不能覆盖新窗口。
     const currentSlotId = chatSlotIdsRef.current[slotIndex] ?? null;
@@ -917,7 +959,8 @@ export function AppShell() {
     const pendingId = pendingSessionIdsBySlotRef.current.get(slotIndex);
     if (pendingId) setSessionRunning(pendingId, false);
     pendingSessionIdsBySlotRef.current.delete(slotIndex);
-    setSessionRunning(session.id, true);
+    // 微信接入只创建空会话；只有已提交 prompt 的创建才进入运行态。
+    setSessionRunning(session.id, running);
     // Keep an optimistic entry with the real id until SessionManager.listAll()
     // can see the file. For brand-new sessions DeerHux delays writing the jsonl
     // until an assistant message is persisted, so clearing this immediately
@@ -1068,10 +1111,10 @@ export function AppShell() {
   const finishRightPanelResize = useCallback(() => {
     setIsResizingRightPanel(false);
     setRightPanelWidth((w) => {
-      if (typeof window !== "undefined") window.localStorage.setItem("deerhux.right-panel-width", String(w));
+      if (typeof window !== "undefined") window.localStorage.setItem(rightPanelView === "explorer" ? "deerhux.explorer-panel-width" : "deerhux.right-panel-width", String(w));
       return w;
     });
-  }, []);
+  }, [rightPanelView, setRightPanelWidth]);
 
   const handleRightPanelResizeStart = useCallback((e: PointerEventType<HTMLDivElement>) => {
     e.preventDefault();
@@ -1103,7 +1146,7 @@ export function AppShell() {
       window.removeEventListener("blur", finishRightPanelResize);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [finishRightPanelResize, isResizingRightPanel]);
+  }, [finishRightPanelResize, isResizingRightPanel, setRightPanelWidth]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
@@ -1123,8 +1166,11 @@ export function AppShell() {
       return [...prev, { id: tabId, label: fileName, filePath }];
     });
     setActiveFileTabId(tabId);
-    setRightPanelOpen(filePreviewDetached ? false : true);
-  }, [filePreviewDetached]);
+    if (!filePreviewDetached && !rightPanelPinned) {
+      setRightPanelView("preview");
+      setRightPanelOpen(true);
+    }
+  }, [filePreviewDetached, rightPanelPinned]);
 
   const handleOpenWebLink = useCallback((url: string, label?: string) => {
     const tabId = `web:${url}`;
@@ -1144,8 +1190,11 @@ export function AppShell() {
       }];
     });
     setActiveFileTabId(tabId);
-    setRightPanelOpen(filePreviewDetached ? false : true);
-  }, [filePreviewDetached]);
+    if (!filePreviewDetached && !rightPanelPinned) {
+      setRightPanelView("preview");
+      setRightPanelOpen(true);
+    }
+  }, [filePreviewDetached, rightPanelPinned]);
 
   useEffect(() => {
     const handleAiOutputLinkClick = (event: MouseEvent) => {
@@ -1216,7 +1265,7 @@ export function AppShell() {
   const handleCloseFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
-      if (next.length === 0) setRightPanelOpen(false);
+      if (next.length === 0) setRightPanelView("explorer");
       return next;
     });
     setActiveFileTabId((cur) => {
@@ -1238,7 +1287,7 @@ export function AppShell() {
       return nextFileTabs.length > 0 ? nextFileTabs[nextFileTabs.length - 1].id : null;
     });
 
-    if (nextFileTabs.length === 0) setRightPanelOpen(false);
+    if (nextFileTabs.length === 0) setRightPanelView("explorer");
   }, [fileTabs]);
 
   const currentFilePreviewState = useMemo<FilePreviewState>(() => ({
@@ -1265,6 +1314,7 @@ export function AppShell() {
 
   const restoreEmbeddedFilePreview = useCallback(() => {
     setFilePreviewDetached(false);
+    setRightPanelView("preview");
     if (filePreviewStateRef.current.tabs.length > 0) {
       setRightPanelOpen(true);
     }
@@ -1301,7 +1351,7 @@ export function AppShell() {
     if (message.type === "close") {
       setFileTabs((prev) => {
         const next = prev.filter((tab) => tab.id !== message.tabId);
-        if (next.length === 0) setRightPanelOpen(false);
+        if (next.length === 0) setRightPanelView("explorer");
         setActiveFileTabId((cur) => {
           if (cur !== message.tabId) return cur;
           return next.length > 0 ? next[next.length - 1].id : null;
@@ -1314,7 +1364,7 @@ export function AppShell() {
       const ids = new Set(message.tabIds);
       setFileTabs((prev) => {
         const next = prev.filter((tab) => !ids.has(tab.id));
-        if (next.length === 0) setRightPanelOpen(false);
+        if (next.length === 0) setRightPanelView("explorer");
         setActiveFileTabId((cur) => {
           if (cur && !ids.has(cur)) return cur;
           return next.length > 0 ? next[next.length - 1].id : null;
@@ -1374,7 +1424,7 @@ export function AppShell() {
     }
 
     setFilePreviewDetached(true);
-    setRightPanelOpen(false);
+    setRightPanelView("explorer");
 
     const url = new URL("/file-preview", window.location.href).toString();
     const postStateSoon = () => {
@@ -1386,8 +1436,22 @@ export function AppShell() {
       }, 150);
     };
 
+    const openBrowserPreview = () => {
+      const opened = window.open(url, FILE_PREVIEW_WINDOW_LABEL, "width=900,height=700");
+      if (!opened) {
+        restoreEmbeddedFilePreview();
+      } else {
+        filePreviewPopupRef.current = opened;
+        postStateSoon();
+      }
+    };
+    if (!window.__TAURI_INTERNALS__) {
+      openBrowserPreview();
+      return;
+    }
+
     void import("@tauri-apps/api/webviewWindow")
-      .then(({ WebviewWindow }) => {
+      .then(async ({ WebviewWindow }) => {
         const previewWindow = new WebviewWindow(FILE_PREVIEW_WINDOW_LABEL, {
           url,
           title: "文件预览",
@@ -1396,64 +1460,19 @@ export function AppShell() {
           minWidth: 520,
           minHeight: 360,
         });
-        previewWindow.once("tauri://created", postStateSoon);
-        previewWindow.once("tauri://destroyed", restoreEmbeddedFilePreview);
-        previewWindow.once("tauri://error", () => {
-          const opened = window.open(url, FILE_PREVIEW_WINDOW_LABEL, "width=900,height=700");
-          if (!opened) {
-            restoreEmbeddedFilePreview();
-          } else {
-            filePreviewPopupRef.current = opened;
-            postStateSoon();
-          }
-        });
+        await Promise.all([
+          previewWindow.once("tauri://created", postStateSoon),
+          previewWindow.once("tauri://destroyed", restoreEmbeddedFilePreview),
+          previewWindow.once("tauri://error", openBrowserPreview),
+        ]);
       })
-      .catch(() => {
-        const opened = window.open(url, FILE_PREVIEW_WINDOW_LABEL, "width=900,height=700");
-        if (!opened) {
-          restoreEmbeddedFilePreview();
-        } else {
-          filePreviewPopupRef.current = opened;
-          postStateSoon();
-        }
-      });
+      .catch(openBrowserPreview);
   }, [fileTabs.length, restoreEmbeddedFilePreview]);
 
   const hasVisibleChatSlots = visibleChatSlotIds.some((id) => id !== null);
   // Show chat area only when a session tab is assigned to a visible chat slot.
   const hasSessionTabs = sessionTabs.length > 0;
   const showChat = hasSessionTabs && hasVisibleChatSlots;
-  const topActionBarAutoCollapse = occupiedChatSlotCount > 1;
-  const topActionBarExpanded = !topActionBarAutoCollapse || topActionBarHovered || settingsMenuOpen;
-
-  const clearTopActionBarHoverTimer = useCallback(() => {
-    if (topActionBarHoverTimerRef.current) {
-      clearTimeout(topActionBarHoverTimerRef.current);
-      topActionBarHoverTimerRef.current = null;
-    }
-  }, []);
-
-  const scheduleTopActionBarHover = useCallback((hovered: boolean) => {
-    clearTopActionBarHoverTimer();
-    if (!topActionBarAutoCollapse) {
-      setTopActionBarHovered(false);
-      return;
-    }
-    if (hovered) {
-      setTopActionBarHovered(true);
-    } else {
-      topActionBarHoverTimerRef.current = setTimeout(() => {
-        setTopActionBarHovered(false);
-        topActionBarHoverTimerRef.current = null;
-      }, 500);
-    }
-  }, [clearTopActionBarHoverTimer, topActionBarAutoCollapse]);
-
-  useEffect(() => {
-    if (!topActionBarAutoCollapse) setTopActionBarHovered(false);
-    return clearTopActionBarHoverTimer;
-  }, [clearTopActionBarHoverTimer, topActionBarAutoCollapse]);
-
   // Show watermark only when absolutely nothing is open (no tabs, no session, no new-session cwd)
   const showWatermark = !showChat && !hasSessionTabs;
   // While restoring initial session from URL, don't show the placeholder
@@ -1533,9 +1552,7 @@ export function AppShell() {
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? null}
         onCwdChange={handleCwdChange}
-        onOpenFile={handleOpenFile}
         explorerRefreshKey={explorerRefreshKey}
-        onAtMention={handleAtMention}
         onProjectsChange={handleProjectsChange}
         onRefreshRunningSessions={loadRunningSessions}
       />
@@ -1671,7 +1688,16 @@ export function AppShell() {
         {chatWindowLimitNotice}
       </div>
     )}
+    <div className="app-header-reveal" data-visible={headerVisible} onFocusCapture={(event) => setHeaderFocused(event.target.matches(":focus-visible"))} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setHeaderFocused(false); }}>
     {needsWindowControls && <WindowControls />}
+    <div
+      className="app-header-actions"
+      style={needsWindowControls ? { left: 76, top: 6 } : undefined}
+      data-tauri-drag-region="false"
+      role="group"
+      aria-label="应用工具栏"
+      onClick={(event) => event.stopPropagation()}
+    >
     <button
       data-tauri-drag-region="false"
       onClick={() => setSidebarMode((mode) => mode === "open" ? "closed" : "open")}
@@ -1679,10 +1705,6 @@ export function AppShell() {
       aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
       aria-pressed={sidebarOpen}
       style={{
-        position: "fixed",
-        left: 76,
-        top: -1,
-        zIndex: 700,
         width: 28,
         height: 28,
         display: "flex",
@@ -1705,131 +1727,11 @@ export function AppShell() {
         e.currentTarget.style.color = "var(--text-muted)";
       }}
     >
-      {sidebarOpen ? (
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
-        </svg>
-      ) : (
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-        </svg>
-      )}
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M5 3h4v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" fill="currentColor" fillOpacity="0.18" stroke="none" />
+        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
+      </svg>
     </button>
-    <div
-      onPointerDownCapture={handleWindowDragPointerDown}
-      style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}
-    >
-      {/* Mobile overlay backdrop */}
-      <div
-        className="sidebar-overlay-backdrop"
-        style={{
-          position: "fixed",
-          inset: 0,
-          zIndex: 199,
-          background: "rgba(0,0,0,0.4)",
-          opacity: 0,
-          pointerEvents: "none",
-          transition: "opacity 0.25s ease",
-        }}
-      />
-
-      {/* Left sidebar */}
-      <div
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}`}
-        style={{
-          width: sidebarOpen ? sidebarWidth : 0,
-          minWidth: sidebarOpen ? SIDEBAR_MIN : 0,
-          background: "var(--bg-panel)",
-          borderRight: "1px solid var(--border)",
-          display: "flex",
-          flexDirection: "column",
-          flexShrink: 0,
-          zIndex: 200,
-          transition: isResizing ? "none" : undefined,
-        }}
-      >
-        {sidebarContent}
-      </div>
-
-      {/* Resize handle */}
-      {sidebarMode === "open" && (
-        <div
-          data-no-window-drag
-          onPointerDown={handleResizeStart}
-          style={{
-            width: 5,
-            cursor: "col-resize",
-            touchAction: "none",
-            flexShrink: 0,
-            background: isResizing ? "var(--accent)" : "transparent",
-            transition: isResizing ? "none" : "background 0.15s",
-            zIndex: 201,
-            marginLeft: -2,
-            marginRight: -2,
-          }}
-          onMouseEnter={(e) => { if (!isResizing) e.currentTarget.style.background = "var(--border)"; }}
-          onMouseLeave={(e) => { if (!isResizing) e.currentTarget.style.background = "transparent"; }}
-        />
-      )}
-
-      {/* Center: chat */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-        {/* Chat content */}
-        <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {/* Top-right action buttons */}
-          <div
-            data-tauri-drag-region="false"
-            onClick={(event) => event.stopPropagation()}
-            onMouseEnter={() => scheduleTopActionBarHover(true)}
-            onMouseLeave={() => scheduleTopActionBarHover(false)}
-            style={{
-              position: "absolute",
-              top: topActionBarAutoCollapse ? 42 : 8,
-              right: 8,
-              zIndex: 60,
-              display: "flex",
-              alignItems: "center",
-              gap: 2,
-              background: "color-mix(in srgb, var(--bg-panel) 85%, transparent)",
-              backdropFilter: "blur(8px)",
-              WebkitBackdropFilter: "blur(8px)",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              padding: 2,
-              boxShadow: topActionBarAutoCollapse && !topActionBarExpanded ? "0 8px 22px rgba(0,0,0,0.12)" : "none",
-              transform: topActionBarAutoCollapse && !topActionBarExpanded ? "translateX(calc(100% - 30px))" : "translateX(0)",
-              transition: "transform 0.18s ease, box-shadow 0.18s ease",
-            }}
-          >
-            {topActionBarAutoCollapse && (
-              <div
-                aria-hidden="true"
-                style={{
-                  width: 26,
-                  height: 30,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "var(--text-muted)",
-                  flexShrink: 0,
-                  pointerEvents: "none",
-                }}
-              >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  style={{ transform: topActionBarExpanded ? "rotate(180deg)" : "none", transition: "transform 0.18s ease" }}
-                >
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-              </div>
-            )}
             {([
               {
                 label: topNewSessionCwd ? `在 ${topNewSessionCwd} 中新建会话` : "新建会话",
@@ -1837,9 +1739,9 @@ export function AppShell() {
                 disabled: !canCreateTopSession,
                 active: false,
                 icon: (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                    <line x1="12" y1="5" x2="12" y2="19" />
-                    <line x1="5" y1="12" x2="19" y2="12" />
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <line x1="12" y1="3" x2="12" y2="21" />
+                    <line x1="3" y1="12" x2="21" y2="12" />
                   </svg>
                 ),
               },
@@ -1852,9 +1754,11 @@ export function AppShell() {
                 disabled: false,
                 active: settingsMenuOpen,
                 icon: (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <g transform="translate(2.1818 2.1818) scale(0.81818)">
                     <circle cx="12" cy="12" r="3" />
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                    </g>
                   </svg>
                 ),
               },
@@ -1867,45 +1771,47 @@ export function AppShell() {
                 disabled: false,
                 active: isDark,
                 icon: isDark ? (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <g transform="translate(2.1818 2.1818) scale(0.81818)">
                     <circle cx="12" cy="12" r="5" />
                     <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
                     <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
                     <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
                     <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                    </g>
                   </svg>
                 ) : (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
                   </svg>
                 ),
               },
               {
-                label: filePreviewDetached ? "收回文件面板" : rightPanelOpen ? "隐藏文件面板" : "显示文件面板",
-                onClick: filePreviewDetached ? handleReturnFilePreview : () => setRightPanelOpen((v) => !v),
+                label: rightPanelOpen ? "隐藏右侧扩展栏" : "显示资源管理器与预览",
+                onClick: () => setRightPanelOpen((v) => !v),
                 disabled: false,
-                active: rightPanelOpen || filePreviewDetached,
-                icon: filePreviewDetached ? (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" /><path d="M10 8 6 12l4 4" /><path d="M6 12h7" />
-                  </svg>
-                ) : (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
+                active: rightPanelOpen,
+                icon: (
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <g transform="translate(24 0) scale(-1 1)">
+                      <path d="M5 3h4v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" fill="currentColor" fillOpacity="0.18" stroke="none" />
+                      <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
+                    </g>
                   </svg>
                 ),
               },
             ] as { label: string; onClick: (event: MouseEventType<HTMLButtonElement>) => void; disabled: boolean; active: boolean; icon: ReactNode }[]).map(({ label, onClick, disabled, active, icon }, index) => (
               <button
-                key={`chat-action-${index}`}
+                key={`header-action-${index}`}
+                type="button"
                 onClick={onClick}
                 disabled={disabled}
                 title={label}
                 aria-label={label}
                 aria-pressed={active}
                 style={{
-                  width: 30,
-                  height: 30,
+                  width: 28,
+                  height: 28,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -1924,22 +1830,23 @@ export function AppShell() {
                 {icon}
               </button>
             ))}
-          </div>
-          {/* Settings dropdown for chat area */}
+
+    </div>
+    </div>
           {settingsMenuOpen && (
             <div
               role="menu"
               style={{
-                position: "absolute",
-                top: 46,
-                right: 8,
+                position: "fixed",
+                top: 39,
+                left: `min(${needsWindowControls ? 136 : 142}px, calc(100vw - 248px))`,
                 width: 240,
                 padding: 6,
                 background: "var(--bg-panel)",
                 border: "1px solid var(--border)",
                 borderRadius: 10,
                 boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
-                zIndex: 100,
+                zIndex: 710,
               }}
               onClick={(e) => e.stopPropagation()}
             >
@@ -2005,6 +1912,7 @@ export function AppShell() {
               </button>
               <div style={{ height: 1, margin: "4px 5px", background: "var(--border)" }} />
               {([
+                { label: "分享窗口", disabled: false, onClick: () => { setSettingsMenuOpen(false); setShareManagerOpen(true); } },
                 { label: "扩展总览", disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd, onClick: () => { setSettingsMenuOpen(false); setExtensionsConfigOpen(true); } },
                 { label: "微信 Bot", disabled: false, onClick: () => { setSettingsMenuOpen(false); setWechatConfigOpen(true); } },
               ] as { label: string; disabled?: boolean; onClick: () => void }[]).map((item) => (
@@ -2033,6 +1941,68 @@ export function AppShell() {
               ))}
             </div>
           )}
+
+    <div
+      onPointerDownCapture={handleWindowDragPointerDown}
+      style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}
+    >
+      {/* Mobile overlay backdrop */}
+      <div
+        className="sidebar-overlay-backdrop"
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 199,
+          background: "rgba(0,0,0,0.4)",
+          opacity: 0,
+          pointerEvents: "none",
+          transition: "opacity 0.25s ease",
+        }}
+      />
+
+      {/* Left sidebar */}
+      <div
+        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}`}
+        style={{
+          width: sidebarOpen ? sidebarWidth : 0,
+          minWidth: sidebarOpen ? SIDEBAR_MIN : 0,
+          background: "var(--bg-panel)",
+          borderRight: "1px solid var(--border)",
+          display: "flex",
+          flexDirection: "column",
+          flexShrink: 0,
+          zIndex: 200,
+          transition: isResizing ? "none" : undefined,
+        }}
+      >
+        {sidebarContent}
+      </div>
+
+      {/* Resize handle */}
+      {sidebarMode === "open" && (
+        <div
+          data-no-window-drag
+          onPointerDown={handleResizeStart}
+          style={{
+            width: 5,
+            cursor: "col-resize",
+            touchAction: "none",
+            flexShrink: 0,
+            background: isResizing ? "var(--accent)" : "transparent",
+            transition: isResizing ? "none" : "background 0.15s",
+            zIndex: 201,
+            marginLeft: -2,
+            marginRight: -2,
+          }}
+          onMouseEnter={(e) => { if (!isResizing) e.currentTarget.style.background = "var(--border)"; }}
+          onMouseLeave={(e) => { if (!isResizing) e.currentTarget.style.background = "transparent"; }}
+        />
+      )}
+
+      {/* Center: chat */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+        {/* Chat content */}
+        <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
           {/* Watermark when no session tabs */}
           {!hasSessionTabs && (
             <div
@@ -2242,8 +2212,10 @@ export function AppShell() {
                 modelsRefreshKey={modelsRefreshKey}
                 chatInputRef={chatInputRef}
                 onOpenFile={handleOpenFile}
-                onAtMention={handleAtMention}
-                explorerRefreshKey={explorerRefreshKey}
+                onOpenExplorer={() => {
+                  setRightPanelView("explorer");
+                  setRightPanelOpen(true);
+                }}
                 onOpenRoleConfig={() => setQuickConfigOpen("role")}
                 projectOptions={headerProjectOptions}
                 onNewSessionCwdChange={handleNewSessionProjectChange}
@@ -2277,9 +2249,10 @@ export function AppShell() {
       </div>
 
       {/* Right panel resize handle */}
-      {rightPanelOpen && !filePreviewDetached && (
+      {rightPanelOpen && (
         <div
           data-no-window-drag
+          className="right-panel-resize-handle"
           onPointerDown={handleRightPanelResizeStart}
           style={{
             width: 5,
@@ -2297,30 +2270,67 @@ export function AppShell() {
         />
       )}
 
-      {/* Right panel: file viewer — width via inline style, CSS class for mobile */}
+      {/* Right workspace: explorer and preview share the same resizable panel. */}
       <div
-        className={`right-panel-container${rightPanelOpen && !filePreviewDetached ? " right-panel-open" : " right-panel-closed"}`}
+        inert={!rightPanelOpen}
+        aria-label="右侧扩展栏"
+        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
         style={{
           display: "flex",
           flexDirection: "column",
           borderLeft: "1px solid var(--border)",
           background: "var(--bg)",
-          width: rightPanelOpen && !filePreviewDetached ? rightPanelWidth : 0,
-          minWidth: rightPanelOpen && !filePreviewDetached ? RIGHT_PANEL_MIN : 0,
+          width: rightPanelOpen ? rightPanelWidth : 0,
+          minWidth: rightPanelOpen ? RIGHT_PANEL_MIN : 0,
           transition: isResizingRightPanel ? "none" : undefined,
         }}
       >
-        <FilePreviewPanel
-          tabs={fileTabs}
-          activeTabId={activeFileTabId}
-          cwd={effectiveProjectCwd}
-          viewerCwd={activeCwd}
-          onSelectTab={handleSelectFileTab}
-          onCloseTab={handleCloseFileTab}
-          onCloseTabs={handleCloseFileTabs}
-          onOpenFile={handleOpenFile}
-          onDetach={handleDetachFilePreview}
-        />
+        <div className="workspace-panel-toolbar" role="group" aria-label="右侧扩展栏视图">
+          {(["explorer", "preview"] as const).map((view) => (
+            <button key={view} type="button" aria-pressed={rightPanelView === view} onClick={() => setRightPanelView(view)}>
+              {view === "explorer" ? "资源管理器" : "预览"}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="workspace-panel-pin"
+            aria-label={rightPanelPinned ? "取消固定右栏视图" : "固定右栏视图"}
+            aria-pressed={rightPanelPinned}
+            title={rightPanelPinned ? "已固定：打开文件不会自动切换视图，点击取消固定" : "固定当前视图，打开文件时不自动跳转预览"}
+            onClick={() => {
+              const next = !rightPanelPinned;
+              setRightPanelPinned(next);
+              try { window.localStorage.setItem("deerhux.right-panel-pinned", String(next)); } catch { /* Keep the toggle usable when storage is unavailable. */ }
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M16 3 21 8l-4 1-3 5v4l-8-8h4l5-3 1-4Z" />
+              <path d="m9 15-6 6" />
+            </svg>
+          </button>
+        </div>
+        <div className="workspace-panel-body" style={{ display: rightPanelView === "explorer" ? "flex" : "none" }}>
+          {rightPanelOpen && (focusedExplorerCwd ? (
+            <WorkspaceExplorer key={focusedExplorerCwd} cwd={focusedExplorerCwd} refreshKey={explorerRefreshKey} onOpenFile={handleOpenFile} onAtMention={handleAtMention} />
+          ) : <div className="workspace-panel-empty">选择项目后浏览文件</div>)}
+        </div>
+        <div className="workspace-panel-body" style={{ display: rightPanelView === "preview" ? "flex" : "none" }}>
+          {filePreviewDetached ? (
+            <div className="workspace-panel-empty">预览已在独立窗口打开<button type="button" onClick={handleReturnFilePreview}>收回预览</button></div>
+          ) : (
+            <FilePreviewPanel
+              tabs={fileTabs}
+              activeTabId={activeFileTabId}
+              cwd={effectiveProjectCwd}
+              viewerCwd={activeCwd}
+              onSelectTab={handleSelectFileTab}
+              onCloseTab={handleCloseFileTab}
+              onCloseTabs={handleCloseFileTabs}
+              onOpenFile={handleOpenFile}
+              onDetach={handleDetachFilePreview}
+            />
+          )}
+        </div>
       </div>
     </div>
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} onSaved={() => setModelsRefreshKey((k) => k + 1)} />}
@@ -2336,6 +2346,7 @@ export function AppShell() {
     {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} projects={projectOptions} />}
     {quickConfigOpen === "memory" && <MemoryConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
     {quickConfigOpen === "mcp" && <McpConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
+    <ShareManager open={shareManagerOpen} onClose={() => setShareManagerOpen(false)} projects={projectOptions} />
     {wechatConfigOpen && <WeChatConfig onClose={() => setWechatConfigOpen(false)} />}
     </>
   );

@@ -1,5 +1,6 @@
 "use client";
 
+import { WindowWeChatButton } from "./WindowWeChatButton";
 import { useChatSelectAll } from "@/hooks/useChatSelectAll";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, AssistantMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
@@ -50,13 +51,14 @@ interface Props {
   newSessionCwd: string | null;
   compact?: boolean;
   onAgentEnd?: (sessionId: string, changedFiles?: string[]) => void;
-  onSessionCreated?: (session: SessionInfo) => void;
+  onSessionCreated?: (session: SessionInfo, running?: boolean) => void;
   onSessionStarted?: (session: SessionInfo | null) => void;
   onAgentRunningChange?: (sessionId: string | null | undefined, running: boolean) => void;
   /** 会话级运行态：布局重排/窗口重挂载期间用于维持流式 UI。 */
   isSessionRunning?: boolean;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
+  wechatHeaderTargetId?: string;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
@@ -618,7 +620,7 @@ function Typewriter({ phrases, paused = false }: { phrases: string[]; paused?: b
   );
 }
 
-export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", simpleWaitingIndicator = false, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
+export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", simpleWaitingIndicator = false, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, wechatHeaderTargetId, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
@@ -1401,11 +1403,12 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     scrollToLiveBottom("auto");
   }, [isRunning, messages, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom]);
 
-  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !isRunning;
+  // 微信绑定会预先创建空 Session；欢迎布局取决于消息和运行状态，而非 Session 是否存在。
+  const isEmptyConversation = messages.length === 0 && !streamState.isStreaming && !isRunning;
   const contentMaxWidth = compact ? 640 : 820;
   const contentSidePadding = 16;
   const messagePaddingClass = compact ? "px-3" : "px-4";
-  const canSwitchEmptyProject = isEmptyNew && Boolean(onNewSessionCwdChange) && selectableProjectOptions.length > 1;
+  const canSwitchEmptyProject = isNew && isEmptyConversation && Boolean(onNewSessionCwdChange) && selectableProjectOptions.length > 1;
   const currentProjectLabel = currentCwd
     ? selectableProjectOptions.find((project) => project.cwd === currentCwd)?.displayName ?? getProjectDisplayName(currentCwd)
     : "";
@@ -1642,6 +1645,30 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     <div
       className="chat-window-wrap relative flex h-full flex-col overflow-hidden"
     >
+      <WindowWeChatButton
+        headerTargetId={wechatHeaderTargetId}
+        key={activeTabId ?? "window"}
+        sessionId={session?.id}
+        project={currentProjectLabel || currentCwd || "默认项目"}
+        role={roles.find((role) => role.id === currentRoleId)?.name || "默认角色"}
+        ensureSession={async () => {
+          if (session?.id) return session.id;
+          if (!currentCwd) throw new Error("请先选择当前窗口的项目");
+          const response = await fetch("/api/agent/new", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              cwd: currentCwd, type: "get_state", roleId: currentRoleId, agentMode,
+              ...(displayModelValue ? { provider: displayModelValue.provider, modelId: displayModelValue.modelId } : {}),
+              ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+            }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || "创建窗口会话失败");
+          onSessionCreated?.({ id: result.sessionId, path: "", cwd: currentCwd,
+            created: new Date().toISOString(), modified: new Date().toISOString(), messageCount: 0, firstMessage: "" }, false);
+          return result.sessionId;
+        }}
+      />
       <CompactionConfirmModal
         open={Boolean(compactionDialog) || ((isCompacting || Boolean(compactionProgress)) && Boolean(session?.id))}
         reason={compactionDialog?.reason ?? "manual"}
@@ -1656,13 +1683,13 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         onAbort={() => { void handleAbortCompaction(); }}
         onSkipSend={compactionDialog?.reason === "threshold" ? skipCompactionAndSend : undefined}
       />
-      {isEmptyNew ? (
+      {isEmptyConversation ? (
         <div className={`flex flex-1 flex-col items-center justify-center overflow-y-auto ${compact ? "px-3 py-5" : "px-4 py-8"}`}>
           {currentCwd && currentProjectLabel && (
             <div
               style={{
                 position: "absolute",
-                top: compact ? 10 : 18,
+                top: compact ? 8 : 12,
                 left: compact ? 10 : 16,
                 zIndex: 4,
                 maxWidth: compact ? "calc(100% - 20px)" : "calc(100% - 32px)",

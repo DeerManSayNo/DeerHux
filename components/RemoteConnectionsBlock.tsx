@@ -64,7 +64,12 @@ export function RemoteConnectionsBlock({ selectedSessionId, onSelectSession }: P
     }
   }, []);
 
-  useEffect(() => { void fetchData(); }, [fetchData]);
+  useEffect(() => {
+    const refresh = () => { void fetchData(); };
+    refresh();
+    window.addEventListener("deerhux.wechat-binding-updated", refresh);
+    return () => window.removeEventListener("deerhux.wechat-binding-updated", refresh);
+  }, [fetchData]);
 
   useEffect(() => {
     if (!open) return;
@@ -200,7 +205,7 @@ export function RemoteConnectionsBlock({ selectedSessionId, onSelectSession }: P
                     微信 · {shortId(connection.userId)}
                   </div>
                   <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {statusText(connection)} · {connection.session ? (connection.session.name || connection.session.firstMessage || connection.sessionId.slice(0, 8)) : "Session 未落盘"}
+                    {statusText(connection)} · {connection.session ? (connection.session.name || connection.session.firstMessage || connection.sessionId.slice(0, 8)) : connection.sessionId ? "Session 未落盘" : "尚未绑定窗口"}
                   </div>
                 </span>
               </button>

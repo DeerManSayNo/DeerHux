@@ -5,8 +5,8 @@ import { useEffect, useState } from "react";
 // Windows/Linux 主窗口为无边框窗口（src-tauri/src/lib.rs 中 decorations(false)），
 // 在左上角自绘仿 macOS 红绿灯窗口控制按钮。macOS 使用原生红绿灯、file-preview 等
 // 子窗口保留系统装饰，均不渲染本组件。水平落位与 macOS 端 traffic_light_position 的
-// x=14 一致；垂直与「收起侧边栏」按钮（top -1 + 高 28/2 = 中心 13）对齐，
-// 左侧边栏 header 的 34px 顶部 padding 覆盖该区域的让位空间。
+// x=14 一致；圆点顶部也留 14px，中心为 20；自绘平台工具栏 top=6px，28px 点击区中心同为 20。
+// 左侧边栏 header 的 33px 顶部 padding 为该组按钮让位。
 
 const MAIN_WINDOW_LABEL = "main";
 
@@ -43,7 +43,7 @@ export function useNeedsWindowControls(): boolean {
 const BUTTON_SIZE = 12;
 const BUTTON_GAP = 8;
 const TRAFFIC_LIGHT_LEFT = 14;
-const TRAFFIC_LIGHT_TOP = 7;
+const TRAFFIC_LIGHT_TOP = 14;
 
 const DOT_COLORS = {
   close: { idle: "#ff5f57", hover: "#e0443d" },

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { getLocalStorageItem } from "@/lib/client-storage";
+import { type ExplorerProjectState, EMPTY_EXPLORER_PROJECT_STATE, sanitizeExplorerProjectState, areExplorerProjectStatesEqual, readFileExplorerState, writeFileExplorerState } from "@/lib/file-explorer-state";
 import { FileExplorer } from "./FileExplorer";
 
 interface Props {
@@ -11,57 +11,6 @@ interface Props {
   onAtMention?: (relativePath: string) => void;
   refreshKey?: number;
   variant?: "floating" | "header";
-}
-
-interface ExplorerProjectState {
-  expandedPaths: string[];
-  activePath: string | null;
-}
-
-const FILE_EXPLORER_STATE_STORAGE_KEY = "deerhux.file-explorer-state";
-const EMPTY_EXPLORER_PROJECT_STATE: ExplorerProjectState = { expandedPaths: [], activePath: null };
-
-function sanitizeExplorerProjectState(value: unknown): ExplorerProjectState {
-  if (!value || typeof value !== "object") return EMPTY_EXPLORER_PROJECT_STATE;
-  const state = value as Partial<ExplorerProjectState>;
-  return {
-    expandedPaths: Array.isArray(state.expandedPaths)
-      ? [...new Set(state.expandedPaths.filter((path): path is string => typeof path === "string" && path.length > 0))]
-      : [],
-    activePath: typeof state.activePath === "string" && state.activePath.length > 0 ? state.activePath : null,
-  };
-}
-
-function areExplorerProjectStatesEqual(a: ExplorerProjectState, b: ExplorerProjectState): boolean {
-  if (a.activePath !== b.activePath || a.expandedPaths.length !== b.expandedPaths.length) return false;
-  return a.expandedPaths.every((path, index) => path === b.expandedPaths[index]);
-}
-
-function readFileExplorerState(cwd: string): ExplorerProjectState {
-  if (typeof window === "undefined") return EMPTY_EXPLORER_PROJECT_STATE;
-  try {
-    const parsedValue = JSON.parse(getLocalStorageItem(FILE_EXPLORER_STATE_STORAGE_KEY) ?? "{}") as unknown;
-    const parsed = parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)
-      ? parsedValue as Record<string, unknown>
-      : {};
-    return sanitizeExplorerProjectState(parsed[cwd]);
-  } catch {
-    return EMPTY_EXPLORER_PROJECT_STATE;
-  }
-}
-
-function writeFileExplorerState(cwd: string, state: ExplorerProjectState) {
-  if (typeof window === "undefined") return;
-  try {
-    const parsedValue = JSON.parse(getLocalStorageItem(FILE_EXPLORER_STATE_STORAGE_KEY) ?? "{}") as unknown;
-    const parsed = parsedValue && typeof parsedValue === "object" && !Array.isArray(parsedValue)
-      ? parsedValue as Record<string, unknown>
-      : {};
-    parsed[cwd] = { ...state, updatedAt: Date.now() };
-    window.localStorage.setItem(FILE_EXPLORER_STATE_STORAGE_KEY, JSON.stringify(parsed));
-  } catch {
-    // ignore quota / private mode errors
-  }
 }
 
 export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKey, variant = "floating" }: Props) {

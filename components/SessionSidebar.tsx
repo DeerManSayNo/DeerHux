@@ -6,11 +6,8 @@ import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties }
 import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
 import type { ProjectMeta } from "@/lib/project-meta";
-import { FileExplorer } from "./FileExplorer";
-import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
-import { ShareManager } from "./ShareManager";
 import { readCachedJson, writeCachedJson } from "@/lib/client-resilience";
-import { getProjectDisplayName } from "@/lib/project-name";
+import { getProjectDisplayName, getSidebarProjectCwd } from "@/lib/project-name";
 import { publishVisibleProjects } from "@/lib/visible-projects";
 import { ProjectBranch } from "./ProjectBranch";
 
@@ -41,9 +38,7 @@ interface Props {
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null) => void;
-  onOpenFile?: (filePath: string, fileName: string) => void;
   explorerRefreshKey?: number;
-  onAtMention?: (relativePath: string) => void;
   compact?: boolean;
   onProjectsChange?: (projects: { cwd: string; displayName: string }[]) => void;
   onRefreshRunningSessions?: () => void | Promise<void>;
@@ -212,13 +207,15 @@ function persistProjectMeta(meta: ProjectMeta) {
 }
 
 /** Group projects by cwd and sort by their newest message/session activity. */
-function buildProjectGroups(sessions: SessionInfo[]): ProjectGroup[] {
+function buildProjectGroups(sessions: SessionInfo[], defaultCwd: string | null): ProjectGroup[] {
   const byCwd = new Map<string, SessionInfo[]>();
   for (const s of sessions) {
     if (!s.cwd) continue;
-    const list = byCwd.get(s.cwd) ?? [];
+    const cwd = getSidebarProjectCwd(s.cwd, defaultCwd);
+    if (!cwd) continue;
+    const list = byCwd.get(cwd) ?? [];
     list.push(s);
-    byCwd.set(s.cwd, list);
+    byCwd.set(cwd, list);
   }
 
   return [...byCwd.entries()]
@@ -227,12 +224,6 @@ function buildProjectGroups(sessions: SessionInfo[]): ProjectGroup[] {
       return { cwd, sessions: sorted, latestModified: sorted[0]?.modified ?? "" };
     })
     .sort((a, b) => b.latestModified.localeCompare(a.latestModified));
-}
-
-function isScheduledTasksCwd(cwd: string): boolean {
-  const normalized = cwd.replace(/[\\/]+$/, "");
-  return /[\\/]\.deerhux[\\/]agent[\\/]scheduled-tasks$/.test(normalized)
-    || /[\\/]\.deerhux[\\/]agent[\\/]wechat[\\/]remote-cwd$/.test(normalized);
 }
 
 function getInitial(text: string | null | undefined): string {
@@ -290,7 +281,7 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, optimisticSessions, onOptimisticSessionResolved, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, optimisticSessions, onOptimisticSessionResolved, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, explorerRefreshKey, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
   const scrollbarHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (scrollbarHideTimerRef.current) clearTimeout(scrollbarHideTimerRef.current);
@@ -316,8 +307,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [showAllProjects, setShowAllProjects] = useState(false);
   const [showAllCwds, setShowAllCwds] = useState<Set<string>>(new Set());
   const autoExpandedRef = useRef(false);
-  const [explorerOpen, setExplorerOpen] = useState(false);
-  const [explorerKey, setExplorerKey] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -339,30 +328,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     return () => { cancelled = true; };
   }, []);
 
-  const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
-  const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [projectsRefreshDone, setProjectsRefreshDone] = useState(false);
   const [branchRefreshKey, setBranchRefreshKey] = useState(0);
   const projectsRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
-  const splitterRef = useRef<HTMLDivElement>(null);
-  const splitPercentRef = useRef(50);
-  const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
-  const [isHoveringSplitter, setIsHoveringSplitter] = useState(false);
-  const [splitPercent, setSplitPercent] = useState(() => {
-    if (typeof window === "undefined") return 50;
-    try {
-      const stored = getLocalStorageItem("deerhux.sidebar-split-percent");
-      if (stored) {
-        const n = Number(stored);
-        if (n >= 10 && n <= 90) return n;
-      }
-    } catch { /* ignore */ }
-    return 50;
-  });
-
-  useEffect(() => { splitPercentRef.current = splitPercent; }, [splitPercent]);
 
   useEffect(() => {
     const cached = readCachedJson<SessionInfo[]>("deerhux.control-plane.sessions.v1");
@@ -507,48 +477,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     loadAbortControllerRef.current?.abort();
   }, []);
 
-  const handleSplitterMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startPercent = splitPercentRef.current;
-    const sidebarEl = sidebarRef.current;
-    const headerEl = headerRef.current;
-    if (!sidebarEl) return;
-    const sidebarHeight = sidebarEl.offsetHeight;
-    const headerHeight = headerEl?.offsetHeight ?? 0;
-    const availableHeight = sidebarHeight - headerHeight;
-    if (availableHeight <= 0) return;
-
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
-    setIsDraggingSplitter(true);
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const deltaY = e.clientY - startY;
-      const deltaPercent = (deltaY / availableHeight) * 100;
-      const newPercent = Math.max(10, Math.min(90, startPercent + deltaPercent));
-      setSplitPercent(newPercent);
-    };
-
-    const handleMouseUp = () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      setIsDraggingSplitter(false);
-      try {
-        localStorage.setItem("deerhux.sidebar-split-percent", String(splitPercentRef.current));
-      } catch { /* ignore */ }
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  }, []);
-
-  useEffect(() => {
-    if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
-  }, [explorerRefreshKey]);
-
   const restoredRef = useRef(false);
 
   useEffect(() => {
@@ -639,14 +567,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
 
     if (selectedCwd === null) {
-      const projects = buildProjectGroups(displayedSessions);
+      const projects = buildProjectGroups(displayedSessions, defaultCwd);
       if (projects.length > 0) {
         setSelectedCwd(projects[0].cwd);
       } else {
         handleDefaultCwd();
       }
     }
-  }, [loading, displayedSessions, selectedCwd, initialSessionId, onSelectSession, onInitialRestoreDone, handleDefaultCwd]);
+  }, [loading, displayedSessions, selectedCwd, initialSessionId, onSelectSession, onInitialRestoreDone, handleDefaultCwd, defaultCwd]);
 
   const handleCustomPath = useCallback(async () => {
     const selected = await open({
@@ -669,7 +597,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [updateProjectMeta]);
 
   const handleNewSession = useCallback(async () => {
-    const recentCwd = buildProjectGroups(displayedSessions)[0]?.cwd;
+    const recentCwd = buildProjectGroups(displayedSessions, defaultCwd)[0]?.cwd;
     const cwd = selectedCwdProp ?? selectedCwd ?? recentCwd ?? await ensureDefaultCwd();
     if (!cwd) return;
     // Generate a temporary UUID client-side — no backend call needed.
@@ -678,13 +606,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     onNewSession?.(tempId, cwd);
-  }, [selectedCwdProp, selectedCwd, displayedSessions, ensureDefaultCwd, onNewSession]);
+  }, [selectedCwdProp, selectedCwd, displayedSessions, ensureDefaultCwd, onNewSession, defaultCwd]);
 
-  const sessionProjects = useMemo(() => buildProjectGroups(displayedSessions), [displayedSessions]);
+  const sessionProjects = useMemo(() => buildProjectGroups(displayedSessions, defaultCwd), [displayedSessions, defaultCwd]);
   const allProjects = useMemo(() => {
     const byCwd = new Map<string, ProjectGroup>();
     for (const project of sessionProjects) byCwd.set(project.cwd, project);
-    for (const cwd of projectMeta.customCwds) {
+    for (const storedCwd of projectMeta.customCwds) {
+      const cwd = getSidebarProjectCwd(storedCwd, defaultCwd);
+      if (!cwd) continue;
       if (!byCwd.has(cwd)) byCwd.set(cwd, { cwd, sessions: [], latestModified: "" });
     }
     if (defaultCwd && !byCwd.has(defaultCwd)) {
@@ -695,7 +625,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       .filter((project) => project.cwd === defaultCwd || !projectMeta.hiddenCwds.includes(project.cwd))
       .map((project) => ({
         ...project,
-        displayName: isScheduledTasksCwd(project.cwd) ? "定时任务" : project.cwd === defaultCwd ? "默认" : project.displayName,
+        displayName: project.cwd === defaultCwd ? "默认" : project.displayName,
         note: projectMeta.notes[project.cwd]?.trim() || undefined,
         pinned: projectMeta.pinnedCwds.includes(project.cwd),
       }))
@@ -730,7 +660,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       })
       .filter((project) => project !== null) as ProjectGroup[];
   }, [allProjects, normalizedSearchQuery]);
-  const activeSelectedCwd = selectedCwdProp ?? selectedCwd;
+  const activeSelectedCwd = getSidebarProjectCwd(selectedCwdProp ?? selectedCwd ?? "", defaultCwd);
   const recentSessions = useMemo(() => {
     if (normalizedSearchQuery) return [];
     return [...displayedSessions]
@@ -836,7 +766,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const handlePurgeProjectSessions = useCallback((cwd: string) => {
     if (cwd === defaultCwd) return;
-    const displayName = isScheduledTasksCwd(cwd) ? "定时任务" : getProjectDisplayName(cwd);
+    const displayName = getProjectDisplayName(cwd);
     setConfirmPurge({ cwd, displayName });
   }, [defaultCwd]);
 
@@ -952,7 +882,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   useEffect(() => {
     return () => {
-      if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
       if (projectsRefreshTimerRef.current) clearTimeout(projectsRefreshTimerRef.current);
     };
   }, []);
@@ -963,7 +892,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       <div
         ref={headerRef}
         style={{
-          padding: compact ? "8px 6px" : "34px 8px 8px",
+          padding: compact ? "8px 6px" : "33px 8px 0",
           flexShrink: 0,
         }}
       >
@@ -1161,7 +1090,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           scrollbarHideTimerRef.current = null;
           delete event.currentTarget.dataset.scrolling;
         }}
-        style={{ flex: compact ? "1 1 auto" : explorerOpen && activeSelectedCwd ? `${splitPercent} 1 0` : "1 1 auto", overflowY: "auto", padding: compact ? "6px 0" : "8px 0 12px", minHeight: 80 }}
+        style={{ flex: "1 1 auto", overflowY: "auto", padding: compact ? "6px 0" : "0 0 12px", minHeight: 80 }}
       >
         {indexRebuilding && allSessions.length > 0 && !compact && (
           <div style={{ padding: "6px 14px", background: "rgba(250, 204, 21, 0.08)", color: "#b45309", fontSize: 11, borderBottom: "1px solid rgba(250, 204, 21, 0.2)" }}>
@@ -1485,123 +1414,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         </div>
       )}
 
-      {!compact && <ShareManager />}
 
-      {/* RemoteConnectionsBlock */}
-      {!compact && (
-        <RemoteConnectionsBlock
-          selectedSessionId={selectedSessionId}
-          onSelectSession={onSelectSession}
-        />
-      )}
-
-      {/* Draggable splitter handle */}
-      {explorerOpen && !compact && (selectedCwdProp || selectedCwd) && (
-        <div
-          ref={splitterRef}
-          onMouseDown={handleSplitterMouseDown}
-          style={{
-            height: 6,
-            flexShrink: 0,
-            cursor: 'row-resize',
-            borderTop: `1px solid ${isDraggingSplitter || isHoveringSplitter ? 'var(--text-muted)' : 'transparent'}`,
-            background: 'var(--bg-subtle)',
-            transition: isDraggingSplitter ? 'none' : 'border-color 0.15s',
-          }}
-          onMouseEnter={() => setIsHoveringSplitter(true)}
-          onMouseLeave={() => setIsHoveringSplitter(false)}
-        />
-      )}
-
-
-
-      {/* File Explorer section */}
-      {!compact && (selectedCwdProp || selectedCwd) && (
-        <div
-          style={{
-            background: "var(--bg-subtle)",
-            display: "flex",
-            flexDirection: "column",
-            flex: explorerOpen ? `${100 - splitPercent} 1 0` : "0 0 auto",
-            minHeight: 0,
-            overflow: "hidden",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", flexShrink: 0, paddingTop: 2 }}>
-            <button
-              onClick={() => setExplorerOpen((v) => !v)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                flex: 1,
-                padding: "6px 10px",
-                background: "none",
-                border: "none",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: "0.05em",
-                textTransform: "uppercase",
-                textAlign: "left",
-              }}
-            >
-              <svg
-                width="9" height="9" viewBox="0 0 10 10" fill="none"
-                stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-                style={{ transform: explorerOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}
-              >
-                <polyline points="3 2 7 5 3 8" />
-              </svg>
-              资源管理器
-            </button>
-            <button
-              onClick={() => {
-                setExplorerKey((k) => k + 1);
-                setExplorerRefreshDone(true);
-                if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
-                explorerRefreshTimerRef.current = setTimeout(() => setExplorerRefreshDone(false), 2000);
-              }}
-              title="刷新资源管理器"
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 26, height: 26, padding: 0, marginRight: 6,
-                background: explorerRefreshDone ? "rgba(74,222,128,0.18)" : "none",
-                border: "none",
-                color: explorerRefreshDone ? "#4ade80" : "var(--text-dim)",
-                cursor: "pointer",
-                borderRadius: 5,
-                flexShrink: 0,
-                transition: "color 0.3s, background 0.3s",
-              }}
-              onMouseEnter={(e) => { if (explorerRefreshDone) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-              onMouseLeave={(e) => { if (explorerRefreshDone) return; e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-            >
-              {explorerRefreshDone ? (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                  <path d="M3 3v5h5" />
-                </svg>
-              )}
-            </button>
-          </div>
-          {explorerOpen && (
-            <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-              <FileExplorer
-                cwd={selectedCwdProp ?? selectedCwd!}
-                onOpenFile={onOpenFile ?? (() => {})}
-                refreshKey={explorerKey}
-                onAtMention={onAtMention}
-              />
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

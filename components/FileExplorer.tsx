@@ -114,6 +114,11 @@ function TreeNode({
     prevLoadedRef.current = loaded;
   });
 
+  // Restored expanded directories must load their children without another click.
+  useEffect(() => {
+    if (open && !loaded) void loadChildren();
+  }, [open, loaded, loadChildren]);
+
   // Re-fetch children when refreshKey changes and the directory is already open/loaded
   useEffect(() => {
     if (open && loaded) {

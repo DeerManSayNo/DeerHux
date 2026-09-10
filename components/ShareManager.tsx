@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import styles from "./sharing/sharing.module.css";
 import { CopyField, ShareIcon, ShareNotice, expiryLabel } from "./sharing/ShareUI";
@@ -15,8 +15,7 @@ async function api(url: string, init?: RequestInit) {
   return data;
 }
 
-export function ShareManager() {
-  const [open, setOpen] = useState(false);
+export function ShareManager({ open, onClose, projects }: { open: boolean; onClose: () => void; projects: { cwd: string; displayName: string }[] }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const [projectQuery, setProjectQuery] = useState("");
@@ -26,8 +25,8 @@ export function ShareManager() {
     else dialog.current?.close();
   }, [open]);
   const [name, setName] = useState("我的分享窗口");
-  const [projects, setProjects] = useState<string[]>([]);
-  const [chosenProjects, setChosenProjects] = useState<string[]>([]);
+  const [selectedProjectCwds, setChosenProjects] = useState<string[]>([]);
+  const chosenProjects = useMemo(() => selectedProjectCwds.filter(cwd => projects.some(project => project.cwd === cwd)), [selectedProjectCwds, projects]);
   const [models, setModels] = useState<Model[]>([]);
   const [chosenModels, setChosenModels] = useState<string[]>([]);
   const [roles, setRoles] = useState<{ id: string; name: string }[]>([]);
@@ -52,15 +51,21 @@ export function ShareManager() {
     return () => { alive = false; };
   }, [chosenProjects, open]);
 
-  async function load() {
-    setOpen(true); setBusy(true); setError("");
-    try {
-      const [sessions, modelData, shareData] = await Promise.all([api("/api/sessions"), api("/api/models"), api("/api/shares")]);
-      setProjects([...new Set<string>((sessions.sessions ?? []).map((s: { cwd: string }) => s.cwd).filter(Boolean))]);
-      setModels(modelData.modelList ?? []); setShares(shareData.shares ?? []);
-    } catch (err) { setError(err instanceof Error ? err.message : "加载失败"); }
-    finally { setBusy(false); }
-  }
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    async function load() {
+      setBusy(true); setError("");
+      try {
+        const [modelData, shareData] = await Promise.all([api("/api/models"), api("/api/shares")]);
+        if (!alive) return;
+        setModels(modelData.modelList ?? []); setShares(shareData.shares ?? []);
+      } catch (err) { if (alive) setError(err instanceof Error ? err.message : "加载失败"); }
+      finally { if (alive) setBusy(false); }
+    }
+    void load();
+    return () => { alive = false; };
+  }, [open]);
 
   async function create() {
     setBusy(true); setError(""); setResult(null);
@@ -88,14 +93,15 @@ export function ShareManager() {
     finally { setBusy(false); }
   }
 
+  const query = projectQuery.trim().toLowerCase();
+  const filteredProjects = projects.filter(project => [project.displayName, project.cwd].some(value => value.toLowerCase().includes(query)));
   const valid = !!name.trim() && chosenProjects.length > 0 && chosenModels.length > 0 && chosenRoles.length > 0 && (hours === null || (hours >= 1 && hours <= 168));
   return <>
-    <button onClick={() => void load()} className={styles.launcher}><ShareIcon name="share" size={16} /><span>分享窗口</span><ShareIcon name="plus" size={14} /></button>
-    <dialog ref={dialog} className={`${styles.scope} ${styles.dialog}`} aria-label="分享窗口" onCancel={() => setOpen(false)} onClose={() => setOpen(false)} onClick={e => { if (e.target === e.currentTarget) setOpen(false); }}>
+    <dialog ref={dialog} className={`${styles.scope} ${styles.dialog}`} aria-label="分享窗口" onCancel={() => onClose()} onClose={() => onClose()} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <section className={styles.modalShell}>
         <header className={styles.modalHeader}>
           <div className={styles.modalHeading}><span className={styles.brandMark}><ShareIcon name="share" /></span><div><h2>分享窗口</h2><p className={styles.muted}>邀请他人，在你设定的范围内协作</p></div></div>
-          <button type="button" className={styles.iconButton} aria-label="关闭分享窗口" onClick={() => setOpen(false)}><ShareIcon name="close" /></button>
+          <button type="button" className={styles.iconButton} aria-label="关闭分享窗口" onClick={() => onClose()}><ShareIcon name="close" /></button>
         </header>
         <div className={styles.tabs} role="tablist" aria-label="分享管理" onKeyDown={event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? "create" : event.key === "End" ? "manage" : tab === "create" ? "manage" : "create"; setTab(next); dialog.current?.querySelector<HTMLButtonElement>(`#share-tab-${next}`)?.focus(); } }}>
           <button id="share-tab-create" role="tab" aria-controls="share-panel" tabIndex={tab === "create" ? 0 : -1} aria-selected={tab === "create"} className={styles.tab} onClick={() => setTab("create")}>创建分享</button>
@@ -115,9 +121,9 @@ export function ShareManager() {
               <section className={styles.section} aria-label="选择项目">
                 <div className={styles.sectionTitle}><h3><ShareIcon name="folder" size={16} />项目</h3><span className={styles.selectionCount}>已选 {chosenProjects.length}</span></div>
                 <input type="search" aria-label="搜索项目" className={styles.input} placeholder="搜索项目名称或路径" value={projectQuery} onChange={event => setProjectQuery(event.target.value)} />
-                <div className={styles.choiceList}>{projects.length === 0 && <p className={styles.emptySmall}>{busy ? "正在加载项目…" : "先在主人端打开项目并创建会话"}</p>}
-                  {projects.filter(p => p.toLowerCase().includes(projectQuery.toLowerCase())).map(p => <label key={p} className={styles.choice}><input type="checkbox" checked={chosenProjects.includes(p)} onChange={() => setChosenProjects(toggle(chosenProjects, p))} /><span className={styles.choiceText}><strong>{p.split(/[\\/]/).filter(Boolean).pop() ?? p}</strong><small title={p}>{p}</small></span></label>)}
-                  {projects.length > 0 && !projects.some(p => p.toLowerCase().includes(projectQuery.toLowerCase())) && <p className={styles.emptySmall}>没有匹配的项目，试试其他关键词</p>}
+                <div className={styles.choiceList}>{projects.length === 0 && <p className={styles.emptySmall}>{busy ? "正在加载项目…" : "请先在左侧添加项目"}</p>}
+                  {filteredProjects.map(project => <label key={project.cwd} className={styles.choice}><input type="checkbox" checked={chosenProjects.includes(project.cwd)} onChange={() => setChosenProjects(toggle(chosenProjects, project.cwd))} /><span className={styles.choiceText}><strong>{project.displayName}</strong><small title={project.cwd}>{project.cwd}</small></span></label>)}
+                  {projects.length > 0 && filteredProjects.length === 0 && <p className={styles.emptySmall}>没有匹配的项目，试试其他关键词</p>}
                 </div>
               </section>
               <section className={styles.section} aria-label="选择模型">

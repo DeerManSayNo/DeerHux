@@ -1,29 +1,14 @@
 import { NextResponse } from "next/server";
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
-import { getAgentDir, listAllSessions } from "@/lib/session-reader";
+import { listAllSessions } from "@/lib/session-reader";
 import { readSessionIndex } from "@/lib/session/session-index";
 import type { SessionInfo } from "@/lib/types";
-import { getWeChatBotService } from "@/lib/wechat-bot";
-
-function readWechatUserSessions(): Record<string, string> {
-  const file = join(getAgentDir(), "wechat", "user-sessions.json");
-  if (!existsSync(file)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf-8")) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === "string")) as Record<string, string>
-      : {};
-  } catch {
-    return {};
-  }
-}
+import { getWeChatBotService, WeChatBindingError } from "@/lib/wechat-bot";
 
 export async function GET() {
   try {
-    const userSessions = readWechatUserSessions();
+    const userSessions = getWeChatBotService().getConnections();
     const wechatStatus = getWeChatBotService().getStatus();
-    const boundSessionIds = new Set(Object.values(userSessions));
+    const boundSessionIds = new Set(Object.values(userSessions).filter(Boolean));
     const sessionById = new Map<string, SessionInfo>();
     // This endpoint is requested on every app launch, even without bindings.
     // Reuse the sidebar index instead of parsing all historical JSONL files.
@@ -58,5 +43,30 @@ export async function GET() {
   } catch (error) {
     console.error("[api/remote-connections] error:", error);
     return NextResponse.json({ error: "Internal server error", connections: [] }, { status: 500 });
+  }
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json();
+    if (!body || !["bind", "unbind"].includes(body.action)
+      || typeof body.userId !== "string" || !body.userId.trim()
+      || typeof body.sessionId !== "string" || !body.sessionId.trim()
+      || (body.action === "bind" && typeof body.expectedSessionId !== "string")) {
+      return NextResponse.json({ error: "无效的微信绑定参数" }, { status: 400 });
+    }
+    const bot = getWeChatBotService();
+    if (body.action === "bind") await bot.bindSession(body.userId, body.sessionId, body.expectedSessionId);
+    else bot.unbindSession(body.userId, body.sessionId);
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    if (error instanceof WeChatBindingError) return NextResponse.json({ error: error.message }, { status: error.status });
+    // 进程级单例的错误可能由另一个 Next 路由包内的类实例抛出。
+    if (error instanceof Error && error.name === "WeChatBindingError" && "status" in error && typeof error.status === "number") {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    if (error instanceof SyntaxError) return NextResponse.json({ error: "无效的 JSON" }, { status: 400 });
+    console.error("[api/remote-connections] mutation failed:", error);
+    return NextResponse.json({ error: "更新微信绑定失败" }, { status: 500 });
   }
 }

@@ -810,7 +810,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setPendingPastes((count) => count + 1);
     setImageUploadError(null);
     try {
-      const paths = await clipboardFilePaths(uriList, desktop);
+      const paths = await clipboardFilePaths(uriList, desktop).catch((error: unknown) => {
+        // Native path lookup is optional when the clipboard already contains
+        // image bytes (for example a screenshot or a copied browser image).
+        if (files.some((file) => file.type.startsWith("image/"))) return [];
+        throw error;
+      });
       if (generation !== pasteGenerationRef.current) return;
       if (paths.length) {
         addFileReferences(paths);

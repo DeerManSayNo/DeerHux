@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { QuickSessionDrawer } from "./QuickSessionDrawer";
 import { useTheme } from "@/hooks/useTheme";
-import { getProjectDisplayName } from "@/lib/project-name";
+import { getProjectDisplayName, getSidebarProjectCwd } from "@/lib/project-name";
 import type { ProjectMeta } from "@/lib/project-meta";
 import type { SessionInfo } from "@/lib/types";
 import { readVisibleProjects, subscribeVisibleProjects } from "@/lib/visible-projects";
@@ -16,12 +16,6 @@ import {
 
 type ProjectOption = { cwd: string; displayName: string };
 
-function isScheduledTasksCwd(cwd: string): boolean {
-  const normalized = cwd.replace(/[\\/]+$/, "");
-  return /[\\/]\.deerhux[\\/]agent[\\/]scheduled-tasks$/.test(normalized)
-    || /[\\/]\.deerhux[\\/]agent[\\/]wechat[\\/]remote-cwd$/.test(normalized);
-}
-
 function buildSidebarProjects(
   sessions: SessionInfo[],
   meta: Pick<ProjectMeta, "customCwds" | "hiddenCwds" | "pinnedCwds">,
@@ -30,10 +24,14 @@ function buildSidebarProjects(
   const latestByCwd = new Map<string, string>();
   for (const session of sessions) {
     if (!session.cwd || session.isSubagent) continue;
-    const latest = latestByCwd.get(session.cwd) ?? "";
-    if (session.modified > latest) latestByCwd.set(session.cwd, session.modified);
+    const cwd = getSidebarProjectCwd(session.cwd, defaultCwd);
+    if (!cwd) continue;
+    const latest = latestByCwd.get(cwd) ?? "";
+    if (session.modified > latest) latestByCwd.set(cwd, session.modified);
   }
-  for (const cwd of meta.customCwds) {
+  for (const storedCwd of meta.customCwds) {
+    const cwd = getSidebarProjectCwd(storedCwd, defaultCwd);
+    if (!cwd) continue;
     if (!latestByCwd.has(cwd)) latestByCwd.set(cwd, "");
   }
   if (defaultCwd && !latestByCwd.has(defaultCwd)) latestByCwd.set(defaultCwd, "");
@@ -50,11 +48,7 @@ function buildSidebarProjects(
     .slice(0, 5)
     .map(([cwd]) => ({
       cwd,
-      displayName: isScheduledTasksCwd(cwd)
-        ? "定时任务"
-        : cwd === defaultCwd
-          ? "默认"
-          : getProjectDisplayName(cwd),
+      displayName: cwd === defaultCwd ? "默认" : getProjectDisplayName(cwd),
     }));
 }
 

@@ -9,8 +9,13 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
+import { WeChatTypingIndicators } from "./wechat-typing";
+import { randomUUID } from "node:crypto";
+import { getAgentEventStore } from "./agent-runtime/event-store";
+import { WeChatSessionMirror, WECHAT_MESSAGE_PREFIX, type WeChatToolProgress } from "./wechat-session-mirror";
 import { getAgentDir, resolveSessionPath } from "./session-reader";
 import { startRpcSession, getRpcSession, type AgentSessionWrapper } from "./rpc-manager";
+import { ensureRpcSession } from "./agent-runtime/session-service";
 
 // ============================================================================
 // 配置
@@ -67,6 +72,11 @@ export interface WeChatStatus {
   loginStatus?: "wait" | "scaned" | "confirmed" | "expired" | "error";
   loginError?: string;
   activeUserCount?: number;
+  lastError?: string;
+  lastPollAt?: string;
+  lastReceivedAt?: string;
+  lastRepliedAt?: string;
+  desktopSyncEnabled?: boolean;
 }
 
 /** iLink 入站消息 */
@@ -226,21 +236,15 @@ function clearContextTokens(): void {
 class ILlinkApiClient {
   private token: string;
   private baseUrl: string;
-  private botId: string;
-  private typingTicket: string | null = null;
+  private typingTickets = new Map<string, string>();
 
-  constructor(token: string, baseUrl: string, botId = "") {
+  constructor(token: string, baseUrl: string, _botId = "") {
     this.token = token;
     this.baseUrl = baseUrl || ILINK_BASE_URL;
-    this.botId = botId;
   }
 
   setToken(token: string): void {
     this.token = token;
-  }
-
-  setBotId(botId: string): void {
-    this.botId = botId;
   }
 
   /** 获取二维码 */
@@ -297,16 +301,19 @@ class ILlinkApiClient {
   }
 
   /** 获取 typing ticket，用于向微信展示“正在输入中” */
-  private async getTypingTicket(): Promise<string> {
-    if (this.typingTicket) return this.typingTicket;
+  private async getTypingTicket(toUserId: string): Promise<string> {
+    const cached = this.typingTickets.get(toUserId);
+    if (cached) return cached;
 
     const body = JSON.stringify({
+      ilink_user_id: toUserId,
       base_info: { channel_version: CHANNEL_VERSION },
     });
     const resp = await fetch(`${this.baseUrl}/ilink/bot/getconfig`, {
       method: "POST",
       headers: buildHeaders(this.token),
       body,
+      signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
       const errorBody = await resp.text().catch(() => "");
@@ -318,13 +325,13 @@ class ILlinkApiClient {
       throw new Error(`获取 typing_ticket 失败: ret=${result.ret} errcode=${result.errcode} errmsg=${result.errmsg ?? ""}`);
     }
 
-    this.typingTicket = result.typing_ticket;
+    this.typingTickets.set(toUserId, result.typing_ticket);
     return result.typing_ticket;
   }
 
   /** 发送“正在输入中”状态：1=开始，2=结束 */
   async sendTyping(toUserId: string, status: 1 | 2): Promise<void> {
-    const typingTicket = await this.getTypingTicket();
+    const typingTicket = await this.getTypingTicket(toUserId);
     const body = JSON.stringify({
       ilink_user_id: toUserId,
       typing_ticket: typingTicket,
@@ -336,6 +343,7 @@ class ILlinkApiClient {
       method: "POST",
       headers: buildHeaders(this.token),
       body,
+      signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
       const errorBody = await resp.text().catch(() => "");
@@ -344,9 +352,17 @@ class ILlinkApiClient {
 
     const result = await resp.json() as { ret?: number; errcode?: number; errmsg?: string };
     if (result.ret !== 0 && result.ret !== undefined) {
-      if (status === 1) this.typingTicket = null;
+      if (status === 1) this.typingTickets.delete(toUserId);
       throw new Error(`发送 typing 状态失败: ret=${result.ret} errcode=${result.errcode} errmsg=${result.errmsg ?? ""}`);
     }
+  }
+
+  async sendProgress(toUserId: string, progress: WeChatToolProgress, contextToken: string, runId: string): Promise<void> {
+    // 原生 type 11/12 在部分微信客户端不可见，使用普通文本保证进度可见。
+    const label = !progress.status ? "正在执行" : progress.status === "completed" ? "执行完成" : progress.status === "failed" ? "执行失败" : "执行已结束（结果未确认）";
+    await this.sendItem(toUserId, {
+      type: 1, text_item: { text: `【工具进度】${label}：${progress.toolName}` },
+    }, contextToken, runId);
   }
 
   /** 发送文本消息 */
@@ -355,16 +371,21 @@ class ILlinkApiClient {
     text: string,
     contextToken: string,
   ): Promise<{ ret: number; errcode?: number; errmsg?: string }> {
+    return this.sendItem(toUserId, { type: 1, text_item: { text } }, contextToken);
+  }
+
+  private async sendItem(toUserId: string, item: object, contextToken: string, runId?: string): Promise<{ ret: number; errcode?: number; errmsg?: string }> {
     const clientId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     const body = JSON.stringify({
       msg: {
-        from_user_id: this.botId,
+        from_user_id: "",
         to_user_id: toUserId,
         client_id: clientId,
         message_type: 2, // BOT
         message_state: 2, // FINISH
         context_token: contextToken,
-        item_list: [{ type: 1, text_item: { text } }],
+        item_list: [item],
+        ...(runId ? { run_id: runId } : {}),
       },
       base_info: { channel_version: CHANNEL_VERSION },
     });
@@ -373,12 +394,20 @@ class ILlinkApiClient {
       method: "POST",
       headers: buildHeaders(this.token),
       body,
+      signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
       const errorBody = await resp.text().catch(() => "");
       throw new Error(`发送消息失败: ${resp.status}${errorBody ? ` - ${errorBody.slice(0, 200)}` : ""}`);
     }
-    const result = await resp.json() as { ret: number; errcode?: number; errmsg?: string };
+    const responseText = await resp.text();
+    let result: { ret: number; errcode?: number; errmsg?: string };
+    try {
+      result = JSON.parse(responseText);
+      if (!result || typeof result !== "object") throw new Error("invalid response");
+    } catch {
+      throw new Error(`发送消息失败：HTTP ${resp.status}，${responseText.trim() ? "响应不是有效 JSON" : "响应为空"}`);
+    }
     if (result.ret !== 0 && result.ret !== undefined) {
       throw new Error(`发送消息失败: ret=${result.ret} errcode=${result.errcode} errmsg=${result.errmsg ?? ""}`);
     }
@@ -393,9 +422,11 @@ class ILlinkApiClient {
 function collectAgentReply(
   session: AgentSessionWrapper,
   timeoutMs = 300_000,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve) => {
     let textBlocks: string[] = [];
+    let modelError: string | undefined;
     let resolved = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -403,6 +434,7 @@ function collectAgentReply(
       const msg = event.message as Record<string, unknown> | undefined;
       if (msg?.role !== "assistant" || !Array.isArray(msg.content)) return;
 
+      if (typeof msg.errorMessage === "string") modelError = msg.errorMessage;
       // DeerHux 的 message_update 通常携带 assistant 消息快照，而不是纯 delta。
       // 因此这里保留“最新快照”，不要每次 push 累加，否则手机端回复会和 session 落盘内容不同步。
       textBlocks = (msg.content as Array<Record<string, unknown>>)
@@ -415,6 +447,7 @@ function collectAgentReply(
       resolved = true;
       if (timer) clearTimeout(timer);
       unsub();
+      signal?.removeEventListener("abort", cancel);
       resolve(text);
     };
 
@@ -428,7 +461,7 @@ function collectAgentReply(
       // agent 回合结束：使用最后一次 assistant 快照，确保和 DeerHux session 中展示的最终文本一致。
       if (event.type === "agent_end") {
         const text = textBlocks.join("").trim();
-        finish(text || "（未生成文本回复）");
+        finish(text || (modelError ? `（模型请求失败：${modelError}）` : "（未生成文本回复）"));
       }
 
       // 自动重试结束但未成功
@@ -437,6 +470,9 @@ function collectAgentReply(
       }
     });
 
+    const cancel = () => finish("");
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) { cancel(); return; }
     timer = setTimeout(() => {
       const text = textBlocks.join("").trim();
       finish(text || "（Agent 回复超时）");
@@ -462,17 +498,12 @@ async function getOrCreateUserSession(
     // 不能直接新建 session，否则同一个微信用户第二次对话会丢上下文，且前端打开的旧会话无法实时同步。
     const existingPath = await resolveSessionPath(existingId);
     if (existingPath) {
-      const { realSessionId } = await startRpcSession(existingId, existingPath, cwd);
-      if (realSessionId !== existingId) {
-        userSessions[fromUserId] = realSessionId;
-        saveUserSessions(userSessions);
-      }
-      return { sessionId: realSessionId, isNew: false };
+      const session = await ensureRpcSession(existingId);
+      return { sessionId: session.sessionId, isNew: false };
     }
 
-    // 映射指向的 session 文件不存在/已删除，清掉脏映射后再新建。
-    delete userSessions[fromUserId];
-    saveUserSessions(userSessions);
+    // 绑定已失效时拒绝静默创建，避免用户以为仍在原项目里工作。
+    throw new Error("绑定的会话已删除，请在 DeerHux 窗口重新接入微信");
   }
 
   // 创建新 session
@@ -489,10 +520,22 @@ async function getOrCreateUserSession(
 // WeChatBotService 单例
 // ============================================================================
 
+export class WeChatBindingError extends Error {
+  constructor(message: string, public readonly status: number) { super(message); this.name = "WeChatBindingError"; }
+}
+
 export class WeChatBotService {
   private api: ILlinkApiClient | null = null;
   private creds: WeChatCredentials | null = null;
   private polling = false;
+  private lastError: string | undefined;
+  private lastPollAt: string | undefined;
+  private lastReceivedAt: string | undefined;
+  private lastRepliedAt: string | undefined;
+  private syncError: string | undefined;
+  private mirror: WeChatSessionMirror | undefined;
+  private unsubscribeMirror: (() => void) | undefined;
+  private outboundQueues = new Map<string, Promise<void>>();
   private abortController: AbortController | null = null;
 
   /** 当前正在处理的用户消息（防止同一 session 并发 prompt） */
@@ -607,38 +650,18 @@ export class WeChatBotService {
     return tokens[this.getContextTokenKey(fromUserId)];
   }
 
-  private startTypingIndicator(fromUserId: string): () => Promise<void> {
-    let stopped = false;
-    let inFlight = false;
+  private typingIndicators: WeChatTypingIndicators | undefined;
 
-    const sendStart = async () => {
-      if (!this.api || stopped || inFlight) return;
-      inFlight = true;
-      try {
-        await this.api.sendTyping(fromUserId, 1);
-      } catch (err) {
-        console.warn("[WeChatBot] 发送正在输入状态失败:", err);
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    void sendStart();
-    const interval = setInterval(() => {
-      void sendStart();
-    }, 15_000);
-
-    return async () => {
-      if (stopped) return;
-      stopped = true;
-      clearInterval(interval);
-      if (!this.api) return;
-      try {
-        await this.api.sendTyping(fromUserId, 2);
-      } catch (err) {
-        console.warn("[WeChatBot] 关闭正在输入状态失败:", err);
-      }
-    };
+  private startTypingIndicator(fromUserId: string): () => void {
+    if (!this.api) return () => {};
+    if (!this.typingIndicators) {
+      const api = this.api;
+      this.typingIndicators = new WeChatTypingIndicators(
+        (userId, status) => api.sendTyping(userId, status),
+        (error) => console.warn("[WeChatBot] 输入状态更新失败:", error),
+      );
+    }
+    return this.typingIndicators.acquire(fromUserId);
   }
 
   /** 开始消息轮询 */
@@ -648,8 +671,37 @@ export class WeChatBotService {
     }
 
     if (this.polling) return;
+    const api = this.api;
 
+    this.lastError = undefined;
     this.polling = true;
+    this.mirror = new WeChatSessionMirror({
+      recipients: (sessionId) => this.polling && this.creds
+        ? Object.entries(loadUserSessions()).filter(([, id]) => id === sessionId).map(([userId]) => userId)
+        : [],
+      beginTyping: (userId) => this.startTypingIndicator(userId),
+      send: async (userId, text, sessionId) => {
+        const mirror = this.mirror;
+        await this.sendReply({ from_user_id: userId, context_token: "" }, text,
+          () => this.polling && this.mirror === mirror && loadUserSessions()[userId] === sessionId);
+        this.lastRepliedAt = new Date().toISOString();
+        this.syncError = undefined;
+      },
+      sendProgress: async (userId, progress, sessionId, runId) => {
+        const mirror = this.mirror;
+        await this.enqueueOutbound(userId, async () => {
+          if (!this.polling || this.mirror !== mirror || loadUserSessions()[userId] !== sessionId) return;
+          const token = this.getCachedContextToken(userId);
+          if (!token) throw new Error("缺少 context_token，无法发送工具进度");
+          await api.sendProgress(userId, progress, token, runId);
+        });
+      },
+      onError: (error) => {
+        this.syncError = `微信同步失败：${error instanceof Error ? error.message : String(error)}`;
+        console.error("[WeChatBot] 桌面会话同步失败:", error);
+      },
+    });
+    this.unsubscribeMirror = getAgentEventStore().subscribeAll(this.mirror.handle);
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
 
@@ -660,16 +712,27 @@ export class WeChatBotService {
 
     while (this.polling && !signal.aborted) {
       try {
-        const resp = await this.api.getUpdates(syncBuf, 35000);
+        const resp = await api.getUpdates(syncBuf, 35000);
+        // 停止或重启后，旧请求返回不得处理消息或清除新登录凭证。
+        if (signal.aborted || this.abortController?.signal !== signal) break;
 
+        this.lastPollAt = new Date().toISOString();
         // Session 过期
         if (resp.errcode === -14) {
           console.log("[WeChatBot] Session 过期，需要重新登录");
-          this.polling = false;
+          this.stopPolling();
+          this.creds = null;
+          this.api = null;
+          this.lastError = "微信登录已过期，请重新扫码连接";
           clearCredentials();
           clearContextTokens();
           return;
         }
+
+        if ((resp.ret !== undefined && resp.ret !== 0) || (resp.errcode !== undefined && resp.errcode !== 0)) {
+          throw new Error(`微信收信失败（${resp.errcode ?? resp.ret}）`);
+        }
+        this.lastError = undefined;
 
         // 更新游标
         if (resp.get_updates_buf) {
@@ -693,6 +756,7 @@ export class WeChatBotService {
           }
 
           const fromUserId = msg.from_user_id;
+          this.lastReceivedAt = new Date().toISOString();
           this.rememberContextToken(fromUserId, msg.context_token);
           console.log(`[WeChatBot] 收到消息 from=${fromUserId}: ${text.slice(0, 50)}...`);
 
@@ -717,6 +781,7 @@ export class WeChatBotService {
         if (!this.polling || signal.aborted) break;
 
         const msg = err instanceof Error ? err.message : String(err);
+        this.lastError = msg;
         console.error("[WeChatBot] 轮询出错:", msg);
 
         // 短暂等待后重试
@@ -729,7 +794,13 @@ export class WeChatBotService {
 
   /** 停止轮询 */
   stopPolling(): void {
+    this.unsubscribeMirror?.();
+    this.unsubscribeMirror = undefined;
+    this.mirror?.stop();
+    this.mirror = undefined;
     this.polling = false;
+    this.typingIndicators?.stop();
+    this.typingIndicators = undefined;
     this.abortController?.abort();
     this.abortController = null;
   }
@@ -757,11 +828,13 @@ export class WeChatBotService {
     this.processingUsers.add(fromUserId);
 
     let currentMsg: WeixinMessage | null = null;
-    let stopTyping: (() => Promise<void>) | null = null;
+    let stopTyping: (() => void) | null = null;
 
     try {
       const { message: msg, text } = queue.shift()!;
       currentMsg = msg;
+      // 收到消息开始处理就显示状态，覆盖冷启动和等待桌面回合的阶段。
+      stopTyping = this.startTypingIndicator(msg.from_user_id);
 
       // 获取或创建用户的 Agent session
       const { sessionId, isNew } = await getOrCreateUserSession(fromUserId, this.defaultCwd);
@@ -776,33 +849,41 @@ export class WeChatBotService {
         console.log(`[WeChatBot] 为新用户 ${fromUserId} 创建 session: ${sessionId}`);
       }
 
+      // 等待桌面端当前回合结束，随后同步订阅并提交，避免收集到上一轮回复。
+      const waitUntil = Date.now() + 10 * 60_000;
+      while (session.getStatus().isRunning || session.getStatus().isStreaming || session.getStatus().isCompacting) {
+        if (Date.now() >= waitUntil || !session.isAlive()) throw new Error("窗口持续忙碌，请稍后重试");
+        await sleep(250);
+      }
+
       console.log(`[WeChatBot] 发送到 Agent: "${text.slice(0, 50)}..."`);
-      stopTyping = this.startTypingIndicator(msg.from_user_id);
 
       // 先订阅事件，再发送 prompt，避免 Agent 很快开始输出时漏掉开头事件。
-      const replyPromise = collectAgentReply(session);
-      await session.send({ type: "prompt", message: text });
-
-      const reply = await replyPromise;
+      const replyController = new AbortController();
+      const replyPromise = collectAgentReply(session, 300_000, replyController.signal);
+      let reply: string;
+      try {
+        await session.send({ type: "prompt", message: text, clientMessageId: `${WECHAT_MESSAGE_PREFIX}${msg.msg_id || randomUUID()}` });
+        reply = await replyPromise;
+      } finally {
+        replyController.abort();
+      }
       console.log(`[WeChatBot] Agent 回复: "${reply.slice(0, 50)}..."`);
 
+      // 等待本轮工具进度发送完毕，避免最终回答越过进度消息。
+      await this.mirror?.drainUser(fromUserId);
       // 发送回复到微信
-      await stopTyping();
-      stopTyping = null;
       await this.sendReply(msg, reply);
+      this.lastRepliedAt = new Date().toISOString();
     } catch (err) {
       console.error(`[WeChatBot] 处理消息失败:`, err);
-      if (stopTyping) {
-        await stopTyping();
-        stopTyping = null;
-      }
       if (currentMsg) {
         try {
           await this.sendReply(currentMsg, "（处理消息时出错，请重试）");
         } catch { /* ignore */ }
       }
     } finally {
-      if (stopTyping) await stopTyping();
+      stopTyping?.();
       this.processingUsers.delete(fromUserId);
       // 继续处理队列中的下一条
       setTimeout(() => this.processNextMessage(fromUserId), 500);
@@ -810,8 +891,22 @@ export class WeChatBotService {
   }
 
   /** 通过 iLink API 发送回复 */
-  private async sendReply(msg: WeixinMessage, reply: string): Promise<void> {
-    if (!this.api) return;
+  private async sendReply(msg: Pick<WeixinMessage, "from_user_id" | "context_token">, reply: string, shouldSend = () => true): Promise<void> {
+    await this.enqueueOutbound(msg.from_user_id, async () => {
+      if (shouldSend()) await this.sendReplyNow(msg, reply, shouldSend);
+    });
+  }
+
+  private async enqueueOutbound(userId: string, send: () => Promise<void>): Promise<void> {
+    const previous = this.outboundQueues.get(userId) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(send);
+    this.outboundQueues.set(userId, next);
+    try { await next; }
+    finally { if (this.outboundQueues.get(userId) === next) this.outboundQueues.delete(userId); }
+  }
+
+  private async sendReplyNow(msg: Pick<WeixinMessage, "from_user_id" | "context_token">, reply: string, shouldSend: () => boolean): Promise<void> {
+    if (!this.api) throw new Error("微信已断开，请重新连接");
 
     const contextToken = msg.context_token || this.getCachedContextToken(msg.from_user_id);
     if (!contextToken) {
@@ -828,10 +923,64 @@ export class WeChatBotService {
     // 分段发送
     const chunks = splitText(reply, maxLen);
     for (let i = 0; i < chunks.length; i++) {
+      if (!shouldSend()) return;
       const prefix = chunks.length > 1 ? `(${i + 1}/${chunks.length})\n` : "";
       await this.api.sendMessage(msg.from_user_id, prefix + chunks[i], contextToken);
       if (i < chunks.length - 1) await sleep(500);
     }
+  }
+
+  /** 已收到消息的微信端；解除绑定后仍可再次选择。 */
+  getConnections(): Record<string, string> {
+    const bindings = loadUserSessions();
+    const prefix = `${this.creds?.accountId ?? "unknown"}:`;
+    const knownUsers = Object.keys(loadContextTokens())
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => key.slice(prefix.length));
+    return Object.fromEntries([...new Set([
+      ...knownUsers, ...Object.keys(bindings),
+    ])].map((userId) => [userId, bindings[userId] ?? ""]));
+  }
+
+  async bindSession(userId: string, sessionId: string, expectedSessionId: string): Promise<void> {
+    if (!this.creds) throw new WeChatBindingError("请先扫码连接微信 Bot", 409);
+    if (!Object.hasOwn(this.getConnections(), userId)) {
+      throw new WeChatBindingError("未找到该微信端，请先给 Bot 发送一条消息", 404);
+    }
+    if (!getRpcSession(sessionId)?.isAlive() && !await resolveSessionPath(sessionId)) {
+      throw new WeChatBindingError("窗口会话不存在，请重新打开窗口", 404);
+    }
+    // 在最后一个 await 后读取并校验，避免切换期间的消息和并发绑定覆盖。
+    const bindings = loadUserSessions();
+    if ((bindings[userId] ?? "") !== expectedSessionId) {
+      throw new WeChatBindingError("微信端的绑定已变化，请刷新后重试", 409);
+    }
+    if (this.processingUsers.has(userId) || this.messageQueues.get(userId)?.length) {
+      throw new WeChatBindingError("该微信端还有消息正在处理，请完成后再切换", 409);
+    }
+    if (Object.entries(bindings).some(([other, id]) => other !== userId && id === sessionId)) {
+      throw new WeChatBindingError("该窗口已接入另一个微信端，请先解除绑定", 409);
+    }
+    const previousSessionId = bindings[userId];
+    bindings[userId] = sessionId;
+    saveUserSessions(bindings);
+    if (previousSessionId && previousSessionId !== sessionId) this.mirror?.cancelSession(previousSessionId);
+    void this.startPolling().catch((error) => {
+      this.lastError = error instanceof Error ? error.message : "微信监听启动失败";
+      console.error("[WeChatBot] 绑定后启动监听失败:", error);
+    });
+  }
+
+  unbindSession(userId: string, sessionId: string): void {
+    const bindings = loadUserSessions();
+    if (bindings[userId] !== sessionId) throw new WeChatBindingError("绑定已变化，请刷新后重试", 409);
+    if (this.processingUsers.has(userId) || this.messageQueues.get(userId)?.length) {
+      throw new WeChatBindingError("微信消息正在处理，请完成后再解除", 409);
+    }
+    // 空映射保留已知端；下一次微信消息恢复为独立会话。
+    bindings[userId] = "";
+    saveUserSessions(bindings);
+    this.mirror?.cancelSession(sessionId);
   }
 
   /** 获取当前状态 */
@@ -840,6 +989,11 @@ export class WeChatBotService {
     return {
       connected: Boolean(this.creds),
       polling: this.polling,
+      lastError: this.lastError ?? this.syncError,
+      lastPollAt: this.lastPollAt,
+      lastReceivedAt: this.lastReceivedAt,
+      lastRepliedAt: this.lastRepliedAt,
+      desktopSyncEnabled: Boolean(this.mirror && this.unsubscribeMirror && this.polling),
       accountId: this.creds?.accountId,
       qrcodeUrl: this.currentQRCodeUrl ?? undefined,
       activeUserCount: Object.keys(userSessions).length,
@@ -907,19 +1061,28 @@ function splitText(text: string, maxLen: number): string[] {
 // 单例
 // ============================================================================
 
-let instance: WeChatBotService | null = null;
+// Next.js 会将多个路由打入不同模块；模块变量不保证跨路由唯一。
+// 使用与 RPC Registry 相同的进程级存储，所有入口共享轮询、队列和绑定锁。
+declare global {
+  var __deerhuxWeChatBotService: WeChatBotService | undefined;
+  var __deerhuxWeChatBotVersion: number | undefined;
+}
 
 export function getWeChatBotService(cwd?: string): WeChatBotService {
-  if (!instance) {
-    instance = new WeChatBotService(cwd);
-  } else if (cwd) {
-    instance.setCwd(cwd);
+  if (globalThis.__deerhuxWeChatBotService && globalThis.__deerhuxWeChatBotVersion !== 8) {
+    const wasPolling = globalThis.__deerhuxWeChatBotService.getStatus().polling;
+    globalThis.__deerhuxWeChatBotService.stopPolling();
+    globalThis.__deerhuxWeChatBotService = new WeChatBotService(cwd);
+    if (wasPolling) void globalThis.__deerhuxWeChatBotService.startPolling().catch(console.error);
   }
+  globalThis.__deerhuxWeChatBotVersion = 8;
+  const instance = globalThis.__deerhuxWeChatBotService ??= new WeChatBotService(cwd);
+  if (cwd) instance.setCwd(cwd);
   return instance;
 }
 
 /** 仅用于测试：重置单例 */
 export function resetWeChatBotService(): void {
-  instance?.stopPolling();
-  instance = null;
+  globalThis.__deerhuxWeChatBotService?.stopPolling();
+  delete globalThis.__deerhuxWeChatBotService;
 }

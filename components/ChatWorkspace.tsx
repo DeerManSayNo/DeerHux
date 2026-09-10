@@ -1,9 +1,8 @@
 "use client";
 
-import type { RefObject } from "react";
+import { useId, type RefObject } from "react";
 import type { ChatInputHandle, ChatInputState } from "./ChatInput";
 import { ChatWindow } from "./ChatWindow";
-import { ChatFileExplorerButton } from "./ChatFileExplorerButton";
 import type { SessionInfo } from "@/lib/types";
 import { getProjectDisplayName } from "@/lib/project-name";
 
@@ -30,15 +29,14 @@ interface ChatWorkspaceProps {
   onFocusSlot: (slotIndex: number) => void;
   onClearSlot: (slotIndex: number) => void;
   onAgentEnd?: (sessionId: string, changedFiles?: string[]) => void;
-  onSessionCreated?: (session: SessionInfo, slotIndex: number, sourceSessionId: string | null) => void;
+  onSessionCreated?: (session: SessionInfo, slotIndex: number, sourceSessionId: string | null, running?: boolean) => void;
   onSessionStarted?: (session: SessionInfo | null, slotIndex: number, sourceSessionId: string | null) => void;
   onAgentRunningChange?: (sessionId: string | null | undefined, running: boolean) => void;
   onSessionForked?: (newSessionId: string, slotIndex: number, sourceSessionId: string | null) => void;
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
-  onAtMention?: (relativePath: string) => void;
-  explorerRefreshKey?: number;
+  onOpenExplorer?: (slotIndex: number) => void;
   onOpenRoleConfig?: () => void;
   projectOptions?: { cwd: string; displayName: string }[];
   onNewSessionCwdChange?: (cwd: string, slotIndex: number) => void;
@@ -71,6 +69,7 @@ function gridTemplate(mode: ChatLayoutMode): { columns: string; rows: string; mi
 }
 
 export function ChatWorkspace(props: ChatWorkspaceProps) {
+  const headerId = useId();
   const {
     layoutMode,
     slotIds,
@@ -91,8 +90,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
     onSessionStatsChange,
     onContextUsageChange,
     onOpenFile,
-    onAtMention,
-    explorerRefreshKey,
+    onOpenExplorer,
     onOpenRoleConfig,
     projectOptions,
     onNewSessionCwdChange,
@@ -206,14 +204,17 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                   <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: isFocused ? 650 : 500 }} title={title}>
                     {title}
                   </span>
+                  <div id={`${headerId}-wechat-${index}`} style={{ display: "flex", flexShrink: 0 }} />
                   {projectCwd && (
-                    <ChatFileExplorerButton
-                      variant="header"
-                      cwd={projectCwd}
-                      onOpenFile={onOpenFile}
-                      onAtMention={onAtMention}
-                      refreshKey={explorerRefreshKey}
-                    />
+                    <button
+                      type="button"
+                      className="workspace-explorer-button"
+                      title="资源管理器"
+                      aria-label="资源管理器"
+                      onClick={() => { onFocusSlot(index); onOpenExplorer?.(index); }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" /></svg>
+                    </button>
                   )}
                   {slotId && (
                     <button
@@ -288,6 +289,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                 {session ? (
                   <div style={{ position: "relative", height: "100%", minHeight: 0 }}>
                     <ChatWindow
+                      wechatHeaderTargetId={isMultiLayout && session ? `${headerId}-wechat-${index}` : undefined}
                       activeTabId={slotId}
                       isFocused={isFocused}
                       streamRenderPriority={isFocused ? "focused" : "visible"}
@@ -295,7 +297,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                       session={activeSession}
                       newSessionCwd={newSessionCwd}
                       onAgentEnd={onAgentEnd}
-                      onSessionCreated={(created) => onSessionCreated?.(created, index, slotId)}
+                      onSessionCreated={(created, running) => onSessionCreated?.(created, index, slotId, running)}
                       onSessionStarted={(started) => onSessionStarted?.(started, index, slotId)}
                       onAgentRunningChange={onAgentRunningChange}
                       isSessionRunning={isRunning}
