@@ -23,7 +23,11 @@ const MAX_STDIO_BYTES = 2 * 1024 * 1024;
 // itself rather than only the npm shim's parent process.
 export function resolveCodeGraphRuntime(appRoot = process.cwd()) {
   const bundle = path.join(appRoot, "node_modules", "@colbymchenry", `codegraph-${process.platform}-${process.arch}`);
-  const command = path.join(bundle, process.platform === "win32" ? "node.exe" : "node");
+  // Packaged builds share the host's verified Node binary. Development installs
+  // retain the upstream self-contained runtime. Never resolve node via PATH.
+  const command = fs.existsSync(path.join(bundle, "deerhux-shared-node"))
+    ? process.execPath
+    : path.join(bundle, process.platform === "win32" ? "node.exe" : "node");
   const entry = path.join(bundle, "lib", "dist", "bin", "codegraph.js");
   if (!fs.existsSync(command) || !fs.existsSync(entry)) {
     throw new CodeGraphCliError(`CodeGraph runtime missing for ${process.platform}-${process.arch}: ${bundle}. Rebuild the application with its CodeGraph platform dependency.`);

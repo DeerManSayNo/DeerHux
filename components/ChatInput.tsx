@@ -1,25 +1,23 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import type { AutoRecoveryMode, RetryInfo, StallLevel } from "@/hooks/useAgentSession";
 import type { AgentMode } from "@/lib/agent-modes";
 import type { FileReference, SkillReference } from "@/lib/types";
+import { useDragDrop } from "@/hooks/useDragDrop";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
-import { notifyApp, subscribeToAppNotification } from "@/lib/app-notifications";
+import { subscribeToAppNotification } from "@/lib/app-notifications";
+import { clipboardFilePaths } from "@/lib/clipboard-file-paths";
 import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 
 export interface AttachedImage {
+  uploadId?: string;
   data: string;   // base64, no prefix (legacy, kept for compatibility)
   mimeType: string;
   previewUrl: string; // object URL for temporary preview before upload
   filePath?: string;  // absolute filesystem path (backend reads from here)
   fileUrl?: string;   // frontend access URL via /api/files/...?type=read
-}
-
-interface PendingFileUpload {
-  id: string;
-  name: string;
-  progress: number;
 }
 
 interface ModelOption {
@@ -194,7 +192,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(initialInputState?.attachedImages ?? []);
   const [imageUploadError, setImageUploadError] = useState<string | null>(null);
   const [fileReferences, setFileReferences] = useState<FileReference[]>(initialInputState?.fileReferences ?? []);
-  const [pendingFileUploads, setPendingFileUploads] = useState<PendingFileUpload[]>([]);
+  const [pendingPastes, setPendingPastes] = useState(0);
   const inputMaxWidth = compact ? 640 : 820;
   const inputHorizontalPadding = compact ? 12 : 16;
 
@@ -220,7 +218,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const rolesRequestIdRef = useRef(0);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const fileUploadRequestsRef = useRef(new Map<string, XMLHttpRequest>());
+  const pasteGenerationRef = useRef(0);
 
   // Track IME composition state to prevent candidate-confirming Enter from sending.
   // KeyboardEvent.isComposing is the standard signal; this ref covers browser event-order differences.
@@ -283,9 +281,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setValue("");
       setSelectedSkill(null);
       setFileReferences([]);
-      fileUploadRequestsRef.current.forEach((request) => request.abort());
-      fileUploadRequestsRef.current.clear();
-      setPendingFileUploads([]);
+      pasteGenerationRef.current += 1;
       setAttachedImages((prev) => {
         prev.forEach((img) => URL.revokeObjectURL(img.previewUrl));
         return [];
@@ -350,74 +346,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, [cwd]);
 
-  const processPastedFiles = useCallback((files: File[]) => {
-    if (!files.length) return;
-    if (!cwd) {
-      setImageUploadError("当前会话尚未设置工作目录，无法粘贴文件");
-      return;
-    }
-
-    setImageUploadError(null);
-    for (const file of files) {
-      const id = crypto.randomUUID();
-      setPendingFileUploads((prev) => [...prev, { id, name: file.name || "pasted-file", progress: 0 }]);
-
-      const request = new XMLHttpRequest();
-      fileUploadRequestsRef.current.set(id, request);
-      request.open("POST", "/api/project-file-upload");
-      request.responseType = "json";
-      request.upload.addEventListener("progress", (event) => {
-        if (!event.lengthComputable) return;
-        const progress = Math.min(0.98, event.loaded / event.total);
-        setPendingFileUploads((prev) => prev.map((upload) => upload.id === id ? { ...upload, progress } : upload));
-      });
-      request.addEventListener("load", () => {
-        fileUploadRequestsRef.current.delete(id);
-        const result = request.response as { path?: string; name?: string; error?: string } | null;
-        if (request.status < 200 || request.status >= 300 || !result?.path) {
-          setPendingFileUploads((prev) => prev.filter((upload) => upload.id !== id));
-          setImageUploadError(result?.error || "文件粘贴失败");
-          return;
-        }
-        const uploadedPath = result.path;
-        setPendingFileUploads((prev) => prev.map((upload) => upload.id === id ? { ...upload, progress: 1 } : upload));
-        setFileReferences((prev) => prev.some((ref) => ref.path === uploadedPath)
-          ? prev
-          : [...prev, { path: uploadedPath, name: result.name || fileReferenceName(uploadedPath) }]);
-        notifyApp("deerhux.project-files-updated");
-        // 留一帧展示完全清晰的完成态，再交给持久引用胶囊。
-        requestAnimationFrame(() => {
-          setPendingFileUploads((prev) => prev.filter((upload) => upload.id !== id));
-        });
-      });
-      request.addEventListener("error", () => {
-        fileUploadRequestsRef.current.delete(id);
-        setPendingFileUploads((prev) => prev.filter((upload) => upload.id !== id));
-        setImageUploadError("文件粘贴失败，请重试");
-      });
-      request.addEventListener("abort", () => {
-        fileUploadRequestsRef.current.delete(id);
-        setPendingFileUploads((prev) => prev.filter((upload) => upload.id !== id));
-      });
-
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("cwd", cwd);
-      request.send(formData);
-    }
-  }, [cwd]);
-
-  const removePendingFileUpload = useCallback((id: string) => {
-    fileUploadRequestsRef.current.get(id)?.abort();
-    fileUploadRequestsRef.current.delete(id);
-    setPendingFileUploads((prev) => prev.filter((upload) => upload.id !== id));
-    requestAnimationFrame(() => textareaRef.current?.focus());
-  }, []);
-
   useEffect(() => () => {
-    fileUploadRequestsRef.current.forEach((request) => request.abort());
-    fileUploadRequestsRef.current.clear();
+    pasteGenerationRef.current += 1;
   }, [cwd]);
+
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -486,7 +418,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const references = fileReferences.length ? [...fileReferences] : undefined;
     const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
     if (!msg && !attachedImages.length && !skill && !references?.length) return;
-    if (attachedImages.some((image) => !image.fileUrl && !image.data) || pendingFileUploads.length) return;
+    if (attachedImages.some((image) => !image.fileUrl && !image.data) || pendingPastes) return;
     if (isStreamingRef.current) return;
     if (sendInFlightRef.current) return;
     sendInFlightRef.current = true;
@@ -506,7 +438,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
     clearSubmittedInput();
     onSend(msg, images, references, skill);
-  }, [value, selectedSkill, attachedImages, fileReferences, pendingFileUploads.length, onSend, onBeforeSend, clearSubmittedInput]);
+  }, [value, selectedSkill, attachedImages, fileReferences, pendingPastes, onSend, onBeforeSend, clearSubmittedInput]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const currentValue = textareaRef.current?.value ?? value;
@@ -514,7 +446,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const references = fileReferences.length ? [...fileReferences] : undefined;
     const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
     if (!msg && !attachedImages.length && !skill && !references?.length) return;
-    if (attachedImages.some((image) => !image.fileUrl && !image.data) || pendingFileUploads.length) return;
+    if (attachedImages.some((image) => !image.fileUrl && !image.data) || pendingPastes) return;
     const images = attachedImages.length ? attachedImages : undefined;
     clearSubmittedInput();
     if (mode === "steer" && onSteer) {
@@ -522,7 +454,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } else if (mode === "followup" && onFollowUp) {
       onFollowUp(msg, images, references, skill);
     }
-  }, [value, selectedSkill, attachedImages, fileReferences, pendingFileUploads.length, onSteer, onFollowUp, clearSubmittedInput]);
+  }, [value, selectedSkill, attachedImages, fileReferences, pendingPastes, onSteer, onFollowUp, clearSubmittedInput]);
 
   const fetchSkills = useCallback(async (cwd: string) => {
     if (skillsFetchRef.current) {
@@ -766,23 +698,132 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name ?? model.modelId)
     : modelOptions.length > 0 ? modelOptions[0].name : null;
 
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    const items = Array.from(e.clipboardData?.items ?? []);
-    const fileItems = items.filter((item) => item.kind === "file");
-    const clipboardFiles = Array.from(e.clipboardData?.files ?? []);
-    const files = clipboardFiles.length > 0
-      ? clipboardFiles
-      : fileItems.map((item) => item.getAsFile()).filter((file): file is File => file !== null);
-    if (!files.length) return;
-    e.preventDefault();
+  const addFileReferences = useCallback((paths: string[], files: File[] = []) => {
+    if (!paths.length) {
+      const images = files.filter((file) => file.type.startsWith("image/"));
+      if (images.length) processImageFiles(images);
+      if (!images.length || images.length !== files.length) {
+        setImageUploadError("无法获取文件原始路径，请复制文件路径后粘贴，或使用桌面端拖入文件");
+      }
+      return;
+    }
+    setImageUploadError(null);
+    const uniquePaths = [...new Set(paths)];
+    const isImage = (path: string) => /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i.test(path);
+    const references = uniquePaths.filter((path) => !isImage(path));
+    setFileReferences((prev) => {
+      const added = references.filter((path) => !prev.some((ref) => ref.path === path));
+      return [...prev, ...added.map((path) => ({ path, name: fileReferenceName(path) }))];
+    });
+    const imagePaths = uniquePaths.filter(isImage);
+    const generation = pasteGenerationRef.current;
+    if (imagePaths.length && !cwd) {
+      setImageUploadError("当前会话尚未设置工作目录，无法添加图片");
+      return;
+    }
+    for (const imagePath of imagePaths) {
+      const uploadId = crypto.randomUUID();
+      setAttachedImages((prev) => [...prev, {
+        uploadId, data: "", mimeType: "image/png", previewUrl: "",
+      }]);
+      void (async () => {
+        try {
+          const res = await fetch("/api/chat-image-upload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: imagePath, cwd }),
+          });
+          const result = await res.json();
+          if (!res.ok) throw new Error(result.error || "图片添加失败");
+          if (generation !== pasteGenerationRef.current) return;
+          setAttachedImages((prev) => prev.map((image) => image.uploadId === uploadId ? {
+            ...image, mimeType: result.mimeType, previewUrl: result.url,
+            filePath: result.path, fileUrl: result.url,
+          } : image));
+        } catch (error) {
+          if (generation === pasteGenerationRef.current) {
+            setAttachedImages((prev) => prev.filter((image) => image.uploadId !== uploadId));
+            setImageUploadError(error instanceof Error ? error.message : "图片添加失败");
+          }
+        }
+      })();
+    }
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [cwd, processImageFiles]);
+  const { dropZoneRef, dropSurface, isDragOver } = useDragDrop(addFileReferences);
 
-    // 剪贴板中的图片始终沿用视觉图片链路，不能因文件带有名称而退化为普通附件。
-    // 混合粘贴时，非图片文件仍按项目附件上传。
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    const attachmentFiles = files.filter((file) => !file.type.startsWith("image/"));
-    if (imageFiles.length) processImageFiles(imageFiles);
-    if (attachmentFiles.length) processPastedFiles(attachmentFiles);
-  }, [processImageFiles, processPastedFiles]);
+  const selectReferenceFiles = useCallback(async () => {
+    if (!window.__TAURI_INTERNALS__) {
+      fileInputRef.current?.click();
+      return;
+    }
+    const generation = pasteGenerationRef.current;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        title: "上传文件",
+        multiple: true,
+        directory: false,
+        ...(cwd ? { defaultPath: cwd } : {}),
+      });
+      if (generation !== pasteGenerationRef.current || !selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      if (paths.length) addFileReferences(paths);
+    } catch (error) {
+      if (generation !== pasteGenerationRef.current) return;
+      setImageUploadError(error instanceof Error ? error.message : "选择文件失败，请重试");
+    }
+  }, [cwd, addFileReferences]);
+
+  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const clipboard = e.clipboardData;
+    const files = Array.from(clipboard.files);
+    const uriList = clipboard.getData("text/uri-list");
+    const text = clipboard.getData("text/plain");
+    const desktop = !!window.__TAURI_INTERNALS__;
+    if (!desktop && !files.length && !uriList.includes("file://")) return;
+    e.preventDefault();
+    const textarea = e.currentTarget;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const originalValue = textarea.value;
+    const generation = pasteGenerationRef.current;
+    const insertText = () => {
+      if (generation !== pasteGenerationRef.current || !text) return;
+      const current = textarea.value;
+      const insertionStart = current === originalValue ? start : textarea.selectionStart;
+      const insertionEnd = current === originalValue ? end : textarea.selectionEnd;
+      const next = current.slice(0, insertionStart) + text + current.slice(insertionEnd);
+      textarea.value = next;
+      setValue(next);
+      textarea.setSelectionRange(insertionStart + text.length, insertionStart + text.length);
+      handleInput();
+    };
+    setPendingPastes((count) => count + 1);
+    setImageUploadError(null);
+    try {
+      const paths = await clipboardFilePaths(uriList, desktop);
+      if (generation !== pasteGenerationRef.current) return;
+      if (paths.length) {
+        addFileReferences(paths);
+        return;
+      }
+      const images = files.filter((file) => file.type.startsWith("image/"));
+      if (images.length) processImageFiles(images);
+      if (files.some((file) => !file.type.startsWith("image/"))) {
+        setImageUploadError("无法获取文件原始路径，请复制文件路径后粘贴；文件不会复制到项目中");
+      }
+      if (!files.length && text) {
+        insertText();
+      }
+    } catch (error) {
+      if (generation !== pasteGenerationRef.current) return;
+      if (!files.length && text) insertText();
+      else setImageUploadError(error instanceof Error ? error.message : "读取文件路径失败，请复制文件路径后粘贴");
+    } finally {
+      setPendingPastes((count) => count - 1);
+    }
+  }, [processImageFiles, handleInput, addFileReferences]);
 
 
 
@@ -897,11 +938,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const selectedRole = roles.find((r) => r.id === currentRoleId) ?? roles.find((r) => r.id === "default");
   const roleSettingCount = selectedRole ? Object.values(selectedRole.blocks ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0) : 0;
   const isUploadingImages = attachedImages.some((image) => !image.fileUrl && !image.data);
-  const isUploadingFiles = pendingFileUploads.length > 0;
+  const isReadingClipboard = pendingPastes > 0;
   const hasSendableContent = Boolean(value.trim() || attachedImages.length || selectedSkill || fileReferences.length)
     && !isUploadingImages
-    && !isUploadingFiles;
-  const hasFileReferences = fileReferences.length > 0 || pendingFileUploads.length > 0;
+    && !isReadingClipboard;
+  const hasFileReferences = fileReferences.length > 0;
   const retryNoticeKey = retryInfo
     ? [
         retryInfo.attempt,
@@ -923,22 +964,38 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   return (
     <div
+      ref={dropZoneRef}
       style={{
+        position: "relative",
+        outlineOffset: -2,
+        borderRadius: 12,
         flexShrink: 0,
         background: "transparent",
         padding: `0 ${inputHorizontalPadding}px ${compact ? 10 : 8}px`,
       }}
     >
+      {isDragOver && dropSurface && createPortal(
+        <div role="status" aria-label="松开以添加到此对话" style={{
+          position: "absolute", inset: 0, zIndex: 100, pointerEvents: "none",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: "color-mix(in srgb, var(--bg) 78%, transparent)",
+          backdropFilter: "blur(3px)", border: "3px dashed var(--accent)",
+        }}>
+          <div style={{ padding: "24px 36px", borderRadius: 16, background: "var(--bg-panel)", color: "var(--text)", textAlign: "center", boxShadow: "0 8px 32px rgba(0,0,0,0.12)" }}>
+            <div style={{ fontSize: 18, fontWeight: 600 }}>松开以添加到此对话</div>
+            <div style={{ marginTop: 8, fontSize: 13, color: "var(--text-muted)" }}>文件作为路径引用，图片作为图片附件</div>
+          </div>
+        </div>, dropSurface,
+      )}
       {/* Hidden file input */}
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
         multiple
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
-          processImageFiles(files);
+          if (files.length) addFileReferences([], files);
           e.target.value = "";
         }}
       />
@@ -1089,12 +1146,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
             {attachedImages.map((img, i) => (
               <div key={i} style={{ position: "relative", flexShrink: 0 }}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
+                {img.previewUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
                   src={img.previewUrl}
                   alt=""
                   style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block", opacity: img.fileUrl || img.data ? 1 : 0.65 }}
-                />
+                  />
+                ) : (
+                  <div aria-label="正在准备图片预览" style={{ width: 56, height: 56, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-panel)" }} />
+                )}
                 {!img.fileUrl && !img.data && (
                   <span
                     role="status"
@@ -1327,101 +1388,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 }}
               >
                 <>
-                  {pendingFileUploads.map((upload, index) => {
-                    const clarity = Math.max(0, Math.min(1, upload.progress));
-                    const chip = (
-                      <span
-                        role="status"
-                        aria-label={`${upload.name} 上传中 ${Math.round(clarity * 100)}%`}
-                        title={`${upload.name} · ${Math.round(clarity * 100)}%`}
-                        style={{
-                          position: "relative",
-                          flexShrink: 0,
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: 5,
-                          maxWidth: 180,
-                          height: 24,
-                          padding: "0 6px 0 8px",
-                          overflow: "hidden",
-                          borderRadius: 999,
-                          background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
-                          border: "1px solid color-mix(in srgb, var(--accent) 16%, var(--border))",
-                          color: "color-mix(in srgb, var(--accent) 62%, var(--text-muted))",
-                          fontSize: 12,
-                          fontWeight: 500,
-                        }}
-                      >
-                        <span
-                          aria-hidden="true"
-                          style={{
-                            position: "absolute",
-                            inset: 0,
-                            width: `${Math.round(clarity * 100)}%`,
-                            background: "color-mix(in srgb, var(--accent) 11%, transparent)",
-                            transition: "width 120ms linear",
-                            pointerEvents: "none",
-                          }}
-                        />
-                        <span
-                          style={{
-                            position: "relative",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 5,
-                            minWidth: 0,
-                            opacity: 0.35 + clarity * 0.65,
-                            filter: `blur(${((1 - clarity) * 2.5).toFixed(2)}px)`,
-                            transition: "filter 120ms linear, opacity 120ms linear",
-                          }}
-                        >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                            <polyline points="14 2 14 8 20 8" />
-                          </svg>
-                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {upload.name}
-                          </span>
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => removePendingFileUpload(upload.id)}
-                          aria-label={`取消上传 ${upload.name}`}
-                          title="取消上传"
-                          style={{
-                            position: "relative",
-                            flexShrink: 0,
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            width: 14,
-                            height: 14,
-                            marginRight: -2,
-                            border: "none",
-                            borderRadius: "50%",
-                            background: "transparent",
-                            color: "inherit",
-                            cursor: "pointer",
-                            padding: 0,
-                            opacity: 0.55,
-                          }}
-                        >
-                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
-                            <path d="M18 6 6 18" />
-                            <path d="m6 6 12 12" />
-                          </svg>
-                        </button>
-                      </span>
-                    );
-
-                    if (index !== 0) return <React.Fragment key={upload.id}>{chip}</React.Fragment>;
-                    return (
-                      <span key={upload.id} style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 6, maxWidth: "100%" }}>
-                        <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)", marginRight: 2 }}>引用</span>
-                        {chip}
-                      </span>
-                    );
-                  })}
                   {fileReferences.map((ref, index) => {
                     const chip = (
                       <span
@@ -1481,7 +1447,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       </span>
                     );
 
-                    if (index !== 0 || pendingFileUploads.length > 0) return <React.Fragment key={ref.path}>{chip}</React.Fragment>;
+                    if (index !== 0) return <React.Fragment key={ref.path}>{chip}</React.Fragment>;
                     return (
                       <span key={ref.path} style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 6, maxWidth: "100%" }}>
                         <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)", marginRight: 2 }}>引用</span>
@@ -1739,7 +1705,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               type="button"
               onClick={handleSend}
               disabled={!hasSendableContent}
-              title={isUploadingFiles ? "文件传输中" : isUploadingImages ? "图片上传中" : agentMode === "plan" ? "生成计划" : agentMode === "ask" ? "发送 Ask" : "发送 Agent"}
+              title={isReadingClipboard ? "正在读取文件路径" : isUploadingImages ? "图片上传中" : agentMode === "plan" ? "生成计划" : agentMode === "ask" ? "发送 Ask" : "发送 Agent"}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
@@ -1773,30 +1739,30 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
           <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 2 }}>
             <button
-              onClick={() => fileInputRef.current?.click()}
-              title="附加图片"
+              onClick={() => { void selectReferenceFiles(); }}
+              title="上传文件"
+              aria-label="上传文件"
+              type="button"
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
-                color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
+                color: fileReferences.length ? "var(--accent)" : "var(--text-muted)",
                 cursor: "pointer",
                 transition: "background 0.12s, color 0.12s",
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text)";
+                e.currentTarget.style.color = fileReferences.length ? "var(--accent)" : "var(--text)";
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = "none";
-                e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text-muted)";
+                e.currentTarget.style.color = fileReferences.length ? "var(--accent)" : "var(--text-muted)";
               }}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <polyline points="21 15 16 10 5 21" />
+                <path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l10-10a4 4 0 0 1 5.66 5.66l-10 10a2 2 0 0 1-2.83-2.83l9.19-9.19" />
               </svg>
             </button>
             {/* Role selector */}

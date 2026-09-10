@@ -2,7 +2,8 @@ const fs = require("fs");
 const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "..");
-const standaloneDir = path.join(repoRoot, ".next", "standalone");
+// An explicit directory allows measuring/validating a copy without touching dev output.
+const standaloneDir = process.argv[2] ? path.resolve(process.argv[2]) : path.join(repoRoot, ".next", "standalone");
 
 let removedBytes = 0;
 let removedCount = 0;
@@ -86,11 +87,10 @@ function walk(dir) {
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isFile()) {
-      const ext = path.extname(entry.name);
       // *.nft.json are build-time module traces Next uses to assemble the
       // standalone output (~20MB total). Nothing reads them at runtime.
       const isNftTrace = entry.name.endsWith(".nft.json");
-      if (isNftTrace || stripExts.has(ext) || stripNames.has(entry.name)) {
+      if (isNftTrace || [...stripExts].some((suffix) => entry.name.endsWith(suffix)) || stripNames.has(entry.name)) {
         remove(full);
       }
     } else if (entry.isDirectory()) {
@@ -99,15 +99,15 @@ function walk(dir) {
   }
 }
 
+// Copy spawned dependencies before pruning so their maps/types are stripped too.
+require("./bundle-codegraph.js").bundleCodeGraph(repoRoot, standaloneDir);
+
 walk(standaloneDir);
 
 console.log(
   `✅ Removed ${removedCount} items, freed ${(removedBytes / 1024 / 1024).toFixed(1)}MB ` +
     `from ${path.relative(repoRoot, standaloneDir)}`
 );
-
-// Add spawned dependencies after pruning, preserving their runtime assets.
-require("./bundle-codegraph.js").bundleCodeGraph(repoRoot, standaloneDir);
 
 // Built-in skills are read on demand; import tracing does not include Markdown.
 for (const name of ["create-role", "create-skill", "webcmd-browser"]) {

@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { homedir } from "os";
-import { defineTool, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AnyToolDefinition } from "./tool-registry.ts";
 import { ensureContextDir, getContextDir, previewForExistingSpill, spillLargeText } from "./context-archive.ts";
@@ -132,45 +132,9 @@ function truncateText(text: string, maxBytes = MAX_TEXT_BYTES): string {
   return `${text.slice(0, maxBytes)}\n\n...[truncated ${bytes - maxBytes} bytes]`;
 }
 
-function normalizeRoot(root: string): string {
-  try {
-    return fs.realpathSync.native(path.resolve(root));
-  } catch {
-    return path.resolve(root);
-  }
-}
-
-function isInsideRoot(candidateParent: string, root: string): boolean {
-  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-  return candidateParent === root || candidateParent.startsWith(rootWithSep);
-}
-
-/** 解析受限路径：必须落在 cwd 或调用方提供的资源根目录内。 */
-function resolveAllowedPath(
-  cwd: string,
-  input: string | null,
-  label = "path",
-  extraRoots: string[] = [],
-): string {
-  if (!input) throw new Error(`${label} is required`);
-  const roots = [normalizeRoot(cwd), ...extraRoots.map(normalizeRoot)];
-  const primary = roots[0];
-  const candidate = path.isAbsolute(input) ? path.resolve(input) : path.resolve(primary, input);
-  const parent = fs.existsSync(candidate) ? candidate : path.dirname(candidate);
-  const realParent = fs.existsSync(parent) ? fs.realpathSync.native(parent) : path.resolve(parent);
-  if (roots.some((root) => isInsideRoot(realParent, root))) return candidate;
-  throw new Error(extraRoots.length
-    ? `${label} must be inside cwd or an allowed resource root`
-    : `${label} must be inside cwd`);
-}
-
 function resolveUnrestrictedPath(cwd: string, input: string | null, label = "path"): string {
   if (!input) throw new Error(`${label} is required`);
   return path.isAbsolute(input) ? path.resolve(input) : path.resolve(cwd, input);
-}
-
-function isDefaultDeerHuxCwd(cwd: string): boolean {
-  return normalizeRoot(cwd) === normalizeRoot(path.join(homedir(), "deerhux-cwd"));
 }
 
 function lineSlice(content: string, offset: number, limit: number): string {
@@ -344,19 +308,11 @@ export function createStandardCodingTools(
 ): AnyToolDefinition[] {
   const sessionId = options?.sessionId;
   const contextDir = sessionId ? getContextDir(sessionId) : null;
-  const globalSkillDirs = [
-    path.join(getAgentDir(), "skills"),
-    path.join(homedir(), ".pi", "agent", "skills"),
-  ];
-  // 本机文件系统默认可读。默认 ~/deerhux-cwd 代表非项目沙箱模式，读写均不限制路径；
-  // 实际项目 cwd 的写权限仍限定为项目本身和全局 Skill。
-  const unrestricted = isDefaultDeerHuxCwd(cwd);
-  const writeRoots = globalSkillDirs;
+  // 文件工具统一接受原始绝对路径；相对路径仍基于会话 cwd。
+  // 是否允许写入由模式的工具白名单与操作系统权限控制。
   const resolveReadPath = (input: string | null, label = "path") =>
     resolveUnrestrictedPath(cwd, input, label);
-  const resolveWritePath = (input: string | null, label = "path") => unrestricted
-    ? resolveUnrestrictedPath(cwd, input, label)
-    : resolveAllowedPath(cwd, input, label, writeRoots);
+  const resolveWritePath = resolveReadPath;
   const contextHint = contextDir
     ? ` Also readable: session context archive at ${contextDir} (compacted history + spilled tool outputs).`
     : "";
@@ -393,9 +349,7 @@ export function createStandardCodingTools(
       description: "Create or fully overwrite a text file, creating parent directories. For partial changes use edit.",
       promptSnippet: "write: Create or fully overwrite a text file.",
       parameters: Type.Object({
-        filePath: Type.Optional(Type.String({ description: unrestricted
-          ? "Required file path (or path alias); relative to cwd or absolute anywhere"
-          : "Required file path or path alias; relative to cwd, within cwd/global Skill directories" })),
+        filePath: Type.Optional(Type.String({ description: "Required file path (or path alias); relative to cwd or absolute anywhere" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
         content: Type.String({ description: "Complete file content" }),
       }),
@@ -416,9 +370,7 @@ export function createStandardCodingTools(
       description: "Replace exact text in a file. Read the target first; include surrounding text to distinguish duplicate matches.",
       promptSnippet: "edit: Replace exact text within a file.",
       parameters: Type.Object({
-        filePath: Type.Optional(Type.String({ description: unrestricted
-          ? "Required file path (or path alias); relative to cwd or absolute anywhere"
-          : "Required file path or path alias; relative to cwd, within cwd/global Skill directories" })),
+        filePath: Type.Optional(Type.String({ description: "Required file path (or path alias); relative to cwd or absolute anywhere" })),
         path: Type.Optional(Type.String({ description: "Alias for filePath" })),
         oldString: Type.Optional(Type.String({ description: "Required nonempty text; must match once unless replaceAll=true" })),
         newString: Type.Optional(Type.String({ description: "Replacement text; empty or omitted deletes the match" })),

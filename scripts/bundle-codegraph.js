@@ -11,8 +11,8 @@ function buildTarget() {
 }
 
 // CodeGraph is spawned, so Next's import tracing cannot discover this package.
-// Preserve the complete self-contained platform bundle (runtime, SQLite,
-// tree-sitter grammars, nested dependencies) instead of relying on .bin links.
+// Preserve the CLI, tree-sitter grammars and dependencies, but share the host
+// Node runtime (including SQLite) instead of shipping a second executable.
 function bundleCodeGraph(repoRoot, standaloneDir, target = buildTarget()) {
   const scope = path.join("node_modules", "@colbymchenry");
   const name = `codegraph-${target}`;
@@ -26,13 +26,18 @@ function bundleCodeGraph(repoRoot, standaloneDir, target = buildTarget()) {
   if (manifest.version !== meta.optionalDependencies?.[`@colbymchenry/${name}`]) {
     throw new Error(`CodeGraph platform version mismatch: ${manifest.version}`);
   }
-  for (const relative of [target.startsWith("win32-") ? "node.exe" : "node", "lib/dist/bin/codegraph.js"]) {
+  for (const relative of ["lib/dist/bin/codegraph.js"]) {
     if (!fs.existsSync(path.join(source, relative))) throw new Error(`Incomplete CodeGraph bundle: ${relative}`);
   }
   const destination = path.join(standaloneDir, scope, name);
   fs.rmSync(destination, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(destination), { recursive: true });
-  fs.cpSync(source, destination, { recursive: true, dereference: true });
+  fs.cpSync(source, destination, {
+    recursive: true,
+    dereference: true,
+    filter: (file) => !["node", "node.exe", "bin"].includes(path.relative(source, file)),
+  });
+  fs.writeFileSync(path.join(destination, "deerhux-shared-node"), "Use the DeerHux host process.execPath (Node >=22.19.0).\n");
   console.log(`Bundled CodeGraph ${manifest.version} (${target})`);
   return destination;
 }

@@ -175,47 +175,49 @@ async function testCodingToolsCanReadArchive(): Promise<void> {
     fs.rmSync(skillDir, { recursive: true, force: true });
   }
 
-  // context archive 保持只读。
-  await assert.rejects(
-    () => write!.execute(
-      "write-test",
-      { filePath: path.join(getContextDir(SESSION_ID), "evil.txt"), content: "nope" },
-      undefined,
-      undefined,
-      undefined as never,
-    ),
-    /allowed resource root/,
-  );
   fs.rmSync(workspaceDir, { recursive: true, force: true });
 }
 
-async function testDefaultCwdHasUnrestrictedWriteAccess(): Promise<void> {
-  const defaultCwd = path.join(os.homedir(), "deerhux-cwd");
-  fs.mkdirSync(defaultCwd, { recursive: true });
+async function testProjectCwdHasUnrestrictedWriteAccess(): Promise<void> {
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "deerhux-write-workspace-"));
   const externalDir = fs.mkdtempSync(path.join(os.tmpdir(), "deerhux-unrestricted-write-"));
   const externalFile = path.join(externalDir, "outside.txt");
-  const tools = createStandardCodingTools(defaultCwd);
+  const tools = createStandardCodingTools(workspaceDir);
   const write = tools.find((t) => t.name === "write");
   const edit = tools.find((t) => t.name === "edit");
   assert.ok(write && edit);
   try {
     await write!.execute(
-      "default-cwd-write-test",
+      "project-cwd-write-test",
       { filePath: externalFile, content: "outside-before\n" },
       undefined,
       undefined,
       undefined as never,
     );
     await edit!.execute(
-      "default-cwd-edit-test",
+      "project-cwd-edit-test",
       { filePath: externalFile, oldString: "before", newString: "after" },
       undefined,
       undefined,
       undefined as never,
     );
     assert.equal(fs.readFileSync(externalFile, "utf8"), "outside-after\n");
+    // 相对路径仍以 cwd 为基准，也允许指向项目外的原文件。
+    await edit!.execute(
+      "project-relative-external-edit-test",
+      { path: path.relative(workspaceDir, externalFile), oldString: "after", newString: "relative" },
+      undefined, undefined, undefined as never,
+    );
+    assert.equal(fs.readFileSync(externalFile, "utf8"), "outside-relative\n");
+    await write!.execute(
+      "project-relative-write-test",
+      { path: "nested/local.txt", content: "inside" },
+      undefined, undefined, undefined as never,
+    );
+    assert.equal(fs.readFileSync(path.join(workspaceDir, "nested/local.txt"), "utf8"), "inside");
   } finally {
     fs.rmSync(externalDir, { recursive: true, force: true });
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
   }
 }
 
@@ -254,10 +256,11 @@ async function testDeleteCascade(): Promise<void> {
 async function main(): Promise<void> {
   cleanup();
   try {
+    await testProjectCwdHasUnrestrictedWriteAccess();
+    console.log("project external write/edit tests passed");
     await testHistoryTranscript();
     await testSpillLargeText();
     await testCodingToolsCanReadArchive();
-    await testDefaultCwdHasUnrestrictedWriteAccess();
     await testToolExecutorSpill();
     await testDeleteCascade();
     console.log("context-archive tests passed");

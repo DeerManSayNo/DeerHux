@@ -42,9 +42,26 @@ const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20MB
 
 export async function POST(request: NextRequest) {
   try {
-    const form = await request.formData();
-    const image = form.get("image");
-    const cwd = form.get("cwd");
+    let image: FormDataEntryValue | null;
+    let cwd: unknown;
+    if (request.headers.get("content-type")?.includes("application/json")) {
+      const body = await request.json();
+      cwd = body.cwd;
+      const sourcePath = body.path;
+      if (typeof sourcePath !== "string" || !path.isAbsolute(sourcePath)) {
+        return NextResponse.json({ error: "Invalid image path" }, { status: 400 });
+      }
+      const mimeType = IMAGE_EXT_TO_MIME[path.extname(sourcePath).slice(1).toLowerCase()];
+      if (!mimeType) return NextResponse.json({ error: "Unsupported image type" }, { status: 400 });
+      const stat = await fs.promises.stat(sourcePath);
+      if (!stat.isFile()) return NextResponse.json({ error: "Not an image file" }, { status: 400 });
+      if (stat.size > MAX_UPLOAD_BYTES) return NextResponse.json({ error: "Image too large (>20MB)" }, { status: 413 });
+      image = new File([await fs.promises.readFile(sourcePath)], path.basename(sourcePath), { type: mimeType });
+    } else {
+      const form = await request.formData();
+      image = form.get("image");
+      cwd = form.get("cwd");
+    }
 
     if (!(image instanceof File)) {
       return NextResponse.json({ error: "Missing image" }, { status: 400 });

@@ -1,12 +1,13 @@
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { statSync } from "fs";
+import { open } from "node:fs/promises";
 import type { SessionEntry, SessionInfo, SessionContext, SessionHeader, AgentMessage, AssistantMessage, FileReference, SkillReference } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import type { CollaborationRunSnapshot } from "./parallel-agent/collaboration-types";
 import { normalizeToolCalls } from "./normalize";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "./agent-modes";
 import { getWorkerOrigins, pruneWorkerOrigins } from "./parallel-agent/subagent-registry";
-import { invalidateSessionIndex, scheduleSessionIndexRebuild } from "./session/session-index";
+import { invalidateSessionIndex, readSessionIndex, scheduleSessionIndexRebuild } from "./session/session-index";
 
 const SESSION_LIST_TTL_MS = 30_000;
 /** Min interval between background refreshes to avoid thundering herd under load. */
@@ -222,6 +223,32 @@ function getPathCache(): Map<string, string> {
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
   if (cached) return cached;
+
+  // The sidebar already uses the durable index. A cold path-cache miss must
+  // not turn opening one indexed session into a scan of every JSONL file.
+  // Verify only the header: an old index may point to a removed/replaced file.
+  if (process.env.DEERHUX_SESSION_INDEX !== "0") {
+    const index = await readSessionIndex();
+    const candidate = index?.records.find((record) => record.id === sessionId)?.path;
+    if (candidate) {
+      let file: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        file = await open(candidate, "r");
+        const buffer = Buffer.alloc(64 * 1024);
+        const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+        const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split("\n", 1)[0];
+        const header = JSON.parse(firstLine);
+        if (header.type === "session" && header.id === sessionId) {
+          cacheSessionPath(sessionId, candidate);
+          return candidate;
+        }
+      } catch {
+        // Missing, unreadable or stale index targets retain the legacy fallback.
+      } finally {
+        await file?.close();
+      }
+    }
+  }
 
   // Cache miss: scan all sessions to populate cache, then retry
   await listAllSessions();
@@ -663,4 +690,3 @@ export function getLeafId(entries: SessionEntry[]): string | null {
   if (entries.length === 0) return null;
   return entries[entries.length - 1].id;
 }
-

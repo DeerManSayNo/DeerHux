@@ -136,6 +136,8 @@ export async function openExternalLink(href: string): Promise<boolean> {
       return true;
     } catch (error) {
       console.warn("Failed to open external link via Tauri shell:", error);
+      // Falling back to window.open inside a WebView can navigate the app itself.
+      return false;
     }
   }
 

@@ -73,6 +73,48 @@ fn normalize_windows_node_path(path: &Path) -> PathBuf {
 }
 
 const QUICK_SESSION_WINDOW_LABEL: &str = "quick-session";
+
+/// Read references from the OS clipboard without reading or copying file contents.
+#[tauri::command]
+fn read_clipboard_file_paths() -> Result<Vec<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL};
+        let board = NSPasteboard::generalPasteboard();
+        let mut paths = Vec::new();
+        if let Some(items) = board.pasteboardItems() {
+            for item in items.iter() {
+                if let Some(url) = item.stringForType(unsafe { NSPasteboardTypeFileURL }) {
+                    paths.push(url.to_string());
+                }
+            }
+        }
+        return Ok(paths);
+    }
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+        use windows_sys::Win32::UI::Shell::DragQueryFileW;
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Err("无法读取剪贴板，请重试".into());
+        }
+        let handle = GetClipboardData(15); // CF_HDROP: Explorer file references.
+        let mut paths = Vec::new();
+        if !handle.is_null() {
+            let count = DragQueryFileW(handle, u32::MAX, std::ptr::null_mut(), 0);
+            for index in 0..count {
+                let length = DragQueryFileW(handle, index, std::ptr::null_mut(), 0);
+                let mut buffer = vec![0u16; length as usize + 1];
+                let copied = DragQueryFileW(handle, index, buffer.as_mut_ptr(), length + 1);
+                paths.push(String::from_utf16_lossy(&buffer[..copied as usize]));
+            }
+        }
+        CloseClipboard();
+        return Ok(paths);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Ok(Vec::new())
+}
 const QUICK_SESSION_OPEN_EVENT: &str = "quick-session://request-open";
 const QUICK_SESSION_CLOSE_EVENT: &str = "quick-session://request-close";
 const QUICK_SESSION_NEW_EVENT: &str = "quick-session://request-new";
@@ -1055,6 +1097,7 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            read_clipboard_file_paths,
             hide_quick_session_window,
             mark_quick_session_ready,
             resize_quick_session_window,

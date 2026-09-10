@@ -55,6 +55,7 @@
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public",
     "test:mcp-stdio": "node scripts/test-mcp-stdio-integration.mjs",
     "test:client-api": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-client-api.ts",
+    "test:session-cold-start": "node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/register-typescript-test-loader.mjs scripts/test-session-path-cold-start.ts && node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/register-typescript-test-loader.mjs scripts/test-remote-connections-cold-start.ts",
     "test:app-shell-lazy-configs": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-app-shell-lazy-configs.ts",
     "test:codegraph": "node --experimental-strip-types --import ./scripts/register-typescript-test-loader.mjs scripts/test-codegraph-tool.ts && node --experimental-strip-types --import ./scripts/register-typescript-test-loader.mjs scripts/test-codegraph-runtime.ts"
   },

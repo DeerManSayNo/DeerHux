@@ -7,7 +7,6 @@ import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
 import type { ProjectMeta } from "@/lib/project-meta";
 import { FileExplorer } from "./FileExplorer";
-import { SchedulerRunsBlock } from "./SchedulerRunsBlock";
 import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
 import { readCachedJson, writeCachedJson } from "@/lib/client-resilience";
 import { getProjectDisplayName } from "@/lib/project-name";
@@ -291,6 +290,11 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
 }
 
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, optimisticSessions, onOptimisticSessionResolved, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
+  const scrollbarHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (scrollbarHideTimerRef.current) clearTimeout(scrollbarHideTimerRef.current);
+  }, []);
+
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1139,7 +1143,25 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       </div>
 
       {/* Project/session list */}
-      <div className="sidebar-navigation-scroll" style={{ flex: compact ? "1 1 auto" : explorerOpen && activeSelectedCwd ? `${splitPercent} 1 0` : "1 1 auto", overflowY: "auto", padding: compact ? "6px 0" : "8px 0 12px", minHeight: 80 }}>
+      <div
+        className="sidebar-navigation-scroll"
+        onScroll={(event) => {
+          const list = event.currentTarget;
+          if (!list.matches(":hover")) return;
+          list.dataset.scrolling = "true";
+          if (scrollbarHideTimerRef.current) clearTimeout(scrollbarHideTimerRef.current);
+          scrollbarHideTimerRef.current = setTimeout(() => {
+            delete list.dataset.scrolling;
+            scrollbarHideTimerRef.current = null;
+          }, 700);
+        }}
+        onMouseLeave={(event) => {
+          if (scrollbarHideTimerRef.current) clearTimeout(scrollbarHideTimerRef.current);
+          scrollbarHideTimerRef.current = null;
+          delete event.currentTarget.dataset.scrolling;
+        }}
+        style={{ flex: compact ? "1 1 auto" : explorerOpen && activeSelectedCwd ? `${splitPercent} 1 0` : "1 1 auto", overflowY: "auto", padding: compact ? "6px 0" : "8px 0 12px", minHeight: 80 }}
+      >
         {indexRebuilding && allSessions.length > 0 && !compact && (
           <div style={{ padding: "6px 14px", background: "rgba(250, 204, 21, 0.08)", color: "#b45309", fontSize: 11, borderBottom: "1px solid rgba(250, 204, 21, 0.2)" }}>
             正在恢复会话索引…
@@ -1460,14 +1482,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             </div>
           </div>
         </div>
-      )}
-
-      {/* SchedulerRunsBlock */}
-      {!compact && (
-        <SchedulerRunsBlock
-          selectedSessionId={selectedSessionId}
-          onSelectSession={onSelectSession}
-        />
       )}
 
       {/* RemoteConnectionsBlock */}

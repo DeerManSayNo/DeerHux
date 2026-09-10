@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef, type CSSProperties } from "react";
+import { FILE_REFERENCE_DRAG_TYPE } from "@/hooks/useDragDrop";
 import { getFileIcon, FolderIcon } from "./FileIcons";
 import { encodeFilePathForApi, getRelativeFilePath, joinFilePath } from "@/lib/file-paths";
 
@@ -141,6 +142,12 @@ function TreeNode({
     <div>
       <div
         onClick={handleClick}
+        draggable
+        onDragStart={(event) => {
+          event.dataTransfer.effectAllowed = "link";
+          event.dataTransfer.setData(FILE_REFERENCE_DRAG_TYPE, JSON.stringify([node.fullPath]));
+          event.dataTransfer.setData("text/plain", node.fullPath);
+        }}
         onContextMenu={handleContextMenu}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}

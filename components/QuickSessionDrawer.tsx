@@ -128,6 +128,8 @@ export function QuickSessionDrawer({
   const sessionRenderKeysRef = useRef(new Map<string, string>());
   const handledNewSessionRequestRef = useRef(0);
   const revealThumbRef = useRef<HTMLDivElement | null>(null);
+  const snapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const snapFrameRef = useRef<number | null>(null);
   const revealDragRef = useRef({ screenX: 0, position: 0, travel: 0, maximumOffset: 0 });
   const nativeResizeRef = useRef({ targetWidth: QUICK_SESSION_DEFAULT_WIDTH, running: false });
   const orderedSessions = useMemo(() => sortSessions(sessions, sentAt), [sentAt, sessions]);
@@ -158,6 +160,37 @@ export function QuickSessionDrawer({
     setActiveIndex(Math.max(0, revealedIndex));
     return clampedOffset;
   }, [cardWidth, maximumRevealOffset, orderedSessions.length, viewportWidth]);
+
+  const cancelRevealSnap = useCallback(() => {
+    if (snapTimerRef.current !== null) clearTimeout(snapTimerRef.current);
+    if (snapFrameRef.current !== null) window.cancelAnimationFrame(snapFrameRef.current);
+    snapTimerRef.current = null;
+    snapFrameRef.current = null;
+  }, []);
+
+  const snapRevealOffset = useCallback((offset = revealOffsetRef.current) => {
+    cancelRevealSnap();
+    const step = cardWidth + SESSION_GAP;
+    // Include the trailing boundary when the viewport does not fit whole cards.
+    const cardOffset = Math.min(maximumRevealOffset, Math.max(0, Math.round(offset / step) * step));
+    const target = Math.abs(maximumRevealOffset - offset) < Math.abs(cardOffset - offset)
+      ? maximumRevealOffset
+      : cardOffset;
+    const start = revealOffsetRef.current;
+    if (Math.abs(target - start) < 1 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      applyRevealOffset(target);
+      return;
+    }
+    const startedAt = performance.now();
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / 220);
+      applyRevealOffset(start + (target - start) * (1 - Math.pow(1 - progress, 3)));
+      snapFrameRef.current = progress < 1 ? window.requestAnimationFrame(animate) : null;
+    };
+    snapFrameRef.current = window.requestAnimationFrame(animate);
+  }, [applyRevealOffset, cancelRevealSnap, cardWidth, maximumRevealOffset]);
+
+  useEffect(() => cancelRevealSnap, [cancelRevealSnap, open, snapRevealOffset]);
 
   const resizeNativeWindow = useCallback((targetWidth: number) => {
     if (!window.__TAURI_INTERNALS__) return;
@@ -201,12 +234,13 @@ export function QuickSessionDrawer({
   }, []);
 
   const scrollToIndex = useCallback((index: number) => {
+    cancelRevealSnap();
     const scroller = scrollerRef.current;
     if (!scroller) return;
     const nextIndex = Math.max(0, Math.min(index, Math.max(0, orderedSessions.length - 1)));
     applyRevealOffset(widthThroughIndex(nextIndex) - viewportWidth);
     setActiveIndex(nextIndex);
-  }, [applyRevealOffset, orderedSessions.length, viewportWidth, widthThroughIndex]);
+  }, [applyRevealOffset, cancelRevealSnap, orderedSessions.length, viewportWidth, widthThroughIndex]);
 
   useEffect(() => {
     const expandedWidth = SCROLLER_INLINE_PADDING
@@ -291,6 +325,7 @@ export function QuickSessionDrawer({
     if (!event.isPrimary || event.button !== 0 || maximumRevealOffset <= 0) return;
     const thumb = revealThumbRef.current;
     if (!thumb) return;
+    cancelRevealSnap();
     event.preventDefault();
     event.currentTarget.focus({ preventScroll: true });
     const trackRect = event.currentTarget.getBoundingClientRect();
@@ -304,7 +339,7 @@ export function QuickSessionDrawer({
     applyRevealOffset(scrollbarOffset(position, travel, maximumRevealOffset));
     event.currentTarget.setPointerCapture(event.pointerId);
     revealDragRef.current = { screenX: event.screenX, position, travel, maximumOffset: maximumRevealOffset };
-  }, [applyRevealOffset, maximumRevealOffset]);
+  }, [applyRevealOffset, cancelRevealSnap, maximumRevealOffset]);
 
   const handleRevealMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
@@ -313,26 +348,31 @@ export function QuickSessionDrawer({
   }, [applyRevealOffset]);
 
   const handleRevealEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-  }, []);
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    snapRevealOffset();
+  }, [snapRevealOffset]);
 
   const handleRevealWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
     const horizontalDelta = Math.abs(event.deltaX) >= Math.abs(event.deltaY) ? event.deltaX : 0;
     if (horizontalDelta === 0) return;
     event.preventDefault();
+    cancelRevealSnap();
     applyRevealOffset(revealOffsetRef.current + horizontalDelta);
-  }, [applyRevealOffset]);
+    snapTimerRef.current = setTimeout(() => snapRevealOffset(), 140);
+  }, [applyRevealOffset, cancelRevealSnap, snapRevealOffset]);
 
   const handleRevealKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     let nextOffset: number | undefined;
-    if (event.key === "ArrowRight") nextOffset = revealOffsetRef.current + 40;
-    else if (event.key === "ArrowLeft") nextOffset = revealOffsetRef.current - 40;
+    const step = cardWidth + SESSION_GAP;
+    if (event.key === "ArrowRight") nextOffset = (Math.floor(revealOffsetRef.current / step) + 1) * step;
+    else if (event.key === "ArrowLeft") nextOffset = (Math.ceil(revealOffsetRef.current / step) - 1) * step;
     else if (event.key === "Home") nextOffset = 0;
     else if (event.key === "End") nextOffset = maximumRevealOffset;
     if (nextOffset === undefined) return;
     event.preventDefault();
-    applyRevealOffset(nextOffset);
-  }, [applyRevealOffset, maximumRevealOffset]);
+    snapRevealOffset(nextOffset);
+  }, [cardWidth, maximumRevealOffset, snapRevealOffset]);
 
   const markSessionSent = useCallback((sessionId: string) => {
     // Keep the sending card mounted while the same state update moves it to

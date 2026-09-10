@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { notifyApp } from "@/lib/app-notifications";
+import { findEmptyModelId } from "@/lib/models-config-validation";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -1523,6 +1524,13 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
   }, []);
 
   const handleSave = useCallback(async () => {
+    const invalidModel = findEmptyModelId(config);
+    if (invalidModel) {
+      setSaveError(invalidModel.message);
+      setSavedOk(false);
+      setSelection({ type: "model", providerName: invalidModel.provider, index: invalidModel.index });
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     setSavedOk(false);

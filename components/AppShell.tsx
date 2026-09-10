@@ -12,6 +12,8 @@ import type { Tab } from "./TabBar";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import {
   normalizeExternalHref,
+  openExternalLink,
+  openLocalFileLink,
   resolveLocalFileHref,
 } from "@/lib/external-links";
 import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
@@ -1150,8 +1152,6 @@ export function AppShell() {
       if (
         event.defaultPrevented ||
         event.button !== 0 ||
-        event.metaKey ||
-        event.ctrlKey ||
         event.shiftKey ||
         event.altKey ||
         !(event.target instanceof Element)
@@ -1166,7 +1166,13 @@ export function AppShell() {
       const filePath = resolveLocalFileHref(href, effectiveProjectCwd);
       if (filePath) {
         event.preventDefault();
-        handleOpenFile(filePath, getFileName(filePath));
+        if (event.metaKey || event.ctrlKey) {
+          void openLocalFileLink(filePath).then((opened) => {
+            if (!opened) window.alert("无法使用系统默认应用打开此文件，请检查文件是否存在及访问权限。");
+          });
+        } else {
+          handleOpenFile(filePath, getFileName(filePath));
+        }
         return;
       }
 
@@ -1174,11 +1180,17 @@ export function AppShell() {
       if (!externalUrl) return;
 
       event.preventDefault();
-      handleOpenWebLink(externalUrl, anchor.textContent ?? undefined);
+      if (event.metaKey || event.ctrlKey) {
+        void openExternalLink(externalUrl).then((opened) => {
+          if (!opened) window.alert("无法打开外部链接，请复制链接到浏览器中打开。");
+        });
+      } else {
+        handleOpenWebLink(externalUrl, anchor.textContent ?? undefined);
+      }
     };
 
-    document.addEventListener("click", handleAiOutputLinkClick);
-    return () => document.removeEventListener("click", handleAiOutputLinkClick);
+    document.addEventListener("click", handleAiOutputLinkClick, true);
+    return () => document.removeEventListener("click", handleAiOutputLinkClick, true);
   }, [effectiveProjectCwd, handleOpenFile, handleOpenWebLink]);
 
   const handleSelectFileTab = useCallback((tabId: string) => {

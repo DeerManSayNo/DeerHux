@@ -1,10 +1,12 @@
 "use client";
 
+import { useChatSelectAll } from "@/hooks/useChatSelectAll";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, AssistantMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import type { CollaborationMuxSnapshot } from "@/lib/parallel-agent/collaboration-mux";
-import { MessageView, type ToolProcessMessage } from "./MessageView";
+import { MessageView, type ToolProcessMessage, type StreamingToolViewProps } from "./MessageView";
+import { buildStreamingToolLayout } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { CompactionConfirmModal } from "./CompactionConfirmModal";
@@ -16,7 +18,6 @@ import { useAgentSession, type AgentPhase, type RetryInfo, type StreamRenderPrio
 import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useCodeIndex } from "@/hooks/useCodeIndex";
 import { useAudio } from "@/hooks/useAudio";
-import { useDragDrop } from "@/hooks/useDragDrop";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
 import { subscribeToAppNotification, notifyApp } from "@/lib/app-notifications";
 import { agentEventBus } from "@/lib/agent-event-bus";
@@ -311,7 +312,10 @@ function SmoothStreamingMessage({
   modelNames,
   watchdogInfo,
   onOpenSession,
-}: {
+  toolResults,
+  ...streamingToolProps
+}: StreamingToolViewProps & {
+  toolResults?: Map<string, import("@/lib/types").ToolResultMessage>;
   message: Partial<AgentMessage>;
   isBackground: boolean;
   modelNames?: Record<string, string>;
@@ -364,6 +368,8 @@ function SmoothStreamingMessage({
   return (
     <MessageView
       message={visibleMessage}
+      toolResults={toolResults}
+      {...streamingToolProps}
       isStreaming
       isBackground={isBackground}
       modelNames={modelNames}
@@ -1144,11 +1150,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   }, [ctxKey, onContextUsageChange]);
   useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
 
-  const onDrop = useCallback((files: File[]) => {
-    chatInputRef?.current?.addImages(files);
-  }, [chatInputRef]);
-
-  const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
+  useChatSelectAll(scrollContainerRef, isFocused);
 
   const visibleMessages = useMemo(() => messages.filter((m) => m.role === "user" || m.role === "assistant"), [messages]);
   const toolResultsMap = useMemo(() => {
@@ -1304,6 +1306,8 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
 
     const nearBottom = isNearBottom();
     if (nearBottom) {
+      // 自动折叠造成的高度变化不能擅自恢复用户暂停的追底。
+      if (!shouldAutoScrollRef.current && !userScrollIntentRef.current) return;
       setAutoScroll(true);
       // 在底部时，始终钉住最后一条 user 消息
       if (userMsgIndices.length > 0) {
@@ -1395,7 +1399,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     // 绘制前同步追底；若放到 useEffect + requestAnimationFrame，浏览器会先画出
     // “新 DOM + 旧 scrollTop”的中间帧（视口落在模型统计行），下一帧才回到底部。
     scrollToLiveBottom("auto");
-  }, [isRunning, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom]);
+  }, [isRunning, messages, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !isRunning;
   const contentMaxWidth = compact ? 640 : 820;
@@ -1428,6 +1432,31 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     }
     return undefined;
   })();
+  const activeToolIds = useMemo(() => new Set(
+    isRunning && agentPhase?.kind === "running_tools" ? agentPhase.tools.map((tool) => tool.id) : [],
+  ), [isRunning, agentPhase]);
+  const streamingToolLayout = useMemo(() => buildStreamingToolLayout(
+    messages,
+    streamState.isStreaming ? streamState.streamingMessage : null,
+    isRunning,
+  ), [messages, streamState.isStreaming, streamState.streamingMessage, isRunning]);
+  // 展开状态由回合外层保存，流式 bubble 落盘后也不会被重新收起。
+  const [expandedToolGroups, setExpandedToolGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleToolGroup = useCallback((id: string) => {
+    setExpandedToolGroups((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const streamingToolProps: StreamingToolViewProps = {
+    activeToolIds,
+    streamingToolLayout: streamingToolLayout.byMessage.get(messages.length),
+    expandedToolGroups,
+    onToggleToolGroup: toggleToolGroup,
+  };
+
   const toolProcessLayout = useMemo(() => {
     const hiddenMessageIndexes = new Set<number>();
     const messagesByFinalIndex = new Map<number, ToolProcessMessage[]>();
@@ -1437,7 +1466,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       let turnEnd = turnStart + 1;
       while (turnEnd < messages.length && messages[turnEnd].role !== "user") turnEnd++;
 
-      // 最后一回合仍在运行时必须保留原始实时展示；等最终回答完成落盘后再聚合、收起。
+      // 运行中的回合由 streamingToolLayout 按正文分段；完成落盘后才聚合整轮过程。
       const turnIsComplete = turnEnd < messages.length || !isRunning;
       if (turnIsComplete) {
         const assistantIndexes: number[] = [];
@@ -1612,10 +1641,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     <AiFileLinkMenu cwd={session?.cwd ?? newSessionCwd}>
     <div
       className="chat-window-wrap relative flex h-full flex-col overflow-hidden"
-      onDragEnter={handleDragEnter}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
     >
       <CompactionConfirmModal
         open={Boolean(compactionDialog) || ((isCompacting || Boolean(compactionProgress)) && Boolean(session?.id))}
@@ -1631,38 +1656,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         onAbort={() => { void handleAbortCompaction(); }}
         onSkipSend={compactionDialog?.reason === "threshold" ? skipCompactionAndSend : undefined}
       />
-      {isDragOver && (
-        <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[rgba(37,99,235,0.06)] backdrop-blur-[1px]">
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            {[0, 0.8, 1.6].map((delay) => (
-              <div
-                key={delay}
-                className="absolute h-[720px] w-[720px] rounded-full border-[1.5px] border-solid border-[rgba(37,99,235,0.5)] animate-[drop-ripple_2.4s_ease-out_infinite_backwards]"
-                style={{ transformOrigin: "center", animationDelay: `${delay}s` }}
-              />
-            ))}
-          </div>
-          <svg
-            width="280" height="280" viewBox="0 0 140 140" fill="none" xmlns="http://www.w3.org/2000/svg"
-            className="drop-shadow-[0_6px_18px_rgba(37,99,235,0.18)]"
-          >
-            <rect x="28" y="44" width="84" height="60" rx="8" fill="rgba(37,99,235,0.08)" stroke="rgba(37,99,235,0.50)" strokeWidth="1.8"/>
-            <path d="M36 100 L54 72 L68 88 L80 74 L104 100Z" fill="rgba(37,99,235,0.16)" stroke="rgba(37,99,235,0.40)" strokeWidth="1.4" strokeLinejoin="round"/>
-            <circle cx="96" cy="58" r="8" fill="rgba(37,99,235,0.22)" stroke="rgba(37,99,235,0.55)" strokeWidth="1.6"/>
-            <g stroke="rgba(37,99,235,0.45)" strokeWidth="1.4" strokeLinecap="round">
-              <line x1="96" y1="46" x2="96" y2="43"/>
-              <line x1="96" y1="70" x2="96" y2="73"/>
-              <line x1="84" y1="58" x2="81" y2="58"/>
-              <line x1="108" y1="58" x2="111" y2="58"/>
-              <line x1="87.5" y1="49.5" x2="85.4" y2="47.4"/>
-              <line x1="104.5" y1="66.5" x2="106.6" y2="68.6"/>
-              <line x1="104.5" y1="49.5" x2="106.6" y2="47.4"/>
-              <line x1="87.5" y1="66.5" x2="85.4" y2="68.6"/>
-            </g>
-          </svg>
-        </div>
-      )}
-
       {isEmptyNew ? (
         <div className={`flex flex-1 flex-col items-center justify-center overflow-y-auto ${compact ? "px-3 py-5" : "px-4 py-8"}`}>
           {currentCwd && currentProjectLabel && (
@@ -1935,11 +1928,12 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       <div className="relative flex flex-1 overflow-hidden">
         <div
           ref={scrollContainerRef}
+          data-chat-messages
           onScroll={handleScroll}
           onWheel={markUserScrollIntent}
           onTouchStart={markUserScrollIntent}
           className={`${compact ? "pt-3" : "pt-4"} flex-1 overflow-y-auto scrollbar-none [scrollbar-width:none]`}
-          style={{ overflowX: "hidden", overflowAnchor: "none" }}
+          style={{ overflowX: "hidden", overflowAnchor: shouldAutoScroll ? "none" : "auto" }}
         >
           <div className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingBottom: compact ? 12 : 18 }}>
 
@@ -1977,7 +1971,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                 const currentRefIdx = isVisible ? refIdx++ : -1;
                 // 折叠的消息仍占用 ref 序号，与 userMsgIdxToRefIdx 保持一致，
                 // 否则后续提示词会定位到错误节点或空 ref。
-                if (toolProcessLayout.hiddenMessageIndexes.has(idx)) return null;
+                if (toolProcessLayout.hiddenMessageIndexes.has(idx) || streamingToolLayout.hiddenMessageIndexes.has(idx)) return null;
                 let showTimestamp = false;
                 let isLastAssistantInTurn = false;
                 if (msg.role === "assistant") {
@@ -2049,6 +2043,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                   <MessageView
                     key={messageRenderKey}
                     message={msg}
+                    activeToolIds={activeToolIds}
+                    streamingToolLayout={streamingToolLayout.byMessage.get(idx)}
+                    expandedToolGroups={expandedToolGroups}
+                    onToggleToolGroup={toggleToolGroup}
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
                     entryId={entryIds[idx]}
@@ -2084,17 +2082,19 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               });
             })()}
 
-            {streamState.isStreaming && streamState.streamingMessage && hasRenderableStreamOutput(streamState.streamingMessage) && (
+            {streamState.isStreaming && streamState.streamingMessage && !streamingToolLayout.hiddenMessageIndexes.has(messages.length) && hasRenderableStreamOutput(streamState.streamingMessage) && (
               simpleWaitingIndicator ? (
                 <SmoothStreamingMessage
                   message={streamState.streamingMessage}
+                  toolResults={toolResultsMap}
+                  {...streamingToolProps}
                   isBackground={!isFocused}
                   modelNames={modelNames}
                   watchdogInfo={watchdogInfo}
                   onOpenSession={onOpenSession}
                 />
               ) : (
-                <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming isBackground={!isFocused} modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
+                <MessageView message={streamState.streamingMessage as AgentMessage} toolResults={toolResultsMap} {...streamingToolProps} isStreaming isBackground={!isFocused} modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
               )
             )}
 
@@ -2151,7 +2151,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
             <div ref={messagesEndRef} />
           </div>
         </div>
-        {!shouldAutoScroll && isRunning && (
+        {!shouldAutoScroll && (
           <button
             type="button"
             onClick={handleResumeAutoScroll}

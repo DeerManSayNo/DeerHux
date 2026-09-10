@@ -21,6 +21,7 @@ import type {
   ThinkingContent,
 } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
+import { buildCompletedToolLayout, countRunningGroupTools, type StreamingToolGroup, type StreamingToolMessageLayout } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
 
 /** 终态集合：只有这些状态的 run 才沉淀到触发它的 user 消息下方作为历史记录；
@@ -34,7 +35,14 @@ interface WatchdogInfo {
   contentThresholdMs: number;
 }
 
-interface Props {
+export interface StreamingToolViewProps {
+  streamingToolLayout?: StreamingToolMessageLayout;
+  activeToolIds?: ReadonlySet<string>;
+  expandedToolGroups?: ReadonlySet<string>;
+  onToggleToolGroup?: (id: string) => void;
+}
+
+interface Props extends StreamingToolViewProps {
   message: AgentMessage;
   isStreaming?: boolean;
   isBackground?: boolean;
@@ -127,7 +135,7 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ message, isStreaming, isBackground, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, toolProcessMessages, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
+function MessageViewImpl({ activeToolIds, streamingToolLayout, expandedToolGroups, onToggleToolGroup, message, isStreaming, isBackground, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, toolProcessMessages, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
   // 新 run 用 parentEntryId 精确归属到触发它的 user turn；旧数据没有该字段时，
   // 才保留 createdAt 时间窗作为兼容兜底。
   const rawTs = message.role === "user" ? (message as UserMessage).timestamp : undefined;
@@ -165,7 +173,7 @@ function MessageViewImpl({ message, isStreaming, isBackground, toolResults, mode
     );
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} isBackground={isBackground} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} toolProcessMessages={toolProcessMessages} />;
+    return <AssistantMessageView activeToolIds={activeToolIds} streamingToolLayout={streamingToolLayout} expandedToolGroups={expandedToolGroups} onToggleToolGroup={onToggleToolGroup} message={message as AssistantMessage} isStreaming={isStreaming} isBackground={isBackground} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} toolProcessMessages={toolProcessMessages} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -191,6 +199,10 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.turnEndTimestamp === next.turnEndTimestamp &&
   prev.turnDurationSeconds === next.turnDurationSeconds &&
   prev.toolProcessMessages === next.toolProcessMessages &&
+  prev.streamingToolLayout === next.streamingToolLayout &&
+  prev.activeToolIds === next.activeToolIds &&
+  prev.expandedToolGroups === next.expandedToolGroups &&
+  prev.onToggleToolGroup === next.onToggleToolGroup &&
   prev.nextUserTimestamp === next.nextUserTimestamp &&
   prev.onResend === next.onResend &&
   prev.onRetryDelivery === next.onRetryDelivery &&
@@ -617,7 +629,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
                 {displaySkillName}
               </span>
             )}
-            {displayContent}
+            <span data-message-body>{displayContent}</span>
           </div>
         </button>
       ) : (
@@ -873,7 +885,11 @@ function AssistantMessageView({
   turnEndTimestamp,
   turnDurationSeconds,
   toolProcessMessages,
-}: {
+  activeToolIds,
+  streamingToolLayout,
+  expandedToolGroups,
+  onToggleToolGroup,
+}: StreamingToolViewProps & {
   message: AssistantMessage;
   isStreaming?: boolean;
   isBackground?: boolean;
@@ -1082,6 +1098,20 @@ function AssistantMessageView({
           />
         )}
         {blocks.map((block, i) => {
+          if (block.type === "toolCall" && streamingToolLayout) {
+            const group = streamingToolLayout.groups.get(block.toolCallId);
+            if (group) return (
+              <StreamingToolHistory
+                key={`tool-history:${group.id}`}
+                group={group}
+                activeToolIds={activeToolIds}
+                expanded={expandedToolGroups?.has(group.id) ?? false}
+                onToggle={() => onToggleToolGroup?.(group.id)}
+                toolResults={toolResults}
+              />
+            );
+            if (streamingToolLayout.hiddenToolIds.has(block.toolCallId)) return null;
+          }
           // 最终 assistant 自身的 reasoning/toolCall 也属于执行过程，随上方区块折叠；
           // 最终文字和图片仍作为正式回答直接展示。
           if (hasCollapsedToolProcess && (block.type === "thinking" || block.type === "toolCall")) {
@@ -1098,7 +1128,7 @@ function AssistantMessageView({
           }
           return (
             <BlockView
-              key={i}
+              key={block.type === "toolCall" ? block.toolCallId : i}
               block={block}
               toolResults={toolResults}
               streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
@@ -1181,6 +1211,36 @@ function AssistantMessageView({
   );
 }
 
+function StreamingToolHistory({ group, expanded, onToggle, toolResults, activeToolIds }: {
+  activeToolIds?: ReadonlySet<string>;
+  group: StreamingToolGroup;
+  expanded: boolean;
+  onToggle: () => void;
+  toolResults?: Map<string, ToolResultMessage>;
+}) {
+  const running = countRunningGroupTools(group, activeToolIds, toolResults);
+  const errors = group.tools.filter(({ block }) => toolResults?.get(block.toolCallId)?.isError).length;
+  return (
+    <div className="tool-history-group" style={{ paddingBottom: 5 }}>
+      <button type="button" aria-expanded={expanded} onClick={onToggle} style={{
+        width: "100%", padding: "5px 0", border: "none", background: "transparent",
+        color: "var(--text-muted)", fontSize: 13, textAlign: "left", cursor: "pointer",
+      }}>
+        {expanded ? "▾" : "▸"} {group.closedByText ? "工具调用" : "较早的工具调用"} · {group.tools.length} 个
+        {running > 0 && ` · ${running} 个执行中`}
+        {errors > 0 && ` · ${errors} 个失败`}
+      </button>
+      {expanded && <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "8px 0" }}>
+        {group.tools.map(({ block, timestamp }) => {
+          const result = toolResults?.get(block.toolCallId);
+          const seconds = timestamp && result?.timestamp ? Math.round((result.timestamp - timestamp) / 1000) : 0;
+          return <ToolCallBlock key={block.toolCallId} block={block} result={result} duration={seconds > 0 ? seconds : undefined} />;
+        })}
+      </div>}
+    </div>
+  );
+}
+
 function ToolProcessGroup({
   messages,
   finalMessage,
@@ -1196,17 +1256,22 @@ function ToolProcessGroup({
 }) {
   // 该组件只会在完整的最终回答落盘后挂载，因此初始态即为自动收起。
   const [expanded, setExpanded] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const processMessages: ToolProcessMessage[] = [
     ...messages,
     { message: finalMessage, prevTimestamp: finalPrevTimestamp },
   ];
+  const toolLayout = buildCompletedToolLayout(processMessages.map(({ message }) => message));
 
   return (
     <div style={{ borderBottom: "1px solid var(--border)", marginBottom: 4 }}>
       <button
         type="button"
         aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
+        onClick={() => {
+          setExpanded((value) => !value);
+          setExpandedGroups(new Set());
+        }}
         style={{
           display: "flex",
           alignItems: "center",
@@ -1238,7 +1303,7 @@ function ToolProcessGroup({
       </button>
 
       {expanded && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingBottom: 10 }}>
+        <div className="tool-process-content" style={{ display: "flex", flexDirection: "column", gap: 8, paddingBottom: 10 }}>
           {processMessages.flatMap(({ message: processMessage, prevTimestamp: processPrevTimestamp }, messageIndex) => {
             const messageTimestamp = typeof processMessage.timestamp === "number" ? processMessage.timestamp : undefined;
             const thinkingDuration = messageTimestamp && processPrevTimestamp
@@ -1249,13 +1314,22 @@ function ToolProcessGroup({
               if (messageIndex === processMessages.length - 1 && block.type !== "thinking" && block.type !== "toolCall") {
                 return null;
               }
-              let toolDuration: number | undefined;
-              if (block.type === "toolCall" && messageTimestamp) {
-                const resultTimestamp = toolResults?.get(block.toolCallId)?.timestamp;
-                if (resultTimestamp) {
-                  const seconds = Math.round((resultTimestamp - messageTimestamp) / 1000);
-                  if (seconds > 0) toolDuration = seconds;
-                }
+              if (block.type === "toolCall") {
+                const layout = toolLayout.byMessage.get(messageIndex);
+                const group = layout?.groups.get(block.toolCallId);
+                if (!group) return null;
+                return <StreamingToolHistory
+                  key={`tool-history:${group.id}`}
+                  group={group}
+                  expanded={expandedGroups.has(group.id)}
+                  onToggle={() => setExpandedGroups((previous) => {
+                    const next = new Set(previous);
+                    if (next.has(group.id)) next.delete(group.id);
+                    else next.add(group.id);
+                    return next;
+                  })}
+                  toolResults={toolResults}
+                />;
               }
               return (
                 <BlockView
@@ -1263,9 +1337,6 @@ function ToolProcessGroup({
                   block={block}
                   toolResults={toolResults}
                   streamingDuration={block.type === "thinking" ? thinkingDuration : undefined}
-                  toolCallDurations={block.type === "toolCall" && toolDuration !== undefined
-                    ? new Map([[block.toolCallId, toolDuration]])
-                    : undefined}
                 />
               );
             });
@@ -1315,7 +1386,13 @@ function createMarkdownComponents(isStreaming: boolean): Components {
       if (isBlock && isStreaming) {
         return (
           <pre className="streaming-code-block">
-            <code className={className} {...props}>{children}</code>
+            <code className={className} {...props}>
+              {raw.replace(/\n$/, "").split("\n").map((line, index, lines) => (
+                <span key={index} className="chat-code-line" style={{ display: "block", width: "fit-content", minWidth: "1ch" }}>
+                  {line}{index < lines.length - 1 ? "\n" : ""}
+                </span>
+              ))}
+            </code>
           </pre>
         );
       }
@@ -1347,7 +1424,7 @@ const COMPLETED_MARKDOWN_COMPONENTS = createMarkdownComponents(false);
 
 function TextBlock({ block, isStreaming }: { block: TextContent; isStreaming?: boolean }) {
   return (
-    <div className="markdown-body" data-ai-output>
+    <div className="markdown-body" data-ai-output data-message-body>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={isStreaming ? STREAMING_MARKDOWN_COMPONENTS : COMPLETED_MARKDOWN_COMPONENTS}
@@ -1579,6 +1656,14 @@ function formatCompactDuration(seconds: number): string {
 function CodeBlock({ code, lang }: { code: string; lang: string }) {
   const { isDark } = useTheme();
   const [copied, setCopied] = useState(false);
+  const highlightStyle = useMemo(() => {
+    const theme = isDark ? vscDarkPlus : vs;
+    const preStyle = { ...theme['pre[class*="language-"]'] };
+    // The bundled themes use different background properties. Normalize before
+    // SyntaxHighlighter merges customStyle so theme changes never mix them.
+    delete preStyle.background;
+    return { ...theme, 'pre[class*="language-"]': preStyle };
+  }, [isDark]);
 
   const copy = () => {
     copyText(code).then(() => {
@@ -1589,6 +1674,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
 
   return (
     <div
+      data-code-block
       style={{
         position: "relative",
         marginTop: 4,
@@ -1599,6 +1685,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
       }}
     >
       <div
+        data-selection-ignore
         style={{
           padding: "3px 10px",
           background: "var(--bg-panel)",
@@ -1626,8 +1713,10 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
       </div>
       <SyntaxHighlighter
         language={lang || "text"}
-        style={isDark ? vscDarkPlus : vs}
+        style={highlightStyle}
         showLineNumbers
+        wrapLines
+        lineProps={{ className: "chat-code-line", style: { display: "block", width: "fit-content", minWidth: "1ch" } }}
         lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
         customStyle={{
           margin: 0,
@@ -1635,7 +1724,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
           fontSize: 12.5,
           lineHeight: 1.6,
           borderRadius: 0,
-          background: "var(--bg)",
+          backgroundColor: "var(--bg)",
         }}
         codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
       >
