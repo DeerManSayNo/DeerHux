@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-read-clipboard-file-paths"
+description = "Enables the read_clipboard_file_paths command without any pre-configured scope."
+commands.allow = ["read_clipboard_file_paths"]
+
+[[permission]]
+identifier = "deny-read-clipboard-file-paths"
+description = "Denies the read_clipboard_file_paths command without any pre-configured scope."
+commands.deny = ["read_clipboard_file_paths"]

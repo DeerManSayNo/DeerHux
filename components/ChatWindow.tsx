@@ -1644,6 +1644,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     <AiFileLinkMenu cwd={session?.cwd ?? newSessionCwd}>
     <div
       className="chat-window-wrap relative flex h-full flex-col overflow-hidden"
+      style={{ overflowY: "auto" }}
     >
       <WindowWeChatButton
         headerTargetId={wechatHeaderTargetId}
@@ -1684,7 +1685,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         onSkipSend={compactionDialog?.reason === "threshold" ? skipCompactionAndSend : undefined}
       />
       {isEmptyConversation ? (
-        <div className={`flex flex-1 flex-col items-center justify-center overflow-y-auto ${compact ? "px-3 py-5" : "px-4 py-8"}`}>
+        <div className={`flex flex-1 flex-col items-center justify-center overflow-y-auto ${compact ? "px-3 py-5" : "px-4 py-8"}`} style={{ justifyContent: "safe center" }}>
           {currentCwd && currentProjectLabel && (
             <div
               style={{
@@ -2189,7 +2190,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         )}
       </div>
 
-      <div className="relative">
+      <div className="relative" style={{ flexShrink: 0 }}>
         {chatInputElement}
       </div>
       </>

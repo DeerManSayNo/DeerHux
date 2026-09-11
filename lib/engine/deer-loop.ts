@@ -842,10 +842,8 @@ export class DeerLoopEngine implements AgentEnginePort {
               this.emitMessageStartIfNeeded(consumed);
               this.emit({ type: "message_end", message: consumed.endMessage });
             }
-            // ★ M4 修复（问题 #3）：abort 时不 push endMessage 到 transcript（aborted 不算有效对话）。
-            //   error（不可重试/全部重试失败）仍 push（保留错误上下文，下次 prompt LLM 能看到）。
-            //   若 abort 发生在工具结果之后，外层 finally 会补一条可展示的失败消息，避免 UI 静默。
-            if (!consumed.aborted) {
+            // 主动停止保留已有输出，空回复不落盘；真实失败仍保留错误上下文。
+            if (!consumed.aborted || (this._abortRequested && consumed.endMessage.content.length > 0)) {
               this.appendPersistedMessage(consumed.endMessage);
             }
             if (consumed.aborted) {
@@ -1010,7 +1008,7 @@ export class DeerLoopEngine implements AgentEnginePort {
         this._isRunning = false;
         this.abortController = null;
 
-        // 工具跑完后若下一轮 LLM 失败/中止且未落盘错误消息，会话会停在 toolResult，
+        // 工具跑完后若下一轮 LLM 异常结束且未落盘错误消息，会话会停在 toolResult，
         // 前端又因本回合已收到过 tool-call assistant 而不再显示“模型响应失败”。
         // 这里补一条可持久化、可展示的失败 assistant，避免静默空回复。
         const failureMessage = this.persistIncompleteTurnFailure(agentError);
@@ -2973,6 +2971,10 @@ export class DeerLoopEngine implements AgentEnginePort {
       lastPartial ??
       this.synthesizeEmptyAssistantMessage(aborted ? "aborted" : "error", errorMessage);
 
+    if (aborted && this._abortRequested) {
+      return { ...base, stopReason: "aborted", errorMessage: undefined };
+    }
+
     if (!aborted && base.stopReason !== "error" && !errorMessage) {
       return base;
     }
@@ -3022,6 +3024,9 @@ export class DeerLoopEngine implements AgentEnginePort {
    * 返回供 agent_end.error 使用的文案；无需处理时返回 undefined。
    */
   private persistIncompleteTurnFailure(agentError: string | undefined): string | undefined {
+    // Explicit cancellation is a normal terminal state, including before the first token
+    // and between tool execution and the next model response.
+    if (agentError === "aborted" && this._abortRequested) return undefined;
     const last = this._messages[this._messages.length - 1] as
       | { role?: string; stopReason?: string; errorMessage?: string; content?: unknown[] }
       | undefined;

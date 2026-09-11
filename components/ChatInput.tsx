@@ -1,10 +1,12 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
+import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import type { AutoRecoveryMode, RetryInfo, StallLevel } from "@/hooks/useAgentSession";
 import type { AgentMode } from "@/lib/agent-modes";
 import type { FileReference, SkillReference } from "@/lib/types";
+import { skillReference, skillQueryAtCaret } from "@/lib/skill-selection";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
 import { subscribeToAppNotification } from "@/lib/app-notifications";
@@ -42,6 +44,7 @@ export interface ChatInputState {
   value: string;
   attachedImages: AttachedImage[];
   selectedSkill: SkillOption | null;
+  selectedSkills?: SkillOption[];
   fileReferences?: FileReference[];
 }
 
@@ -155,12 +158,6 @@ function skillScope(skill: SkillOption): "global" | "project" | "path" {
   return "path";
 }
 
-function skillPickerModeForValue(value: string): "all" | "project" | null {
-  if (!value || /\s/.test(value)) return null;
-  if (value.startsWith("/")) return value.startsWith("/skill:") ? null : "all";
-  // Only trigger skill picker for "/" prefix, not for plain text input.
-  return null;
-}
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onBeforeSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, modelCatalogError, onModelChange,
@@ -207,14 +204,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [skills, setSkills] = useState<SkillOption[]>([]);
   const [skillPickerRect, setSkillPickerRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [skillPickerIndex, setSkillPickerIndex] = useState(0);
-  const [selectedSkill, setSelectedSkill] = useState<SkillOption | null>(initialInputState?.selectedSkill ?? null);
+  const [selectedSkills, setSelectedSkills] = useState<SkillOption[]>(initialInputState?.selectedSkills ?? (initialInputState?.selectedSkill ? [initialInputState.selectedSkill] : []));
+  const [skillQuery, setSkillQuery] = useState<ReturnType<typeof skillQueryAtCaret>>(null);
   const skillPickerIndexRef = useRef(0);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const skillsFetchRef = useRef<AbortController | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const selectedSkillChipRef = useRef<HTMLSpanElement>(null);
-  const [selectedSkillIndent, setSelectedSkillIndent] = useState(0);
+  useAutoGrowTextarea(textareaRef, value);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
@@ -257,7 +254,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         ta.setSelectionRange(pos, pos);
         ta.focus();
         ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        ta.style.height = `${ta.scrollHeight}px`;
       });
     },
     addImages(files: File[]) {
@@ -285,7 +282,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     },
     clearInput() {
       setValue("");
-      setSelectedSkill(null);
+      setSelectedSkills([]);
       setFileReferences([]);
       pasteGenerationRef.current += 1;
       setAttachedImages((prev) => {
@@ -296,6 +293,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         value: "",
         attachedImages: [],
         selectedSkill: null,
+        selectedSkills: [],
         fileReferences: [],
       });
       if (textareaRef.current) {
@@ -383,12 +381,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       textareaRef.current.style.height = "auto";
     }
     setValue("");
-    setSelectedSkill(null);
+    setSelectedSkills([]);
     clearImages();
     saveInputStateRef?.current?.({
       value: "",
       attachedImages: [],
       selectedSkill: null,
+      selectedSkills: [],
       fileReferences,
     });
   }, [clearImages, fileReferences, saveInputStateRef]);
@@ -422,7 +421,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const currentValue = textareaRef.current?.value ?? value;
     const msg = currentValue.trim();
     const references = fileReferences.length ? [...fileReferences] : undefined;
-    const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
+    const skill = skillReference(selectedSkills.map((skill) => skill.name));
     if (!msg && !attachedImages.length && !skill && !references?.length) return;
     if (attachedImages.some((image) => !image.fileUrl && !image.data) || pendingPastes) return;
     if (isStreamingRef.current) return;
@@ -444,13 +443,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
     clearSubmittedInput();
     onSend(msg, images, references, skill);
-  }, [value, selectedSkill, attachedImages, fileReferences, pendingPastes, onSend, onBeforeSend, clearSubmittedInput]);
+  }, [value, selectedSkills, attachedImages, fileReferences, pendingPastes, onSend, onBeforeSend, clearSubmittedInput]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const currentValue = textareaRef.current?.value ?? value;
     const msg = currentValue.trim();
     const references = fileReferences.length ? [...fileReferences] : undefined;
-    const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
+    const skill = skillReference(selectedSkills.map((skill) => skill.name));
     if (!msg && !attachedImages.length && !skill && !references?.length) return;
     if (attachedImages.some((image) => !image.fileUrl && !image.data) || pendingPastes) return;
     const images = attachedImages.length ? attachedImages : undefined;
@@ -460,7 +459,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } else if (mode === "followup" && onFollowUp) {
       onFollowUp(msg, images, references, skill);
     }
-  }, [value, selectedSkill, attachedImages, fileReferences, pendingPastes, onSteer, onFollowUp, clearSubmittedInput]);
+  }, [value, selectedSkills, attachedImages, fileReferences, pendingPastes, onSteer, onFollowUp, clearSubmittedInput]);
 
   const fetchSkills = useCallback(async (cwd: string) => {
     if (textOnly) return;
@@ -494,31 +493,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const closeSkillPicker = useCallback(() => {
     setSkillPickerOpen(false);
+    setSkillQuery(null);
     setActiveSkillPickerIndex(0);
   }, [setActiveSkillPickerIndex]);
 
   const selectSkill = useCallback((skill: SkillOption) => {
     const ta = textareaRef.current;
     const currentValue = ta?.value ?? value;
-    const firstSpace = currentValue.indexOf(" ");
-    const rest = currentValue.startsWith("/") && firstSpace >= 0 ? currentValue.slice(firstSpace + 1) : "";
-    setSelectedSkill(skill);
+    const query = skillPickerOpen ? skillQueryAtCaret(currentValue, ta?.selectionStart ?? currentValue.length) : null;
+    const rest = query ? currentValue.slice(0, query.start) + currentValue.slice(query.end) : currentValue;
+    const caret = query?.start ?? ta?.selectionStart ?? rest.length;
+    setSelectedSkills((previous) => previous.some((item) => item.name === skill.name) ? previous : [...previous, skill]);
     setValue(rest);
     closeSkillPicker();
     requestAnimationFrame(() => {
       if (!ta) return;
       ta.focus();
-      ta.setSelectionRange(rest.length, rest.length);
+      ta.setSelectionRange(caret, caret);
     });
-  }, [value, closeSkillPicker]);
+  }, [value, skillPickerOpen, closeSkillPicker]);
 
   const handleTextChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value;
     setValue(newValue);
-    if (selectedSkill && newValue.startsWith("/")) setSelectedSkill(null);
+    const query = skillQueryAtCaret(newValue, e.target.selectionStart);
+    setSkillQuery(query);
 
-    // Skill picker: "/" searches all skills; plain first-token input searches project skills.
-    if (cwd && !selectedSkill && skillPickerModeForValue(newValue)) {
+    // Each slash token can add a skill without replacing prior selections or prose.
+    if (cwd && query) {
       const ta = textareaRef.current;
       if (ta) {
         const rect = ta.getBoundingClientRect();
@@ -532,7 +534,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } else {
       if (skillPickerOpen) closeSkillPicker();
     }
-  }, [skillPickerOpen, selectedSkill, cwd, fetchSkills, closeSkillPicker, setActiveSkillPickerIndex]);
+  }, [skillPickerOpen, cwd, fetchSkills, closeSkillPicker, setActiveSkillPickerIndex]);
 
   const handleCompositionStart = useCallback(() => {
     isComposingRef.current = true;
@@ -551,21 +553,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [onSteer, onFollowUp, sendQueued, handleSend]);
 
   // Filtered skills for the picker
-  const skillPickerMode = useMemo(() => skillPickerModeForValue(value), [value]);
-
-  const skillPickerFilter = useMemo(() => {
-    if (skillPickerMode === "all") return value.slice(1).toLowerCase();
-    if (skillPickerMode === "project") return value.toLowerCase();
-    return "";
-  }, [skillPickerMode, value]);
+  const skillPickerMode = skillQuery ? "all" : null;
+  const skillPickerFilter = skillQuery?.query.toLowerCase() ?? "";
 
   const filteredSkills = useMemo(() => {
-    if (!skillPickerFilter) return skills;
+    const available = skills.filter((skill) => !selectedSkills.some((selected) => selected.name === skill.name));
+    if (!skillPickerFilter) return available;
     const q = skillPickerFilter;
-    return skills.filter(
+    return available.filter(
       (s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
     );
-  }, [skillPickerFilter, skills]);
+  }, [skillPickerFilter, skills, selectedSkills]);
 
   const globalSkills = useMemo(() => (
     skillPickerMode === "all" ? filteredSkills.filter((s) => skillScope(s) === "global") : []
@@ -576,7 +574,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   ), [globalSkills, projectSkills, skillPickerMode]);
 
   const commonProjectSkills = useMemo(() => skills
-    .filter((s) => skillScope(s) === "project" && !s.disableModelInvocation), [skills]);
+    .filter((s) => skillScope(s) === "project" && !s.disableModelInvocation && !selectedSkills.some((selected) => selected.name === s.name)), [skills, selectedSkills]);
 
   useEffect(() => {
     if (!cwd) {
@@ -645,16 +643,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
 
-      if (selectedSkill && (e.key === "Backspace" || e.key === "Delete")) {
+      if (selectedSkills.length > 0 && e.key === "Backspace") {
         const ta = e.currentTarget;
         const start = ta.selectionStart ?? 0;
         const end = ta.selectionEnd ?? 0;
         const isEmpty = ta.value.length === 0;
         const isBackspaceAtStart = e.key === "Backspace" && start === 0 && end === 0;
-        const isDeleteAtStart = e.key === "Delete" && start === 0 && end === 0;
-        if (isEmpty || isBackspaceAtStart || isDeleteAtStart) {
+        if (isEmpty || isBackspaceAtStart) {
           e.preventDefault();
-          setSelectedSkill(null);
+          setSelectedSkills((previous) => previous.slice(0, -1));
           return;
         }
       }
@@ -665,14 +662,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         runSendAction();
       }
     },
-    [runSendAction, skillPickerOpen, visibleSkillPickerSkills.length, handleSkillPickerKeyDown, selectedSkill]
+    [runSendAction, skillPickerOpen, visibleSkillPickerSkills.length, handleSkillPickerKeyDown, selectedSkills]
   );
 
   const handleInput = useCallback(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    ta.style.height = `${ta.scrollHeight}px`;
   }, []);
 
   // Build model options: prefer modelList (has provider info), fallback to modelNames
@@ -840,33 +837,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
 
 
-  // Keep the textarea's first line indented by the visual skill chip.
-  // The textarea itself stays full-width, so wrapped/new lines can flow underneath the chip.
-  useLayoutEffect(() => {
-    if (!selectedSkill) {
-      setSelectedSkillIndent(0);
-      return;
-    }
-
-    const chip = selectedSkillChipRef.current;
-    const measure = () => {
-      setSelectedSkillIndent(chip ? Math.ceil(chip.getBoundingClientRect().width) + 8 : 0);
-    };
-
-    measure();
-    const resizeObserver = chip && typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
-    if (chip) resizeObserver?.observe(chip);
-    window.addEventListener("resize", measure);
-    return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener("resize", measure);
-    };
-  }, [selectedSkill]);
-
   // Persist input state to the cache ref whenever it changes
   useEffect(() => {
-    saveInputStateRef?.current?.({ value, attachedImages, selectedSkill, fileReferences });
-  }, [value, attachedImages, selectedSkill, fileReferences, saveInputStateRef]);
+    saveInputStateRef?.current?.({ value, attachedImages, selectedSkill: null, selectedSkills, fileReferences });
+  }, [value, attachedImages, selectedSkills, fileReferences, saveInputStateRef]);
 
   // Close dropdowns on outside click or Escape
   useEffect(() => {
@@ -953,7 +927,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const roleSettingCount = selectedRole ? Object.values(selectedRole.blocks ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0) : 0;
   const isUploadingImages = attachedImages.some((image) => !image.fileUrl && !image.data);
   const isReadingClipboard = pendingPastes > 0;
-  const hasSendableContent = Boolean(value.trim() || attachedImages.length || selectedSkill || fileReferences.length)
+  const hasComposerContent = Boolean(value.trim() || attachedImages.length || selectedSkills.length || fileReferences.length);
+  const hasSendableContent = hasComposerContent
     && !isUploadingImages
     && !isReadingClipboard;
   const hasFileReferences = fileReferences.length > 0;
@@ -1235,6 +1210,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     return (
                       <button
                         key={skill.name}
+                        onMouseDown={(e) => e.preventDefault()}
                         onClick={() => selectSkill(skill)}
                         style={{
                           display: "flex", alignItems: "flex-start", gap: 8,
@@ -1271,6 +1247,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     return (
                       <button
                         key={skill.name}
+                        onMouseDown={(e) => e.preventDefault()}
                         onClick={() => selectSkill(skill)}
                         style={{
                           display: "flex", alignItems: "flex-start", gap: 8,
@@ -1301,7 +1278,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         })()}
 
         {/* Input context row: project skills on the left, file references on the right */}
-        {((commonProjectSkills.length > 0 && !selectedSkill) || hasFileReferences) && (
+        {(commonProjectSkills.length > 0 || hasFileReferences) && (
           <div
             style={{
               display: "flex",
@@ -1330,7 +1307,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   : undefined,
               }}
             >
-              {commonProjectSkills.length > 0 && !selectedSkill && (
+              {commonProjectSkills.length > 0 && (
                 <>
                   <span
                     style={{
@@ -1475,18 +1452,20 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           </div>
         )}
 
-        {/* Main input */}
+        {/* Text and controls share one composer surface. */}
         <div
+          data-chat-composer
           style={{
             display: "flex",
+            flexDirection: "column",
             gap: compact ? 7 : 8,
-            alignItems: "center",
+            alignItems: "stretch",
             background: "var(--bg)",
             border: `1px solid ${isStreaming && (onSteer || onFollowUp)
               ? "rgba(234,179,8,0.4)"
               : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
             borderRadius: compact ? 16 : 14,
-            padding: compact ? "9px 9px 9px 12px" : "10px 10px 10px 14px",
+            padding: compact ? "9px 9px 4px 12px" : "10px 10px 4px 14px",
             boxShadow: compact
               ? "0 1px 2px rgba(15,23,42,0.035), 0 12px 28px -22px rgba(15,23,42,0.22)"
               : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
@@ -1498,92 +1477,93 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               position: "relative",
               flex: 1,
               minWidth: 0,
-              alignSelf: "center",
+              alignSelf: "stretch",
               display: "flex",
-              alignItems: "center",
+              flexDirection: "column",
+              alignItems: "stretch",
             }}
           >
-            {selectedSkill && (
-              <span
-                ref={selectedSkillChipRef}
-                title={`当前启用 skill: ${selectedSkill.name}`}
-                style={{
-                  position: "absolute",
-                  left: 0,
-                  top: 0,
-                  zIndex: 1,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 4,
-                  maxWidth: 200,
-                  height: 22,
-                  padding: "0 5px 0 7px",
-                  borderRadius: 999,
-                  background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
-                  border: "1px solid color-mix(in srgb, var(--accent) 13%, transparent)",
-                  color: "color-mix(in srgb, var(--accent) 55%, var(--text-muted))",
-                  fontSize: 12,
-                  fontWeight: 500,
-                  letterSpacing: "-0.01em",
-                  backdropFilter: "blur(8px)",
-                  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.10), 0 1px 2px rgba(15,23,42,0.03)",
-                }}
-              >
-                <span
-                  aria-hidden="true"
-                  style={{
-                    width: 4,
-                    height: 4,
-                    borderRadius: "50%",
-                    background: "currentColor",
-                    opacity: 0.45,
-                    flexShrink: 0,
-                  }}
-                />
-                <span
-                  style={{
-                    minWidth: 0,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {selectedSkill.name}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => { setSelectedSkill(null); textareaRef.current?.focus(); }}
-                  aria-label={`移除 skill ${selectedSkill.name}`}
-                  title="移除技能"
-                  style={{
-                    flexShrink: 0,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    width: 14,
-                    height: 14,
-                    marginRight: -2,
-                    border: "none",
-                    borderRadius: "50%",
-                    background: "transparent",
-                    color: "inherit",
-                    cursor: "pointer",
-                    padding: 0,
-                    opacity: 0.42,
-                    outline: "none",
-                    transition: "background 120ms ease, opacity 120ms ease, color 120ms ease",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.85"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
-                  onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.9"; }}
-                  onBlur={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
-                >
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
-                    <path d="M18 6 6 18" />
-                    <path d="m6 6 12 12" />
-                  </svg>
-                </button>
-              </span>
+            {selectedSkills.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, width: "100%", marginBottom: 6 }}>
+                {selectedSkills.map((selectedSkill) => (
+                  <span
+                    key={selectedSkill.name}
+                    title={`当前启用 skill: ${selectedSkill.name}`}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      maxWidth: 200,
+                      height: 22,
+                      padding: "0 5px 0 7px",
+                      borderRadius: 999,
+                      background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
+                      border: "1px solid color-mix(in srgb, var(--accent) 13%, transparent)",
+                      color: "color-mix(in srgb, var(--accent) 55%, var(--text-muted))",
+                      fontSize: 12,
+                      fontWeight: 500,
+                      letterSpacing: "-0.01em",
+                      backdropFilter: "blur(8px)",
+                      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.10), 0 1px 2px rgba(15,23,42,0.03)",
+                    }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        width: 4,
+                        height: 4,
+                        borderRadius: "50%",
+                        background: "currentColor",
+                        opacity: 0.45,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span
+                      style={{
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {selectedSkill.name}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedSkills((previous) => previous.filter((skill) => skill.name !== selectedSkill.name)); textareaRef.current?.focus(); }}
+                      aria-label={`移除 skill ${selectedSkill.name}`}
+                      title="移除技能"
+                      style={{
+                        flexShrink: 0,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 14,
+                        height: 14,
+                        marginRight: -2,
+                        border: "none",
+                        borderRadius: "50%",
+                        background: "transparent",
+                        color: "inherit",
+                        cursor: "pointer",
+                        padding: 0,
+                        opacity: 0.42,
+                        outline: "none",
+                        transition: "background 120ms ease, opacity 120ms ease, color 120ms ease",
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.85"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
+                      onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.9"; }}
+                      onBlur={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
+                        <path d="M18 6 6 18" />
+                        <path d="m6 6 12 12" />
+                      </svg>
+                    </button>
+                  </span>
+                ))}
+              </div>
             )}
             <textarea
               ref={textareaRef}
@@ -1621,137 +1601,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 display: "block",
                 boxSizing: "border-box",
                 minHeight: compact ? 40 : 44,
-                maxHeight: 200,
-                overflow: "auto",
+                overflow: "hidden",
                 // Only reserve space for the skill chip on the first visual line.
                 // Wrapped/subsequent lines should start from the normal left edge.
-                textIndent: selectedSkillIndent,
               }}
             />
           </div>
 
-          {isStreaming ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
-              {onSteer && (
-                <button
-                  type="button"
-                  onClick={() => sendQueued("steer")}
-                  disabled={!hasSendableContent}
-                  title="打断 Agent 当前运行，立即注入消息"
-                  aria-label="立即注入消息"
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    width: 28,
-                    height: 28,
-                    padding: 0,
-                    background: hasSendableContent ? "var(--bg-panel)" : "var(--bg-panel)",
-                    border: "none",
-                    borderRadius: "50%",
-                    color: hasSendableContent ? "var(--text-muted)" : "var(--text-dim)",
-                    cursor: hasSendableContent ? "pointer" : "not-allowed",
-                    boxShadow: "none",
-                    transition: "background 0.15s, box-shadow 0.15s",
-                  }}
-                >
-                  <svg width="14" height="14" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M5 1 L9 5 L5 9" /><line x1="1" y1="5" x2="9" y2="5" />
-                  </svg>
-                </button>
-              )}
-              {onFollowUp && (
-                <button
-                  type="button"
-                  onClick={() => sendQueued("followup")}
-                  disabled={!hasSendableContent}
-                  title="在 Agent 完成后排队发送"
-                  aria-label="排队发送消息"
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    width: 28,
-                    height: 28,
-                    padding: 0,
-                    background: hasSendableContent ? "var(--bg-panel)" : "var(--bg-panel)",
-                    border: "none",
-                    borderRadius: "50%",
-                    color: hasSendableContent ? "var(--text-muted)" : "var(--text-dim)",
-                    cursor: hasSendableContent ? "pointer" : "not-allowed",
-                    boxShadow: "none",
-                    transition: "background 0.15s, box-shadow 0.15s",
-                  }}
-                >
-                  <svg width="14" height="14" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <line x1="5" y1="1" x2="5" y2="6" /><polyline points="2.5 3.5 5 1 7.5 3.5" />
-                    <line x1="2" y1="9" x2="8" y2="9" />
-                  </svg>
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onAbort}
-                title="停止 Agent"
-                aria-label="停止 Agent"
-                style={{
-                  flexShrink: 0,
-                  alignSelf: "flex-end",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 28,
-                  height: 28,
-                  padding: 0,
-                  background: "#ef4444",
-                  border: "none",
-                  borderRadius: "50%",
-                  color: "#fff",
-                  cursor: "pointer",
-                  fontSize: 13,
-                  fontWeight: 600,
-                  letterSpacing: "-0.01em",
-                  boxShadow: "0 1px 3px rgba(239,68,68,0.25)",
-                  transition: "background 0.15s, box-shadow 0.15s",
-                }}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
-                </svg>
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={handleSend}
-              disabled={!hasSendableContent}
-              title={isReadingClipboard ? "正在读取文件路径" : isUploadingImages ? "图片上传中" : agentMode === "plan" ? "生成计划" : agentMode === "ask" ? "发送 Ask" : "发送 Agent"}
-              style={{
-                flexShrink: 0,
-                alignSelf: "flex-end",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28,
-                height: 28,
-                padding: 0,
-                background: hasSendableContent ? "var(--accent)" : "var(--bg-panel)",
-                border: "none",
-                borderRadius: "50%",
-                color: hasSendableContent ? "#fff" : "var(--text-dim)",
-                cursor: hasSendableContent ? "pointer" : "not-allowed",
-                fontSize: 13,
-                fontWeight: 600,
-                letterSpacing: "-0.01em",
-                boxShadow: hasSendableContent ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
-                transition: "background 0.15s, box-shadow 0.15s",
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="19" x2="12" y2="5" />
-                <polyline points="5 12 12 5 19 12" />
-              </svg>
-            </button>
-          )}
-        </div>
-
         {/* Bottom bar: left | center (context) | right */}
-        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+        <div data-composer-toolbar style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0, marginLeft: compact ? -6 : -8 }}>
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
-          <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 2 }}>
+          <div style={{ flex: "0 1 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
             <button
               hidden={textOnly}
               onClick={() => { void selectReferenceFiles(); }}
@@ -1782,7 +1643,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </button>
             {/* Role selector */}
             {selectedRole && onRoleChange && (
-              <div ref={roleDropdownRef} style={{ position: "relative" }}>
+              <div ref={roleDropdownRef} style={{ position: "relative", minWidth: 0 }}>
                 <button
                   onClick={(e) => {
                     if (isStreaming) return;
@@ -1794,7 +1655,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   title={roleSettingCount ? `当前角色有 ${roleSettingCount} 条设定` : "选择角色"}
                   style={{
                     display: "flex", alignItems: "center", gap: 6,
-                    padding: compact ? "8px 8px" : "8px 12px", height: 32, maxWidth: compact ? 92 : 180,
+                    padding: compact ? "0 8px" : "0 12px", lineHeight: "16px", height: 32, maxWidth: compact ? 92 : 180, width: "100%", minWidth: 0,
                     background: roleDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none", borderRadius: 9,
                     color: roleSettingCount ? "var(--accent)" : "var(--text-muted)",
@@ -1865,7 +1726,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             )}
             {/* Model selector — visible always, disabled during streaming */}
             {modelOptions.length > 0 && currentName && onModelChange && (
-                <div ref={dropdownRef} style={{ position: "relative" }}>
+                <div ref={dropdownRef} style={{ position: "relative", minWidth: 0 }}>
                   <button
                     onClick={(e) => {
                       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -1875,9 +1736,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     disabled={isStreaming}
                     style={{
                       display: "flex", alignItems: "center", gap: 6,
-                      padding: compact ? "8px 8px" : "8px 12px",
+                      padding: compact ? "0 8px" : "0 12px",
+                      lineHeight: "16px",
                       height: 32,
-                      maxWidth: compact ? 118 : 220, overflow: "hidden",
+                      maxWidth: compact ? 118 : 220, width: "100%", minWidth: 0, overflow: "hidden",
                       background: modelDropdownOpen ? "var(--bg-hover)" : "none",
                       border: "none",
                       borderRadius: 9,
@@ -2044,7 +1906,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 e.currentTarget.style.color = moreMenuOpen ? "var(--text)" : "var(--text-muted)";
               }}
             >
-              ...
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style={{ display: "block", flexShrink: 0 }}>
+                <circle cx="5" cy="12" r="2" />
+                <circle cx="12" cy="12" r="2" />
+                <circle cx="19" cy="12" r="2" />
+              </svg>
             </button>
             {moreMenuOpen && (
               <div
@@ -2386,6 +2252,123 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             )}
           </div>
 
+          {isStreaming ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "center" }}>
+              {onSteer && (
+                <button
+                  type="button"
+                  onClick={() => sendQueued("steer")}
+                  disabled={!hasSendableContent}
+                  title="打断 Agent 当前运行，立即注入消息"
+                  aria-label="立即注入消息"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32,
+                    height: 32,
+                    padding: 0,
+                    background: hasSendableContent ? "var(--bg-panel)" : "var(--bg-panel)",
+                    border: "none",
+                    borderRadius: "50%",
+                    color: hasSendableContent ? "var(--text-muted)" : "var(--text-dim)",
+                    cursor: hasSendableContent ? "pointer" : "not-allowed",
+                    boxShadow: "none",
+                    transition: "background 0.15s, box-shadow 0.15s",
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M5 1 L9 5 L5 9" /><line x1="1" y1="5" x2="9" y2="5" />
+                  </svg>
+                </button>
+              )}
+              {onFollowUp && (
+                <button
+                  type="button"
+                  onClick={() => sendQueued("followup")}
+                  disabled={!hasSendableContent}
+                  title="在 Agent 完成后排队发送"
+                  aria-label="排队发送消息"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32,
+                    height: 32,
+                    padding: 0,
+                    background: hasSendableContent ? "var(--bg-panel)" : "var(--bg-panel)",
+                    border: "none",
+                    borderRadius: "50%",
+                    color: hasSendableContent ? "var(--text-muted)" : "var(--text-dim)",
+                    cursor: hasSendableContent ? "pointer" : "not-allowed",
+                    boxShadow: "none",
+                    transition: "background 0.15s, box-shadow 0.15s",
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <line x1="5" y1="1" x2="5" y2="6" /><polyline points="2.5 3.5 5 1 7.5 3.5" />
+                    <line x1="2" y1="9" x2="8" y2="9" />
+                  </svg>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onAbort}
+                title="停止 Agent"
+                aria-label="停止 Agent"
+                style={{
+                  flexShrink: 0,
+                  alignSelf: "center",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32,
+                  height: 32,
+                  padding: 0,
+                  background: "#ef4444",
+                  border: "none",
+                  borderRadius: "50%",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  letterSpacing: "-0.01em",
+                  boxShadow: "0 1px 3px rgba(239,68,68,0.25)",
+                  transition: "background 0.15s, box-shadow 0.15s",
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
+                </svg>
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!hasSendableContent}
+              title={isReadingClipboard ? "正在读取文件路径" : isUploadingImages ? "图片上传中" : agentMode === "plan" ? "生成计划" : agentMode === "ask" ? "发送 Ask" : "发送 Agent"}
+              aria-busy={isReadingClipboard || isUploadingImages}
+              style={{
+                flexShrink: 0,
+                alignSelf: "center",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 30,
+                height: 30,
+                padding: 0,
+                background: hasComposerContent ? "var(--accent)" : "var(--bg-panel)",
+                border: "none",
+                borderRadius: "50%",
+                color: hasComposerContent ? "#fff" : "var(--text-dim)",
+                cursor: hasSendableContent ? "pointer" : "not-allowed",
+                fontSize: 13,
+                fontWeight: 600,
+                letterSpacing: "-0.01em",
+                boxShadow: hasComposerContent ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
+                transition: "background 0.15s, box-shadow 0.15s",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="19" x2="12" y2="5" />
+                <polyline points="5 12 12 5 19 12" />
+              </svg>
+            </button>
+          )}
+        </div>
         </div>
       </div>
     </div>

@@ -839,7 +839,11 @@ span.linenumber {
   background: transparent;
 }
 [data-chat-messages] [data-message-body]::selection,
-[data-chat-messages] [data-message-body] *::selection {
+[data-chat-messages] [data-message-body] *::selection,
+[data-chat-messages] textarea::selection,
+[data-chat-messages] input::selection,
+[data-chat-messages] [contenteditable]:not([contenteditable="false"])::selection,
+[data-chat-messages] [contenteditable]:not([contenteditable="false"]) *::selection {
   background: Highlight;
   color: HighlightText;
 }

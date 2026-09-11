@@ -11,16 +11,19 @@ declare global {
 }
 
 export function normalizeExternalHref(href: string): string | null {
-  if (typeof window === "undefined") return null;
-
   const trimmed = href.trim();
-  // A leading slash is a filesystem path in agent output, but `new URL()` would
-  // otherwise turn it into http://<deerhux-host>/<path>.
-  if (!/^(?:https?:|mailto:|tel:|\/\/)/i.test(trimmed)) return null;
-
+  if (!trimmed || /[\u0000-\u0020\u007f\\]/.test(trimmed) || /%(?![a-f\d]{2})/i.test(trimmed)) return null;
+  if (!/^(?:https?:\/\/|mailto:|tel:|\/\/)/i.test(trimmed)) return null;
+  if (/^(?:https?:\/\/|\/\/)[/?#]/i.test(trimmed)) return null;
   try {
-    const url = new URL(trimmed, window.location.href);
-    return EXTERNAL_PROTOCOLS.has(url.protocol) ? url.href : null;
+    const url = new URL(trimmed.startsWith("//") ? `https:${trimmed}` : trimmed);
+    if (!EXTERNAL_PROTOCOLS.has(url.protocol)) return null;
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      if (!url.hostname || url.username || url.password) return null;
+    } else if (url.protocol === "mailto:") {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(decodeURIComponent(url.pathname))) return null;
+    } else if (!/^\+?[\d().-]+$/.test(url.pathname) || !/\d/.test(url.pathname)) return null;
+    return url.href;
   } catch {
     return null;
   }

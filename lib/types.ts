@@ -45,7 +45,10 @@ export interface FileReference {
 }
 
 export interface SkillReference {
+  /** First selected skill, retained for existing sessions and clients. */
   name: string;
+  /** Complete ordered selection when more than one skill is selected. */
+  names?: readonly string[];
 }
 
 export interface ThinkingContent {

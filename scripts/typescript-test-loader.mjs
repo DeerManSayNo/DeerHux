@@ -11,6 +11,10 @@ async function isFile(url) {
 }
 
 export async function load(url, context, nextLoad) {
+  // Component markup tests do not run the bundler's CSS pipeline.
+  if (url.endsWith(".css")) {
+    return { format: "module", source: "export default {};", shortCircuit: true };
+  }
   if (url.endsWith(".ts") || url.endsWith(".tsx")) {
     const source = await readFile(fileURLToPath(url), "utf8");
     return {
@@ -30,6 +34,9 @@ export async function load(url, context, nextLoad) {
 }
 
 export async function resolve(specifier, context, nextResolve) {
+  if (specifier === "react-syntax-highlighter/dist/cjs/styles/prism") {
+    return nextResolve(`${specifier}/index.js`, context);
+  }
   // Next exposes this subpath as server.js without an exports map. The app
   // bundler resolves it, while direct Node route tests need the explicit file.
   if (specifier === "next/server") return nextResolve("next/server.js", context);

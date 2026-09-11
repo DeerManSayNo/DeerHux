@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "quick-session-commands",
+  "description": "Allow the quick session drawer to manage its own native window",
+  "windows": ["quick-session"],
+  "remote": { "urls": ["http://localhost:30141", "http://127.0.0.1:*"] },
+  "permissions": [
+    "allow-hide-quick-session-window",
+    "allow-mark-quick-session-ready",
+    "allow-resize-quick-session-window"
+  ]
+}

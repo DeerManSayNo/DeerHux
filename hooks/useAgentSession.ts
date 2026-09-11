@@ -1,5 +1,6 @@
 "use client";
 
+import { skillNames } from "@/lib/skill-selection";
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import { useChatAutoScroll } from "@/hooks/agent-session/useChatAutoScroll";
 import { getLocalStorageItem } from "@/lib/client-storage";
@@ -107,7 +108,7 @@ function userTextContent(msg: AgentMessage | Partial<AgentMessage>): string {
 
 function isSkillOnlyUserMessage(msg: AgentMessage | Partial<AgentMessage>, skillName?: string | null): boolean {
   if (msg.role !== "user") return false;
-  const userSkillName = (msg as { skill?: SkillReference }).skill?.name;
+  const userSkillName = skillNames((msg as { skill?: SkillReference }).skill).join("、");
   if (skillName && userSkillName !== skillName) return false;
   return userTextContent(msg).trim() === "";
 }
@@ -1576,6 +1577,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end": {
+        const wasStopRequested = stopRequestedRef.current;
         clearAwaitingAgentStartGuard();
         awaitingAgentStartRef.current = false;
         stopRequestedRef.current = false;
@@ -1602,7 +1604,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         stallRecoveriesRef.current = 0;
         setStallLevel(null);
         watchdogStaleRecoveriesRef.current = 0;
-        const eventData = event as { willRetry?: boolean; error?: string; errorCode?: string };
+        const eventData = event as { willRetry?: boolean; error?: string; errorCode?: string; stopReason?: string };
+        const cancelled = wasStopRequested || (eventData.stopReason === "aborted" && !eventData.error);
+        if (cancelled) {
+          lastModelErrorRef.current = null;
+          setLastModelError(null);
+        }
         const willRetry = eventData.willRetry ?? false;
         // 持久化失败：用专门文案替代通用「模型调用失败」——这不是模型问题，
         // 重试前需要用户检查磁盘/权限。
@@ -1612,7 +1619,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         // agent_end carries the backend's most complete terminal diagnosis.
         // Always prefer it over an earlier generic message_end error shell.
-        if (eventData.error) {
+        if (eventData.error && !cancelled) {
           lastModelErrorRef.current = eventData.error;
           setLastModelError(eventData.error);
         }
@@ -1622,18 +1629,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 旧逻辑会因 receivedAssistantMessageRef=true 而静默成功——这里强制报错。
         if (
           !willRetry
+          && !cancelled
           && awaitingFinalReplyAfterToolsRef.current
           && !lastModelErrorRef.current
         ) {
           lastModelErrorRef.current = "模型在工具执行后未返回最终回复";
           setLastModelError(lastModelErrorRef.current);
         }
-        const endedWithError = (
+        const endedWithError = !cancelled && (
           (lastModelErrorRef.current !== null) ||
           (!willRetry && !receivedAssistantMessageRef.current) ||
           (!willRetry && awaitingFinalReplyAfterToolsRef.current)
         );
-        if (!willRetry && !receivedAssistantMessageRef.current && !lastModelErrorRef.current) {
+        if (!cancelled && !willRetry && !receivedAssistantMessageRef.current && !lastModelErrorRef.current) {
           lastModelErrorRef.current = "模型响应失败";
           setLastModelError("模型响应失败");
         }
@@ -1667,7 +1675,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!endedWithError) retryInfoRef.current = null;
     setRetryInfo(null);
         dispatch({ type: "end" });
-        setPlanReady(!endedWithError && agentModeRef.current === "plan");
+        setPlanReady(!cancelled && !endedWithError && agentModeRef.current === "plan");
         if (sessionIdRef.current && !endedWithError) {
           // Refresh messages (history) and live agent state independently.
           // History via the lightweight path; runtime state via the dedicated
@@ -1693,7 +1701,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         //（用户 abort 走 aborted 分支，不产生该 errorCode）。
         const ttftErrorCode = (event as { errorCode?: string }).errorCode;
         if (
-          ttftErrorCode === "UPSTREAM_TTFT_TIMEOUT" &&
+          !cancelled && ttftErrorCode === "UPSTREAM_TTFT_TIMEOUT" &&
           sessionIdRef.current &&
           autoRecoveryMode !== "off" &&
           autoRecoveryModelsRef.current.length > 0 &&
@@ -1888,8 +1896,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ?? currentRetryInfo?.errorMessage
             ?? "模型调用失败";
           const terminalMessage = `自动重试失败（${retrySummary}）：${finalError}`;
-          lastModelErrorRef.current = terminalMessage;
-          setLastModelError(terminalMessage);
+          lastModelErrorRef.current = retryWasAborted ? null : terminalMessage;
+          setLastModelError(retryWasAborted ? null : terminalMessage);
           if (agentRunningRef.current) {
             agentRunningRef.current = false;
             setAgentRunning(false);
@@ -2094,7 +2102,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
             ...(roleId ? { roleId } : {}),
-            ...(skill ? { skillName: skill.name } : {}),
+            ...(skill ? { skillName: skill.name, skillNames: skillNames(skill) } : {}),
           }),
         }, {
           // POST retry is safe here because creationRequestId and
@@ -2139,7 +2147,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(sentReferences ? { references: sentReferences } : {}),
           ...(piImages?.length ? { images: piImages } : {}),
           ...(roleId ? { roleId } : {}),
-          ...(skill ? { skillName: skill.name } : {}),
+          ...(skill ? { skillName: skill.name, skillNames: skillNames(skill) } : {}),
         }, { timeoutMs: 45_000 });
       }
       const acceptedMessage = withDeliveryState(userMsg as UserMessage, "accepted");
@@ -2243,7 +2251,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           capabilities: getTurnCapabilities(),
           ...(userMessage.references?.length ? { references: userMessage.references } : {}),
           ...(images.length ? { images } : {}),
-          ...(userMessage.skill?.name ? { skillName: userMessage.skill.name } : {}),
+          ...(userMessage.skill?.name ? { skillName: userMessage.skill.name, skillNames: skillNames(userMessage.skill) } : {}),
         }, { timeoutMs: 45_000 });
       } else {
         const selectedModel = newSessionModel;
@@ -2262,7 +2270,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(images.length ? { images } : {}),
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
-            ...(userMessage.skill?.name ? { skillName: userMessage.skill.name } : {}),
+            ...(userMessage.skill?.name ? { skillName: userMessage.skill.name, skillNames: skillNames(userMessage.skill) } : {}),
           }),
         }, { attempts: 2, timeoutMs: 45_000 });
         sid = result.sessionId;
@@ -2493,7 +2501,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         capabilities: getTurnCapabilities(),
         ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
-        ...(skill ? { skillName: skill.name } : {}),
+        ...(skill ? { skillName: skill.name, skillNames: skillNames(skill) } : {}),
       });
     } catch (e) {
       console.error("Failed to steer:", e);
@@ -2537,7 +2545,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         capabilities: getTurnCapabilities(),
         ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
-        ...(skill ? { skillName: skill.name } : {}),
+        ...(skill ? { skillName: skill.name, skillNames: skillNames(skill) } : {}),
       });
       const acceptedMessage = withDeliveryState(userMsg as UserMessage, "accepted");
       pendingUserMessagesRef.current.set(clientMessageId, acceptedMessage);

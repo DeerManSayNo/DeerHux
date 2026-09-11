@@ -227,7 +227,7 @@ const snapshot = (turnId: string, activeToolNames: string[], prompt: string, ski
   await normalEngine.prompt("normal completion");
   assert.equal(normalEvents.findLast((event) => event.type === "agent_end")?.stopReason, "stop");
 
-  const abortEvents: Array<{ type: string; stopReason?: string }> = [];
+  const abortEvents: Array<{ type: string; stopReason?: string; error?: string; message?: unknown }> = [];
   const pendingStream = createAssistantMessageEventStream();
   const abortEngine = new DeerLoopEngine({
     model,
@@ -240,6 +240,52 @@ const snapshot = (turnId: string, activeToolNames: string[], prompt: string, ski
   await abortEngine.abort();
   await run;
   assert.equal(abortEvents.findLast((event) => event.type === "agent_end")?.stopReason, "aborted");
+  assert.equal(abortEvents.findLast((event) => event.type === "agent_end")?.error, undefined);
+  assert.ok(!abortEvents.some((event) => event.type === "message_end" && (event.message as AssistantMessage)?.errorMessage));
+}
+
+// Stop after partial output or after a tool result: no synthetic failure, partial text survives.
+for (const afterTool of [false, true]) {
+  const ready = deferred();
+  const events: Array<{ type: string; error?: string; message?: unknown }> = [];
+  const persisted: unknown[] = [];
+  let calls = 0;
+  const engine = new DeerLoopEngine({
+    model, cwd: process.cwd(), tools: [tool], activeToolNames: ["subagent"],
+    sessionManager: { isPersisted: () => true, appendMessage: (message: unknown) => persisted.push(message) } as never,
+    streamFn: () => {
+      calls++;
+      if (afterTool && calls === 1) return doneStream(assistant([{ type: "toolCall", id: "stop-tool", name: "subagent", arguments: {} }], "toolUse"));
+      const stream = createAssistantMessageEventStream();
+      if (afterTool) ready.resolve();
+      else queueMicrotask(() => stream.push({ type: "start", partial: assistant([{ type: "text", text: "保留已生成内容" }]) }));
+      return stream;
+    },
+  });
+  engine.subscribe((event) => {
+    events.push(event);
+    if (event.type === "message_start" && (event.message as AssistantMessage)?.role === "assistant" && !afterTool) ready.resolve();
+  });
+  const run = engine.prompt("stop test");
+  await ready.promise;
+  await engine.abort();
+  await run;
+  assert.equal(events.findLast((event) => event.type === "agent_end")?.error, undefined);
+  assert.ok(!persisted.some((message) => (message as AssistantMessage).errorMessage));
+  if (!afterTool) assert.ok(persisted.some((message) => (message as AssistantMessage).role === "assistant" && JSON.stringify(message).includes("保留已生成内容")));
+}
+
+// An unsolicited provider abort must still surface as a failure.
+{
+  const events: Array<{ type: string; error?: string }> = [];
+  const engine = new DeerLoopEngine({ model, cwd: process.cwd(), streamFn: () => {
+    const stream = createAssistantMessageEventStream();
+    queueMicrotask(() => { const message = assistant([], "aborted"); stream.push({ type: "error", reason: "aborted", error: message }); stream.end(message); });
+    return stream;
+  } });
+  engine.subscribe((event) => events.push(event));
+  await engine.prompt("unexpected abort");
+  assert.ok(events.findLast((event) => event.type === "agent_end")?.error);
 }
 
 console.log("queued turn context behavior tests passed");

@@ -10,6 +10,7 @@
     ]
   },
   "permissions": [
+    "allow-read-clipboard-file-paths",
     "core:default",
     "core:window:allow-set-theme",
     "core:window:allow-start-dragging",

@@ -1,3 +1,4 @@
+import { skillNames, skillReference } from "@/lib/skill-selection";
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { statSync } from "fs";
 import { open } from "node:fs/promises";
@@ -529,13 +530,13 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       }
     }
     if (e.type === "custom" && (e as { customType?: string }).customType === "turn_context") {
-      const data = (e as { data?: { mode?: unknown; references?: unknown; skill?: { name?: unknown } } }).data;
+      const data = (e as { data?: { mode?: unknown; references?: unknown; skill?: { name?: unknown; names?: unknown } } }).data;
       const references = normalizeReferences(data?.references);
-      const skillName = typeof data?.skill?.name === "string" && data.skill.name.trim() ? data.skill.name.trim() : null;
+      const skill = skillReference(skillNames(data?.skill));
       pendingTurnContext = {
         agentMode: normalizeAgentMode(data?.mode),
         ...(references.length ? { references } : {}),
-        ...(skillName ? { skill: { name: skillName } } : {}),
+        ...(skill ? { skill } : {}),
       };
     }
     if (e.type === "message" && (e as { message?: { role?: unknown } }).message?.role === "user") {
@@ -601,10 +602,10 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       parent = byId.get(parent.parentId);
     }
     if (!isCustomEntryOf(parent, "display_user_message")) return null;
-    const data = (parent as { data?: { content?: unknown; references?: unknown; agentMode?: unknown; skill?: { name?: unknown }; clientMessageId?: unknown } }).data;
+    const data = (parent as { data?: { content?: unknown; references?: unknown; agentMode?: unknown; skill?: { name?: unknown; names?: unknown }; clientMessageId?: unknown } }).data;
     if (!data || !("content" in data)) return null;
     const references = normalizeReferences(data.references);
-    const skillName = typeof data.skill?.name === "string" && data.skill.name.trim() ? data.skill.name.trim() : null;
+    const skill = skillReference(skillNames(data.skill));
     const clientMessageId = typeof data.clientMessageId === "string" && data.clientMessageId.trim() ? data.clientMessageId.trim() : undefined;
     // Strip large base64 image payloads from display content to keep
     // session-load responses lean and avoid multi-second HTTP transfers.
@@ -613,7 +614,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       content: displayContent,
       ...(references.length ? { references } : {}),
       ...(data.agentMode ? { agentMode: normalizeAgentMode(data.agentMode) } : {}),
-      ...(skillName ? { skill: { name: skillName } } : {}),
+      ...(skill ? { skill } : {}),
       ...(clientMessageId ? { clientMessageId } : {}),
     };
   };

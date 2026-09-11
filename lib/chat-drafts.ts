@@ -4,6 +4,7 @@ export interface ChatDraftState {
   value: string;
   attachedImages: unknown[];
   selectedSkill: unknown | null;
+  selectedSkills?: unknown[];
   fileReferences?: { path: string; name: string }[];
 }
 
@@ -36,6 +37,7 @@ export function clearCwdScopedDraftResources<T extends ChatDraftState>(draft: T)
     ...draft,
     attachedImages: [],
     selectedSkill: null,
+    selectedSkills: [],
     fileReferences: [],
   };
 }

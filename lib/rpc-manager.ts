@@ -1,3 +1,4 @@
+import { skillReference, normalizeSkillNames } from "@/lib/skill-selection";
 import path from "path";
 import { cacheSessionPath, forceRefreshSessionList } from "./session-reader";
 import type { AgentEnginePort, ToolInfo } from "./engine/port";
@@ -618,19 +619,19 @@ export class AgentSessionWrapper {
   ): Promise<PreparedTurnContext> {
     const references = normalizeReferences(rawReferences);
     const parsedSkill = parseSkillCommand(rawMessage);
-    const explicitSkillName = typeof rawSkillName === "string" ? rawSkillName : undefined;
-    const skillName = explicitSkillName ?? parsedSkill?.skillName;
+    const names = normalizeSkillNames(rawSkillName ?? parsedSkill?.skillName);
     const message = parsedSkill ? parsedSkill.message : rawMessage;
-    const skillInvocation = await this.resolveSkillInvocation(skillName);
-    const skill = skillInvocation ? { name: skillInvocation.name } : undefined;
-    const displayMessage = message.trim() || (skill ? `使用技能：${skill.name}` : rawMessage);
+    const invocations = await Promise.all(names.map((name) => this.resolveSkillInvocation(name)));
+    const skill = skillReference(names);
+    const skillLabel = names.join("、");
+    const displayMessage = message.trim() || (skill ? `使用技能：${skillLabel}` : rawMessage);
     return {
-      message: message.trim() || (skill ? `Use the selected skill: ${skill.name}.` : rawMessage),
+      message: message.trim() || (skill ? `Use the selected skill: ${skillLabel}.` : rawMessage),
       displayMessage,
       references,
       skill,
       systemPromptBlock: this.buildTurnSystemPromptBlock(references),
-      userPromptBlock: this.buildSkillUserPromptBlock(skillInvocation),
+      userPromptBlock: invocations.map((invocation) => this.buildSkillUserPromptBlock(invocation)).join("\n\n"),
     };
   }
 
@@ -703,7 +704,7 @@ export class AgentSessionWrapper {
       roleId: admission.roleId,
       agentMode: admission.agentMode,
       references: Object.freeze([...turnContext.references]),
-      ...(turnContext.skill ? { skill: Object.freeze({ ...turnContext.skill }) } : {}),
+      ...(turnContext.skill ? { skill: Object.freeze({ ...turnContext.skill, ...(turnContext.skill.names ? { names: Object.freeze([...turnContext.skill.names]) } : {}) }) } : {}),
       createdAt: Date.now(),
     });
   }
@@ -1631,7 +1632,7 @@ export class AgentSessionWrapper {
           admissionPromise = this.commitAndTrackPromptTurn(
             promptText,
             command.references,
-            command.skillName,
+            (command.skillNames ?? command.skillName),
             promptImages,
             promptClientMessageId,
             admission,
@@ -1758,7 +1759,7 @@ export class AgentSessionWrapper {
           const recoverTurn = await this.commitAndTrackPromptTurn(
             recoverText,
             command.references,
-            command.skillName,
+            (command.skillNames ?? command.skillName),
             recoverImages,
             recoverClientMessageId,
             admission,
@@ -1916,7 +1917,7 @@ export class AgentSessionWrapper {
           const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const steerText = typeof command.message === "string" ? command.message : "";
           const turnContext = await raceWithAbort(
-            this.prepareTurnContext(steerText, command.references, command.skillName, admission.agentMode),
+            this.prepareTurnContext(steerText, command.references, (command.skillNames ?? command.skillName), admission.agentMode),
             steerAdmissionController.signal,
           );
           const prepared = await raceWithAbort(
@@ -1960,7 +1961,7 @@ export class AgentSessionWrapper {
           const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const followText = typeof command.message === "string" ? command.message : "";
           const turnContext = await raceWithAbort(
-            this.prepareTurnContext(followText, command.references, command.skillName, admission.agentMode),
+            this.prepareTurnContext(followText, command.references, (command.skillNames ?? command.skillName), admission.agentMode),
             followAdmissionController.signal,
           );
           const prepared = await raceWithAbort(

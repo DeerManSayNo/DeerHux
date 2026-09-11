@@ -269,6 +269,7 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, initial
   const initialExpandedPathsRef = useRef(initialExpandedPaths);
   const initialActivePathRef = useRef(activePath);
   const onExplorerStateChangeRef = useRef(onExplorerStateChange);
+  const explorerStateRef = useRef({ expandedPaths, activePath: activeFilePath });
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -333,15 +334,17 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, initial
   }, [contextMenu]);
 
   const handleToggleExpanded = useCallback((fullPath: string, open: boolean) => {
-    setExpandedPaths((prev) => {
-      const next = new Set(prev);
-      if (open) next.add(fullPath); else next.delete(fullPath);
-      return next;
-    });
+    const next = new Set(explorerStateRef.current.expandedPaths);
+    if (open) next.add(fullPath); else next.delete(fullPath);
+    explorerStateRef.current = { ...explorerStateRef.current, expandedPaths: next };
+    setExpandedPaths(next);
+    onExplorerStateChangeRef.current?.({ expandedPaths: Array.from(next), activePath: explorerStateRef.current.activePath });
   }, []);
 
   const handleOpenFile = useCallback((filePath: string, fileName: string) => {
+    explorerStateRef.current = { ...explorerStateRef.current, activePath: filePath };
     setActiveFilePath(filePath);
+    onExplorerStateChangeRef.current?.({ expandedPaths: Array.from(explorerStateRef.current.expandedPaths), activePath: filePath });
     onOpenFile(filePath, fileName);
   }, [onOpenFile]);
 
@@ -355,16 +358,14 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, initial
   }, [onExplorerStateChange]);
 
   useEffect(() => {
-    onExplorerStateChangeRef.current?.({ expandedPaths: Array.from(expandedPaths), activePath: activeFilePath });
-  }, [activeFilePath, expandedPaths]);
-
-  useEffect(() => {
     const cwdChanged = prevCwdRef.current !== cwd;
     prevCwdRef.current = cwd;
 
     // Reset expanded state only when cwd changes, not on refreshKey bumps
     if (cwdChanged) {
-      setExpandedPaths(new Set(initialExpandedPathsRef.current));
+      const restoredPaths = new Set(initialExpandedPathsRef.current);
+      explorerStateRef.current = { expandedPaths: restoredPaths, activePath: initialActivePathRef.current };
+      setExpandedPaths(restoredPaths);
       setActiveFilePath(initialActivePathRef.current);
     }
 

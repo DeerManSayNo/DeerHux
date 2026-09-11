@@ -63,12 +63,14 @@ const emptyDraft = (): Draft => ({
     value: "保留这段需求文本",
     attachedImages: [{ path: "/projects/a/image.png" }],
     selectedSkill: { name: "project-a-skill" },
+    selectedSkills: [{ name: "project-a-skill" }, { name: "second-skill" }],
     fileReferences: [{ path: "/projects/a/src/index.ts", name: "index.ts" }],
   };
   assert.deepEqual(clearCwdScopedDraftResources(original), {
     value: "保留这段需求文本",
     attachedImages: [],
     selectedSkill: null,
+    selectedSkills: [],
     fileReferences: [],
   });
 }

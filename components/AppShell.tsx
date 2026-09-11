@@ -1,5 +1,7 @@
 "use client";
 
+import { AiLinkWorkspace } from "./AiOutputLink";
+
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { PointerEvent as PointerEventType, MouseEvent as MouseEventType, ReactNode } from "react";
 import dynamic from "next/dynamic";
@@ -236,8 +238,10 @@ export function AppShell() {
 
   // Right workspace: remember explorer and preview widths separately.
   const RIGHT_PANEL_MIN = 250;
+  const EXPLORER_PANEL_MIN = 200;
   const RIGHT_PANEL_MAX = 1000;
   const [rightPanelView, setRightPanelView] = useState<"explorer" | "preview">("explorer");
+  const rightPanelMinWidth = rightPanelView === "explorer" ? EXPLORER_PANEL_MIN : RIGHT_PANEL_MIN;
   const [explorerPanelWidth, setExplorerPanelWidth] = useState(320);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(500);
   const rightPanelWidth = rightPanelView === "explorer" ? explorerPanelWidth : previewPanelWidth;
@@ -299,13 +303,20 @@ export function AppShell() {
   useEffect(() => {
     if (!(window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ || !navigator.platform.toUpperCase().includes("MAC")) return;
     let cancelled = false;
+    let syncErrorReported = false;
     let timer: ReturnType<typeof setTimeout>;
     const sync = async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const hovered = await invoke<boolean>("sync_header_controls", { keepVisible: sidebarOpen || settingsMenuOpen || headerFocused });
         if (!cancelled) setHeaderHovered(hovered);
-      } catch { /* Older native hosts retain their existing window controls. */ }
+        syncErrorReported = false;
+      } catch (error) {
+        if (!cancelled && !syncErrorReported) {
+          console.error("Failed to synchronize native header controls", error);
+          syncErrorReported = true;
+        }
+      }
       if (!cancelled) timer = setTimeout(sync, 100);
     };
     void sync();
@@ -380,7 +391,7 @@ export function AppShell() {
       if (Number.isFinite(parsed)) setPreviewPanelWidth(Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, parsed)));
     }
     const storedExplorerWidth = Number(getLocalStorageItem("deerhux.explorer-panel-width"));
-    if (Number.isFinite(storedExplorerWidth) && storedExplorerWidth >= RIGHT_PANEL_MIN) {
+    if (Number.isFinite(storedExplorerWidth) && storedExplorerWidth >= EXPLORER_PANEL_MIN) {
       setExplorerPanelWidth(Math.min(RIGHT_PANEL_MAX, storedExplorerWidth));
     }
     setRightPanelPinned(getLocalStorageItem("deerhux.right-panel-pinned") === "true");
@@ -1128,7 +1139,7 @@ export function AppShell() {
     if (!isResizingRightPanel) return;
     const handleMove = (e: PointerEvent) => {
       const delta = rightPanelResizeStartX.current - e.clientX;
-      const next = Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, rightPanelResizeStartWidth.current + delta));
+      const next = Math.min(RIGHT_PANEL_MAX, Math.max(rightPanelMinWidth, rightPanelResizeStartWidth.current + delta));
       setRightPanelWidth(next);
     };
     const handleVisibilityChange = () => {
@@ -1146,7 +1157,7 @@ export function AppShell() {
       window.removeEventListener("blur", finishRightPanelResize);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [finishRightPanelResize, isResizingRightPanel, setRightPanelWidth]);
+  }, [finishRightPanelResize, isResizingRightPanel, rightPanelMinWidth, setRightPanelWidth]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
@@ -1200,9 +1211,7 @@ export function AppShell() {
     const handleAiOutputLinkClick = (event: MouseEvent) => {
       if (
         event.defaultPrevented ||
-        event.button !== 0 ||
-        event.shiftKey ||
-        event.altKey ||
+        (event.button !== 0 && event.button !== 1) ||
         !(event.target instanceof Element)
       ) return;
 
@@ -1210,12 +1219,12 @@ export function AppShell() {
       if (!(anchor instanceof HTMLAnchorElement)) return;
 
       const href = anchor.getAttribute("href");
-      if (!href) return;
+      if (!href) { event.preventDefault(); return; }
 
-      const filePath = resolveLocalFileHref(href, effectiveProjectCwd);
+      const filePath = anchor.dataset.localFilePath ?? resolveLocalFileHref(href, effectiveProjectCwd);
       if (filePath) {
         event.preventDefault();
-        if (event.metaKey || event.ctrlKey) {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
           void openLocalFileLink(filePath).then((opened) => {
             if (!opened) window.alert("无法使用系统默认应用打开此文件，请检查文件是否存在及访问权限。");
           });
@@ -1226,10 +1235,11 @@ export function AppShell() {
       }
 
       const externalUrl = normalizeExternalHref(href);
-      if (!externalUrl) return;
+      if (!externalUrl) { event.preventDefault(); return; }
 
       event.preventDefault();
-      if (event.metaKey || event.ctrlKey) {
+      const windowsDesktop = Boolean(window.__TAURI_INTERNALS__) && /WIN/i.test(navigator.platform);
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1 || windowsDesktop || !/^https?:/i.test(externalUrl)) {
         void openExternalLink(externalUrl).then((opened) => {
           if (!opened) window.alert("无法打开外部链接，请复制链接到浏览器中打开。");
         });
@@ -1239,7 +1249,11 @@ export function AppShell() {
     };
 
     document.addEventListener("click", handleAiOutputLinkClick, true);
-    return () => document.removeEventListener("click", handleAiOutputLinkClick, true);
+    document.addEventListener("auxclick", handleAiOutputLinkClick, true);
+    return () => {
+      document.removeEventListener("click", handleAiOutputLinkClick, true);
+      document.removeEventListener("auxclick", handleAiOutputLinkClick, true);
+    };
   }, [effectiveProjectCwd, handleOpenFile, handleOpenWebLink]);
 
   const handleSelectFileTab = useCallback((tabId: string) => {
@@ -1663,7 +1677,7 @@ export function AppShell() {
   );
 
   return (
-    <>
+    <AiLinkWorkspace.Provider value={effectiveProjectCwd ?? null}>
     {chatWindowLimitNotice && (
       <div
         role="status"
@@ -2281,7 +2295,7 @@ export function AppShell() {
           borderLeft: "1px solid var(--border)",
           background: "var(--bg)",
           width: rightPanelOpen ? rightPanelWidth : 0,
-          minWidth: rightPanelOpen ? RIGHT_PANEL_MIN : 0,
+          minWidth: rightPanelOpen ? rightPanelMinWidth : 0,
           transition: isResizingRightPanel ? "none" : undefined,
         }}
       >
@@ -2348,6 +2362,6 @@ export function AppShell() {
     {quickConfigOpen === "mcp" && <McpConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
     <ShareManager open={shareManagerOpen} onClose={() => setShareManagerOpen(false)} projects={projectOptions} />
     {wechatConfigOpen && <WeChatConfig onClose={() => setWechatConfigOpen(false)} />}
-    </>
+    </AiLinkWorkspace.Provider>
   );
 }

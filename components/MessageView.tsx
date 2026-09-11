@@ -1,8 +1,11 @@
 "use client";
+import { skillNames } from "@/lib/skill-selection";
+import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 
 import { memo, useState, useRef, useEffect, useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { AiOutputLink, aiOutputUrlTransform } from "./AiOutputLink";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -173,6 +176,11 @@ function MessageViewImpl({ activeToolIds, streamingToolLayout, expandedToolGroup
     );
   }
   if (message.role === "assistant") {
+    const assistant = message as AssistantMessage;
+    if (!isStreaming && assistant.stopReason === "aborted" && !assistant.errorMessage
+      && !assistant.content.some((block) => block.type === "text" ? Boolean(block.text.trim()) : block.type === "thinking" ? Boolean(block.thinking.trim()) : true)) {
+      return null;
+    }
     return <AssistantMessageView activeToolIds={activeToolIds} streamingToolLayout={streamingToolLayout} expandedToolGroups={expandedToolGroups} onToggleToolGroup={onToggleToolGroup} message={message as AssistantMessage} isStreaming={isStreaming} isBackground={isBackground} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} toolProcessMessages={toolProcessMessages} />;
   }
   if (message.role === "toolResult") {
@@ -279,7 +287,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
   }, [message.references, referencePrefix]);
   const contentWithoutReferences = message.references?.length ? content : referencePrefix ? referencePrefix.rest : content;
   const skillPrefix = useMemo(() => parseSkillPrefix(contentWithoutReferences), [contentWithoutReferences]);
-  const displaySkillName = message.skill?.name ?? skillPrefix?.skillName;
+  const displaySkillNames = message.skill ? skillNames(message.skill) : skillPrefix ? [skillPrefix.skillName] : [];
   const displayContent = skillPrefix ? skillPrefix.rest : contentWithoutReferences;
 
   const [expanded, setExpanded] = useState(false);
@@ -294,16 +302,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
     setEditValue(content);
   }, [content]);
 
-  const resizeTextarea = () => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(Math.max(ta.scrollHeight, 24), 200)}px`;
-  };
-
-  useEffect(() => {
-    if (expanded) requestAnimationFrame(resizeTextarea);
-  }, [expanded, editValue]);
+  useAutoGrowTextarea(textareaRef, editValue, expanded);
 
   const handleCancel = () => {
     setEditValue(content);
@@ -595,8 +594,9 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
               wordBreak: "break-word",
             }}
           >
-            {displaySkillName && (
+            {displaySkillNames.map((displaySkillName) => (
               <span
+                key={displaySkillName}
                 title={`使用了技能: ${displaySkillName}`}
                 style={{
                   display: "inline-flex",
@@ -628,7 +628,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
                 />
                 {displaySkillName}
               </span>
-            )}
+            ))}
             <span data-message-body>{displayContent}</span>
           </div>
         </button>
@@ -652,6 +652,8 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
             {renderImages()}
             <textarea
               ref={textareaRef}
+              aria-label="编辑历史消息"
+              data-message-body
               value={editValue}
               onChange={(e) => setEditValue(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -660,13 +662,12 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
               style={{
                 width: "100%",
                 minHeight: 24,
-                maxHeight: 200,
                 padding: 0,
                 background: "transparent",
                 border: "none",
                 outline: "none",
                 resize: "none",
-                overflow: "auto",
+                overflow: "hidden",
                 color: "var(--text)",
                 fontFamily: "inherit",
                 fontSize: 14,
@@ -1369,15 +1370,8 @@ function BlockView({ block, toolResults, streamingDuration, toolCallDurations, i
 
 function createMarkdownComponents(isStreaming: boolean): Components {
   return {
-    a({ href, children, node: _node, ...props }) {
-      return (
-        <a
-          {...props}
-          href={href}
-        >
-          {children}
-        </a>
-      );
+    a({ href, children, title }) {
+      return <AiOutputLink href={href} title={title}>{children}</AiOutputLink>;
     },
     code({ className, children, node: _node, ...props }) {
       const lang = className?.replace("language-", "") ?? "";
@@ -1427,6 +1421,7 @@ function TextBlock({ block, isStreaming }: { block: TextContent; isStreaming?: b
     <div className="markdown-body" data-ai-output data-message-body>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={aiOutputUrlTransform}
         components={isStreaming ? STREAMING_MARKDOWN_COMPONENTS : COMPLETED_MARKDOWN_COMPONENTS}
       >
         {block.text}

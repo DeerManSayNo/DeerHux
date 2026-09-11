@@ -20,6 +20,7 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
   const [localRefreshKey, setLocalRefreshKey] = useState(0);
   const [refreshDone, setRefreshDone] = useState(false);
   const [explorerState, setExplorerState] = useState<ExplorerProjectState>(EMPTY_EXPLORER_PROJECT_STATE);
+  const [restoredCwd, setRestoredCwd] = useState<string | null>(null);
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
@@ -99,9 +100,11 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
   useEffect(() => {
     if (!cwd) {
       setExplorerState(EMPTY_EXPLORER_PROJECT_STATE);
+      setRestoredCwd(null);
       return;
     }
     setExplorerState(readFileExplorerState(cwd));
+    setRestoredCwd(cwd);
   }, [cwd]);
 
   const handleRefresh = useCallback(() => {
@@ -270,7 +273,8 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
             </button>
           </div>
           <div style={{ flex: 1, minHeight: 160, overflowY: "auto", overflowX: "hidden", padding: "4px 2px" }}>
-            <FileExplorer
+            {restoredCwd === cwd && <FileExplorer
+              key={cwd}
               cwd={cwd}
               onOpenFile={onOpenFile ?? (() => {})}
               onAtMention={onAtMention}
@@ -278,7 +282,7 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
               initialExpandedPaths={explorerState.expandedPaths}
               activePath={explorerState.activePath}
               onExplorerStateChange={handleExplorerStateChange}
-            />
+            />}
           </div>
         </div>
       , document.body)}

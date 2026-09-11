@@ -22,7 +22,7 @@ use std::{mem::size_of, os::windows::io::AsRawHandle, os::windows::process::Comm
 use tauri::webview::PageLoadEvent;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
-use tauri::{LogicalPosition, TitleBarStyle};
+use tauri::TitleBarStyle;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 use windows_sys::Win32::System::JobObjects::{
@@ -39,6 +39,38 @@ use windows_sys::Win32::{
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Use window coordinates, rather than Wry's titlebar-container inset: AppKit
+/// may lay out that container differently after navigation or opening devtools.
+#[cfg(target_os = "macos")]
+fn align_main_window_controls(native: &objc2_app_kit::NSWindow) {
+    use objc2_app_kit::{NSWindowButton, NSWindowStyleMask};
+
+    // Fullscreen controls belong to the system's revealable titlebar.
+    if native.styleMask().contains(NSWindowStyleMask::FullScreen) {
+        return;
+    }
+    let height = native.frame().size.height;
+    for (index, kind) in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton].into_iter().enumerate() {
+        if let Some(button) = native.standardWindowButton(kind) {
+            // Native window and button are retained and only used on the main thread.
+            if let Some(parent) = unsafe { button.superview() } {
+                let frame = button.frame();
+                let mut center = frame.origin;
+                center.x = 16.0 + index as f64 * 23.0;
+                center.y = height - 16.0;
+                // A nil source view means window base coordinates; conversion
+                // also handles the titlebar parent's flipped coordinate system.
+                let mut origin = parent.convertPoint_fromView(center, None);
+                origin.x -= frame.size.width / 2.0;
+                origin.y -= frame.size.height / 2.0;
+                if (origin.x - frame.origin.x).abs() > 0.01 || (origin.y - frame.origin.y).abs() > 0.01 {
+                    button.setFrameOrigin(origin);
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn sync_header_controls(window: tauri::WebviewWindow, keep_visible: bool) -> Result<bool, String> {
     if window.label() != "main" { return Ok(true); }
@@ -52,6 +84,7 @@ async fn sync_header_controls(window: tauri::WebviewWindow, keep_visible: bool) 
         window.run_on_main_thread(move || {
             let result = target.ns_window().map(|pointer| unsafe {
                 let native: &NSWindow = &*pointer.cast();
+                align_main_window_controls(native);
                 let point = native.mouseLocationOutsideOfEventStream();
                 let height = native.frame().size.height;
                 let hovered = point.x >= 0.0 && point.x <= 246.0 && point.y <= height && point.y >= height - 48.0;
@@ -1162,13 +1195,16 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let builder = builder
                 .title_bar_style(TitleBarStyle::Overlay)
-                .hidden_title(true)
-                // Increase the native titlebar inset by 7pt to align with the header center at y=20.
-                .traffic_light_position(LogicalPosition::new(14.0, 22.0));
+                .hidden_title(true);
             #[cfg(target_os = "windows")]
             let builder = builder.decorations(false);
 
             let window = builder.build()?;
+            #[cfg(target_os = "macos")]
+            if let Ok(pointer) = window.ns_window() {
+                // setup runs on the main thread. Position before the first UI sync.
+                unsafe { align_main_window_controls(&*pointer.cast()); }
+            }
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             {
                 let close_app = app.handle().clone();

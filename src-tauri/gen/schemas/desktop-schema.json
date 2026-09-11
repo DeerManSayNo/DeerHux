@@ -387,6 +387,66 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the hide_quick_session_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-hide-quick-session-window",
+          "markdownDescription": "Enables the hide_quick_session_window command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mark_quick_session_ready command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mark-quick-session-ready",
+          "markdownDescription": "Enables the mark_quick_session_ready command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the read_clipboard_file_paths command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-read-clipboard-file-paths",
+          "markdownDescription": "Enables the read_clipboard_file_paths command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the resize_quick_session_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-resize-quick-session-window",
+          "markdownDescription": "Enables the resize_quick_session_window command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the sync_header_controls command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-sync-header-controls",
+          "markdownDescription": "Enables the sync_header_controls command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the hide_quick_session_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-hide-quick-session-window",
+          "markdownDescription": "Denies the hide_quick_session_window command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mark_quick_session_ready command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mark-quick-session-ready",
+          "markdownDescription": "Denies the mark_quick_session_ready command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the read_clipboard_file_paths command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-read-clipboard-file-paths",
+          "markdownDescription": "Denies the read_clipboard_file_paths command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the resize_quick_session_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-resize-quick-session-window",
+          "markdownDescription": "Denies the resize_quick_session_window command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the sync_header_controls command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-sync-header-controls",
+          "markdownDescription": "Denies the sync_header_controls command without any pre-configured scope."
+        },
+        {
           "description": "No features are enabled by default, as we believe\nthe clipboard can be inherently dangerous and it is \napplication specific if read and/or write access is needed.\n\nClipboard interaction needs to be explicitly enabled.\n",
           "type": "string",
           "const": "clipboard-manager:default",

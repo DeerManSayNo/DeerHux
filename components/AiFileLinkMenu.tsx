@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
+import { AiLinkWorkspace } from "./AiOutputLink";
 import { resolveLocalFileHref } from "@/lib/external-links";
 import { getRelativeFilePath } from "@/lib/file-paths";
 import styles from "./AiFileLinkMenu.module.css";
@@ -94,7 +95,7 @@ export function AiFileLinkMenu({ cwd, children }: { cwd?: string | null; childre
 
   return (
     <div style={{ display: "contents" }} onContextMenu={openMenu}>
-      {children}
+      <AiLinkWorkspace.Provider value={cwd ?? null}>{children}</AiLinkWorkspace.Provider>
       {menu && createPortal(
         <div ref={menuRef} className={styles.menu} role="menu" aria-label="文件链接操作"
           style={{ left: menu.x, top: menu.y }}
