@@ -8,12 +8,13 @@ import { getProjectDisplayName } from "@/lib/project-name";
 interface Props {
   cwd: string;
   refreshKey: number;
+  revealRequest?: { id: number; path: string } | null;
   onOpenFile: (path: string, name: string) => void;
   onAtMention: (path: string) => void;
 }
 
 // The parent keys this component by cwd, so each project's state is restored independently.
-export function WorkspaceExplorer({ cwd, refreshKey, onOpenFile, onAtMention }: Props) {
+export function WorkspaceExplorer({ cwd, refreshKey, revealRequest, onOpenFile, onAtMention }: Props) {
   const [initialState, setInitialState] = useState<ExplorerProjectState | null>(null);
   const [localRefreshKey, setLocalRefreshKey] = useState(0);
   const currentState = useRef<ExplorerProjectState>({ expandedPaths: [], activePath: null });
@@ -21,10 +22,12 @@ export function WorkspaceExplorer({ cwd, refreshKey, onOpenFile, onAtMention }: 
   const contentRef = useRef<HTMLDivElement>(null);
   const pendingScroll = useRef<number | null>(null);
 
+  const initialReveal = useRef(revealRequest);
+
   useEffect(() => {
     const saved = readFileExplorerState(cwd);
     currentState.current = saved;
-    pendingScroll.current = saved.scrollTop ?? 0;
+    pendingScroll.current = initialReveal.current ? null : saved.scrollTop ?? 0;
     setInitialState(saved);
   }, [cwd]);
 
@@ -45,6 +48,34 @@ export function WorkspaceExplorer({ cwd, refreshKey, onOpenFile, onAtMention }: 
     restore();
     return () => observer.disconnect();
   }, [initialState]);
+
+  useEffect(() => {
+    if (!revealRequest || !initialState) return;
+    pendingScroll.current = null;
+    const viewport = scrollRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+    let completed = false;
+    const locate = () => {
+      if (completed || viewport.clientHeight === 0) return;
+      const tree = content.querySelector<HTMLElement>(`[data-explorer-reveal-id="${revealRequest.id}"]`);
+      if (tree?.querySelector("[data-explorer-loading=true]")) return;
+      const row = tree?.querySelector<HTMLElement>("[data-explorer-active=true]");
+      if (!row || row.getBoundingClientRect().height === 0) return;
+      const rect = row.getBoundingClientRect();
+      const bounds = viewport.getBoundingClientRect();
+      viewport.scrollTop += rect.top - bounds.top - (viewport.clientHeight - rect.height) / 2;
+      completed = true;
+      currentState.current = { ...currentState.current, scrollTop: viewport.scrollTop };
+      writeFileExplorerState(cwd, currentState.current);
+    };
+    const mutationObserver = new MutationObserver(locate);
+    const resizeObserver = new ResizeObserver(locate);
+    mutationObserver.observe(content, { subtree: true, childList: true, attributes: true });
+    resizeObserver.observe(viewport);
+    locate();
+    return () => { mutationObserver.disconnect(); resizeObserver.disconnect(); };
+  }, [cwd, initialState, revealRequest]);
 
   const save = (state: ExplorerProjectState) => {
     currentState.current = { ...currentState.current, ...state };
@@ -73,6 +104,7 @@ export function WorkspaceExplorer({ cwd, refreshKey, onOpenFile, onAtMention }: 
         <div ref={contentRef}>
           {initialState && <FileExplorer
             cwd={cwd}
+            revealRequest={revealRequest}
             refreshKey={refreshKey + localRefreshKey}
             onOpenFile={onOpenFile}
             onAtMention={onAtMention}

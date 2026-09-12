@@ -24,7 +24,7 @@ import { isTerminalAgentRunStatus, type AgentRunRecord } from "./agent-runtime/r
 import { registerShutdownCleanup } from "./process-shutdown";
 import type { AgentRuntimeEventBase } from "./agent-runtime/types";
 import { hostEventBus, type HostRunningSession, type SessionTransientSnapshot } from "./host-event-bus";
-import type { FileReference, ImageContent, SkillReference, TextContent, TurnCapabilities } from "./types";
+import type { FileReference, ImageContent, SkillReference, TurnSkillContext, TextContent, TurnCapabilities } from "./types";
 import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
 import {
   applyModePrompt,
@@ -47,6 +47,7 @@ export type AgentEvent = AgentRuntimeEventBase & {
 type EventListener = (event: AgentEvent) => void;
 
 interface SkillInvocation {
+  filePath?: string;
   name: string;
   content?: string;
 }
@@ -56,6 +57,7 @@ interface PreparedTurnContext {
   displayMessage: string;
   references: FileReference[];
   skill?: SkillReference;
+  skillContext: TurnSkillContext;
   systemPromptBlock: string;
   userPromptBlock: string;
 }
@@ -569,11 +571,12 @@ export class AgentSessionWrapper {
     return null;
   }
 
-  private appendTurnContextMetadata(references: FileReference[], skill?: SkillReference, mode: AgentMode = this.agentMode): void {
+  private appendTurnContextMetadata(references: FileReference[], skill?: SkillReference, mode: AgentMode = this.agentMode, skillContext?: TurnSkillContext): void {
     if (!this.session.persisted) return;
     try {
       this.session.appendCustomEntry("turn_context", {
         mode,
+        ...(skillContext ? { skillContext } : {}),
         ...(references.length ? { references } : {}),
         ...(skill ? { skill } : {}),
       });
@@ -630,6 +633,7 @@ export class AgentSessionWrapper {
       displayMessage,
       references,
       skill,
+      skillContext: { cwd: this.session.cwd, injected: invocations.filter((item): item is SkillInvocation => Boolean(item?.content?.trim())).map((item) => ({ name: item.name, ...(item.filePath ? { filePath: item.filePath } : {}) })) },
       systemPromptBlock: this.buildTurnSystemPromptBlock(references),
       userPromptBlock: invocations.map((invocation) => this.buildSkillUserPromptBlock(invocation)).join("\n\n"),
     };
@@ -1481,7 +1485,7 @@ export class AgentSessionWrapper {
       // 顺序约束：display_user_message 必须是 user message 的直接 parent——
       // session-reader 的 getDisplayUserMessage 靠这个父子关系回读 clientMessageId
       // 与展示内容；turn_context 插在中间会切断该链路（见 32a2d25 引入的回归）。
-      this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode);
+      this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode, turnContext.skillContext);
       this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId, turnKey);
       this.beginChangedFilesTurn(turnKey);
 
@@ -1492,6 +1496,7 @@ export class AgentSessionWrapper {
           content: displayUserContent,
           ...(turnContext.references.length ? { references: turnContext.references } : {}),
           ...(turnContext.skill ? { skill: turnContext.skill } : {}),
+          skillContext: turnContext.skillContext,
           ...(clientMessageId ? { clientMessageId } : {}),
           agentMode: admission.agentMode,
           timestamp: Date.now(),
@@ -1541,7 +1546,7 @@ export class AgentSessionWrapper {
     this.createPromptRun(turnKey);
     this.transitionCurrentRun({ status: "preparing", lastEventType: `${options.source}_preparing` });
     try {
-      this.appendTurnContextMetadata(options.turnContext.references, options.turnContext.skill, options.admission.agentMode);
+      this.appendTurnContextMetadata(options.turnContext.references, options.turnContext.skill, options.admission.agentMode, options.turnContext.skillContext);
       this.appendDisplayUserMessage(displayUserContent, options.turnContext.references, options.turnContext.skill, undefined, turnKey);
       this._turnActive = true;
       this.beginChangedFilesTurn(turnKey);
@@ -1932,7 +1937,7 @@ export class AgentSessionWrapper {
           );
 
           if (this._isRunning || this.inner.isStreaming) {
-            this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode);
+            this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode, turnContext.skillContext);
             this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
             await this.inner.steer({
               text: prepared.message,
@@ -1976,7 +1981,7 @@ export class AgentSessionWrapper {
           );
 
           if (this._isRunning || this.inner.isStreaming) {
-            this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode);
+            this.appendTurnContextMetadata(turnContext.references, turnContext.skill, admission.agentMode, turnContext.skillContext);
             this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
             await this.inner.followUp({
               text: prepared.message,

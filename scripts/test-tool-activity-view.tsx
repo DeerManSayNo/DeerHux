@@ -1,0 +1,50 @@
+import assert from "node:assert/strict";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MessageView } from "../components/MessageView";
+import { buildStreamingToolLayout } from "../lib/streaming-tool-layout";
+import type { AssistantMessage, ToolCallContent, ToolResultMessage } from "../lib/types";
+const read: ToolCallContent = { type: "toolCall", toolName: "read", toolCallId: "r", input: { path: "README.md" } };
+const bash: ToolCallContent = { type: "toolCall", toolName: "bash", toolCallId: "b", input: { command: "npm run lint" } };
+const message: AssistantMessage = { role: "assistant", provider: "test", model: "test", content: [read, bash] };
+const layout = buildStreamingToolLayout([], message, true).byMessage.get(0);
+const results = new Map<string, ToolResultMessage>([["r", { role: "toolResult", toolCallId: "r", toolName: "read", content: [], isError: false }]]);
+const render = (active: string[]) => renderToStaticMarkup(<MessageView message={message} isStreaming streamingToolLayout={layout} activeToolIds={new Set(active)} toolResults={results} />);
+let html = render(["b"]);
+assert.equal((html.match(/class="tool-activity-row"/g) ?? []).length, 1);
+assert.match(html, /正在运行命令 · npm run lint/);
+assert.doesNotMatch(html, /较早的工具调用/);
+assert.match(render([]), /等待执行：运行命令/);
+results.set("b", { role: "toolResult", toolCallId: "b", toolName: "bash", content: [], isError: true });
+html = render(["b"]);
+assert.match(html, /已读取文件并运行了命令/);
+assert.match(html, /1 失败/);
+assert.doesNotMatch(html, /1 执行中/);
+const final: AssistantMessage = { ...message, content: [{ type: "text", text: "最终回复" }] };
+html = renderToStaticMarkup(<MessageView message={final} toolProcessMessages={[{ message }]} toolResults={results} />);
+assert.match(html, /已读取文件并运行了命令/);
+assert.match(html, /最终回复/);
+assert.doesNotMatch(html, /npm run lint/);
+html = renderToStaticMarkup(<MessageView message={{ ...final, content: [], stopReason: "aborted" }} toolProcessMessages={[{ message }]} toolResults={results} />);
+assert.match(html, /已读取文件并运行了命令/);
+html = renderToStaticMarkup(<MessageView message={{ ...message, content: [bash] }} />);
+assert.match(html, /运行了命令/);
+assert.equal((html.match(/class="tool-activity-row"/g) ?? []).length, 1);
+console.log("tool activity rendering tests passed");
+
+const { StreamingToolHistory } = await import("../components/MessageView");
+const { moveCurrentToolGroupToBottom } = await import("../lib/streaming-tool-layout");
+const bottom = moveCurrentToolGroupToBottom(buildStreamingToolLayout([], message, true));
+html = renderToStaticMarkup(<MessageView message={message} isStreaming streamingToolLayout={bottom.byMessage.get(0)} />);
+assert.doesNotMatch(html, /tool-activity-row/, "消息中不重复显示当前工具行");
+html = renderToStaticMarkup(<StreamingToolHistory group={bottom.bottomGroup!} expanded={false} onToggle={() => {}} statusLabel="工具已完成，等待模型继续..." />);
+assert.match(html, /工具已完成，等待模型继续/);
+assert.doesNotMatch(html, /等待执行：/);
+console.log("bottom tool status rendering tests passed");
+
+for (const props of [{ isStreaming: true }, { hideMetadata: true, alwaysShowMetadata: true }]) {
+  const markup = renderToStaticMarkup(<MessageView message={final} {...props} />);
+  assert.doesNotMatch(markup, /assistant-message-meta/, "运行时统计栏不应出现在 DOM 中");
+  assert.match(markup, /最终回复/);
+}
+assert.match(renderToStaticMarkup(<MessageView message={final} />), /assistant-message-meta/);
+console.log("running message metadata tests passed");

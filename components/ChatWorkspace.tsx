@@ -36,6 +36,7 @@ interface ChatWorkspaceProps {
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
+  onRevealFile?: (filePath: string, cwd: string, slotIndex: number) => void;
   onOpenExplorer?: (slotIndex: number) => void;
   onOpenRoleConfig?: () => void;
   projectOptions?: { cwd: string; displayName: string }[];
@@ -91,6 +92,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
     onContextUsageChange,
     onOpenFile,
     onOpenExplorer,
+    onRevealFile,
     onOpenRoleConfig,
     projectOptions,
     onNewSessionCwdChange,
@@ -307,6 +309,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                       onSessionStatsChange={isFocused ? onSessionStatsChange : undefined}
                       onContextUsageChange={isFocused ? onContextUsageChange : undefined}
                       onOpenFile={onOpenFile}
+                      onRevealFile={onRevealFile ? (path) => onRevealFile(path, session.cwd, index) : undefined}
                       onOpenRoleConfig={onOpenRoleConfig}
                       projectOptions={projectOptions}
                       onNewSessionCwdChange={(cwd) => onNewSessionCwdChange?.(cwd, index)}

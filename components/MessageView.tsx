@@ -1,4 +1,8 @@
 "use client";
+import { TurnSkillEvidence } from "./TurnSkillEvidence";
+import { collectTurnSkillEvidence } from "@/lib/turn-skill-evidence";
+import { SendIconButton } from "./SendIconButton";
+import "./tool-activity.css";
 import { skillNames } from "@/lib/skill-selection";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 
@@ -24,7 +28,7 @@ import type {
   ThinkingContent,
 } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
-import { buildCompletedToolLayout, countRunningGroupTools, type StreamingToolGroup, type StreamingToolMessageLayout } from "@/lib/streaming-tool-layout";
+import { buildCompletedToolLayout, countRunningGroupTools, summarizeToolActivities, currentToolActivity, type StreamingToolGroup, type StreamingToolMessageLayout } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
 
 /** 终态集合：只有这些状态的 run 才沉淀到触发它的 user 消息下方作为历史记录；
@@ -46,6 +50,9 @@ export interface StreamingToolViewProps {
 }
 
 interface Props extends StreamingToolViewProps {
+  hideMetadata?: boolean;
+  turnSkillMessages?: readonly AgentMessage[];
+  alwaysShowMetadata?: boolean;
   message: AgentMessage;
   isStreaming?: boolean;
   isBackground?: boolean;
@@ -138,7 +145,7 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ activeToolIds, streamingToolLayout, expandedToolGroups, onToggleToolGroup, message, isStreaming, isBackground, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, toolProcessMessages, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
+function MessageViewImpl({ hideMetadata, turnSkillMessages, alwaysShowMetadata, activeToolIds, streamingToolLayout, expandedToolGroups, onToggleToolGroup, message, isStreaming, isBackground, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, showTurnDuration, prevTimestamp, turnStartTimestamp, turnEndTimestamp, turnDurationSeconds, toolProcessMessages, nextUserTimestamp, onResend, onRetryDelivery, onRestoreToInput, systemPrompt, collaborationRuns, turnEntryIds, onOpenSession, onCollaborationRunUpdate }: Props) {
   // 新 run 用 parentEntryId 精确归属到触发它的 user turn；旧数据没有该字段时，
   // 才保留 createdAt 时间窗作为兼容兜底。
   const rawTs = message.role === "user" ? (message as UserMessage).timestamp : undefined;
@@ -164,7 +171,7 @@ function MessageViewImpl({ activeToolIds, streamingToolLayout, expandedToolGroup
   if (message.role === "user") {
     return (
       <>
-        <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} onRetryDelivery={onRetryDelivery} onRestoreToInput={onRestoreToInput} systemPrompt={systemPrompt} />
+        <UserMessageView turnSkillMessages={turnSkillMessages} alwaysShowMetadata={alwaysShowMetadata} message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} onRetryDelivery={onRetryDelivery} onRestoreToInput={onRestoreToInput} systemPrompt={systemPrompt} />
         {linkedRuns.length > 0 && (
           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
             {linkedRuns.map((run) => (
@@ -177,11 +184,16 @@ function MessageViewImpl({ activeToolIds, streamingToolLayout, expandedToolGroup
   }
   if (message.role === "assistant") {
     const assistant = message as AssistantMessage;
-    if (!isStreaming && assistant.stopReason === "aborted" && !assistant.errorMessage
+    if (!isStreaming && assistant.stopReason === "aborted" && !assistant.errorMessage && !toolProcessMessages?.length
       && !assistant.content.some((block) => block.type === "text" ? Boolean(block.text.trim()) : block.type === "thinking" ? Boolean(block.thinking.trim()) : true)) {
       return null;
     }
-    return <AssistantMessageView activeToolIds={activeToolIds} streamingToolLayout={streamingToolLayout} expandedToolGroups={expandedToolGroups} onToggleToolGroup={onToggleToolGroup} message={message as AssistantMessage} isStreaming={isStreaming} isBackground={isBackground} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} toolProcessMessages={toolProcessMessages} />;
+    // Historical thinking is retained in the session, but has no visible message shell.
+    if (!isStreaming && !assistant.errorMessage && assistant.stopReason !== "error" && !toolProcessMessages?.length
+      && assistant.content.every((block) => block.type === "thinking" || (block.type === "text" && !block.text.trim()))) {
+      return null;
+    }
+    return <AssistantMessageView hideMetadata={hideMetadata} alwaysShowMetadata={alwaysShowMetadata} activeToolIds={activeToolIds} streamingToolLayout={streamingToolLayout} expandedToolGroups={expandedToolGroups} onToggleToolGroup={onToggleToolGroup} message={message as AssistantMessage} isStreaming={isStreaming} isBackground={isBackground} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} showTurnDuration={showTurnDuration} prevTimestamp={prevTimestamp} turnStartTimestamp={turnStartTimestamp} turnEndTimestamp={turnEndTimestamp} turnDurationSeconds={turnDurationSeconds} toolProcessMessages={toolProcessMessages} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -192,6 +204,8 @@ function MessageViewImpl({ activeToolIds, streamingToolLayout, expandedToolGroup
 
 export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.message === next.message &&
+  prev.hideMetadata === next.hideMetadata &&
+  prev.alwaysShowMetadata === next.alwaysShowMetadata &&
   prev.isStreaming === next.isStreaming &&
   prev.isBackground === next.isBackground &&
   prev.toolResults === next.toolResults &&
@@ -256,7 +270,9 @@ function parseReferencePrefix(text: string): { references: string[]; rest: strin
   return { references, rest: lines.slice(index).join("\n") };
 }
 
-function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestoreToInput, systemPrompt }: {
+function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entryId, onResend, onRetryDelivery, onRestoreToInput, systemPrompt }: {
+  alwaysShowMetadata?: boolean;
+  turnSkillMessages?: readonly AgentMessage[];
   message: UserMessage;
   entryId?: string;
   onFork?: (entryId: string) => void;
@@ -266,6 +282,8 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
   onRestoreToInput?: (message: UserMessage) => void;
   systemPrompt?: string | null;
 }) {
+  const { isDark } = useTheme();
+  const skillEvidence = useMemo(() => collectTurnSkillEvidence(message, turnSkillMessages ?? []), [message, turnSkillMessages]);
   const content =
     typeof message.content === "string"
       ? message.content
@@ -292,11 +310,24 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
 
   const [expanded, setExpanded] = useState(false);
   const [editValue, setEditValue] = useState(content);
+  const [sendLocked, setSendLocked] = useState(false);
+  const sendUnlockAtRef = useRef(0);
+  const openEditor = () => {
+    sendUnlockAtRef.current = performance.now() + 3000;
+    setSendLocked(true);
+    setExpanded(true);
+  };
+  useEffect(() => {
+    if (!expanded) return;
+    const timer = window.setTimeout(() => setSendLocked(false), Math.max(0, sendUnlockAtRef.current - performance.now()));
+    return () => window.clearTimeout(timer);
+  }, [expanded]);
+
   const [showSystemPromptModal, setShowSystemPromptModal] = useState(false);
   const [systemPromptCopyState, setSystemPromptCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const editorRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const canResend = !!onResend && !!entryId;
+  const canResend = !!onResend;
 
   useEffect(() => {
     setEditValue(content);
@@ -346,6 +377,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
   };
 
   const handleSendEdit = () => {
+    if (performance.now() < sendUnlockAtRef.current) return;
     const trimmed = editValue.trim();
     if (!trimmed) return;
     onResend?.(trimmed, entryId, displayReferences.length ? displayReferences : undefined, message.skill);
@@ -452,39 +484,32 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
     </div>
   );
 
-  const renderSystemPromptChip = () => {
+  const renderSystemPromptIcon = () => {
     if (systemPrompt === undefined) return null;
     const isClickable = systemPrompt !== null && systemPrompt !== "";
     return (
-      <span
-        title={systemPrompt === null ? "当前系统提示词加载中" : systemPrompt || "（空）"}
-        onClick={isClickable ? () => {
+      <button
+        type="button"
+        className="user-message-prompt-icon"
+        aria-label="查看当前系统提示词"
+        title={systemPrompt === null ? "当前系统提示词加载中" : isClickable ? "查看当前系统提示词" : "系统提示词为空"}
+        disabled={!isClickable}
+        onClick={() => {
           setSystemPromptCopyState("idle");
           setShowSystemPromptModal(true);
-        } : undefined}
+        }}
         style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 5,
-          height: 24,
-          padding: "0 9px",
-          borderRadius: 999,
-          background: "color-mix(in srgb, var(--bg-panel) 84%, transparent)",
-          border: "1px solid color-mix(in srgb, var(--border) 78%, transparent)",
-          color: "var(--text-muted)",
-          fontSize: 12,
-          fontWeight: 500,
-          whiteSpace: "nowrap",
-          cursor: isClickable ? "pointer" : "default",
-          userSelect: "none",
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          flexShrink: 0, width: 28, height: 28, marginTop: 7, padding: 0,
+          border: "none", borderRadius: 6, background: "transparent",
+          color: "var(--text-muted)", cursor: isClickable ? "pointer" : "default",
         }}
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <polyline points="14 2 14 8 20 8" />
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="m9.5 3-.5 2-2 1-2-.6-2 3.4L4.5 10v2L3 13.5l2 3.4 2-.6 2 1 .5 2h4l.5-2 2-1 2 .6 2-3.4L18.5 12v-2L20 8.8l-2-3.4-2 .6-2-1-.5-2z" />
+          <circle cx="11.5" cy="11" r="3" />
         </svg>
-        当前系统提示词
-      </span>
+      </button>
     );
   };
 
@@ -526,10 +551,10 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
   };
 
   const time = formatTime(message.timestamp);
-  const hasSideMeta = systemPrompt !== undefined || displayReferences.length > 0 || time !== null;
+  const hasSideMeta = displayReferences.length > 0;
 
   return (
-    <div style={{ marginBottom: 24, display: "flex", justifyContent: "center", width: "100%" }}>
+    <div data-metadata-visible={alwaysShowMetadata || undefined} className="user-message" style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end", width: "100%" }}>
       <div
         style={{
           width: "min(100%, 72rem)",
@@ -546,42 +571,58 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
             minWidth: 0,
           }}
         >
-          <div style={{ flexShrink: 0 }}>{renderSystemPromptChip()}</div>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, minWidth: 0, marginLeft: "auto", paddingRight: time ? 64 : 0 }}>
             {renderReferenceChips()}
-            {time && (
-              <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{time}</span>
-            )}
           </div>
         </div>
       )}
+      <div className="user-message-bubble-row" style={{ position: "relative", display: "flex", justifyContent: "flex-end", alignItems: "flex-start", gap: 8, minWidth: 0 }}>
+      {time && (
+        <span className="user-message-time" style={{ position: "absolute", right: 0, top: -16, fontSize: 10, lineHeight: "14px", color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{time}</span>
+      )}
+      {renderSystemPromptIcon()}
       {!expanded ? (
-        <button
-          type="button"
-          onClick={() => canResend && setExpanded(true)}
+        <div
+          className="user-message-bubble"
+          role={canResend ? "button" : undefined}
+          tabIndex={canResend ? 0 : undefined}
+          onClick={(event) => {
+            const selection = window.getSelection();
+            if (selection && !selection.isCollapsed
+              && ((selection.anchorNode && event.currentTarget.contains(selection.anchorNode))
+                || (selection.focusNode && event.currentTarget.contains(selection.focusNode)))) return;
+            if (canResend) openEditor();
+          }}
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget || !canResend) return;
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openEditor();
+            }
+          }}
           title={canResend ? "点击编辑并重新发送" : undefined}
           style={{
-            width: "100%",
+            width: "fit-content",
+            maxWidth: "85%",
+            minWidth: 0,
             display: "block",
             textAlign: "left",
             padding: "10px 14px",
-            background: "var(--bg)",
-            border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+            background: isDark ? "rgb(42, 42, 42)" : "var(--bg)",
+            border: "none",
             borderRadius: 14,
             color: "var(--text)",
             cursor: canResend ? "pointer" : "default",
             font: "inherit",
-            boxShadow: "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
-            transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
+            boxShadow: "0 2px 4px rgba(15,23,42,0.07), 0 8px 24px -12px rgba(15,23,42,0.16)",
+            transition: "background 0.15s, box-shadow 0.15s",
           }}
           onMouseEnter={(e) => {
             if (!canResend) return;
-            e.currentTarget.style.borderColor = "rgba(148,163,184,0.55)";
-            e.currentTarget.style.boxShadow = "0 0 0 1px rgba(148,163,184,0.12)";
+            e.currentTarget.style.boxShadow = "0 2px 6px rgba(15,23,42,0.10), 0 8px 24px -12px rgba(15,23,42,0.20)";
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.borderColor = "var(--border)";
-            e.currentTarget.style.boxShadow = "none";
+            e.currentTarget.style.boxShadow = "0 2px 4px rgba(15,23,42,0.07), 0 8px 24px -12px rgba(15,23,42,0.16)";
           }}
         >
           {renderImages()}
@@ -629,23 +670,26 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
                 {displaySkillName}
               </span>
             ))}
-            <span data-message-body>{displayContent}</span>
+            <span data-message-body style={{ userSelect: "text", WebkitUserSelect: "text" }}>{displayContent}</span>
           </div>
-        </button>
+        </div>
       ) : (
         <div
           ref={editorRef}
+          className="user-message-bubble"
           style={{
+            minWidth: 0,
+            flex: 1,
             width: "100%",
             display: "flex",
             gap: 8,
             alignItems: "center",
-            background: "var(--bg)",
-            border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+            background: isDark ? "rgb(42, 42, 42)" : "var(--bg)",
+            border: "none",
             borderRadius: 14,
             padding: "10px 10px 10px 14px",
-            boxShadow: "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
-            transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
+            boxShadow: "0 2px 4px rgba(15,23,42,0.07), 0 8px 24px -12px rgba(15,23,42,0.16)",
+            transition: "background 0.15s, box-shadow 0.15s",
           }}
         >
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -660,9 +704,11 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
               rows={1}
               autoFocus
               style={{
+                display: "block",
+                boxSizing: "border-box",
                 width: "100%",
-                minHeight: 24,
-                padding: 0,
+                minHeight: 30,
+                padding: "3px 0",
                 background: "transparent",
                 border: "none",
                 outline: "none",
@@ -672,60 +718,21 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
                 fontFamily: "inherit",
                 fontSize: 14,
                 fontWeight: 400,
-                lineHeight: 1.6,
+                lineHeight: "24px",
               }}
             />
           </div>
 
-            <button
-              type="button"
-              onClick={handleCancel}
-              style={{
-                flexShrink: 0,
-                alignSelf: "flex-end",
-                padding: "7px 10px",
-                background: "none",
-                border: "none",
-                borderRadius: 8,
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontSize: 13,
-                fontWeight: 500,
-                letterSpacing: "-0.01em",
-              }}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              onClick={handleSendEdit}
-              disabled={!editValue.trim()}
-              style={{
-                flexShrink: 0,
-                alignSelf: "flex-end",
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "7px 14px",
-                background: editValue.trim() ? "var(--accent)" : "var(--bg-panel)",
-                border: "none",
-                borderRadius: 8,
-                color: editValue.trim() ? "#fff" : "var(--text-dim)",
-                cursor: editValue.trim() ? "pointer" : "not-allowed",
-                fontSize: 13,
-                fontWeight: 600,
-                letterSpacing: "-0.01em",
-                boxShadow: editValue.trim() ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
-                transition: "background 0.15s, box-shadow 0.15s",
-              }}
-              title="发送"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="2" y1="7" x2="11" y2="7" />
-                <polyline points="7.5 3 12 7 7.5 11" />
-              </svg>
-              发送
-            </button>
+          <SendIconButton
+            onClick={handleSendEdit}
+            disabled={sendLocked || !editValue.trim()}
+            hasContent={!!editValue.trim()}
+            title={sendLocked ? "请稍候，打开编辑后 3 秒可发送" : "发送"}
+            alignSelf="flex-end"
+          />
         </div>
       )}
+      </div>
       {(message.deliveryState === "unknown" || message.deliveryState === "failed") && (
         <div
           role="status"
@@ -865,6 +872,7 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
             >
               {systemPrompt}
             </div>
+            <TurnSkillEvidence evidence={skillEvidence} />
           </div>
         </div>
       )}
@@ -873,6 +881,8 @@ function UserMessageView({ message, entryId, onResend, onRetryDelivery, onRestor
   );
 }
 function AssistantMessageView({
+  hideMetadata,
+  alwaysShowMetadata,
   message,
   isStreaming,
   isBackground,
@@ -891,6 +901,8 @@ function AssistantMessageView({
   expandedToolGroups,
   onToggleToolGroup,
 }: StreamingToolViewProps & {
+  hideMetadata?: boolean;
+  alwaysShowMetadata?: boolean;
   message: AssistantMessage;
   isStreaming?: boolean;
   isBackground?: boolean;
@@ -907,6 +919,10 @@ function AssistantMessageView({
 }) {
   const time = showTimestamp ? formatTime(message.timestamp) : null;
   const blocks = message.content ?? [];
+  const completedToolLayout = useMemo(() => !isStreaming && !streamingToolLayout
+    ? buildCompletedToolLayout([message]).byMessage.get(0) : undefined, [isStreaming, streamingToolLayout, message]);
+  const toolLayout = streamingToolLayout ?? completedToolLayout;
+  const [localExpandedToolGroups, setLocalExpandedToolGroups] = useState<ReadonlySet<string>>(() => new Set());
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
@@ -1021,21 +1037,93 @@ function AssistantMessageView({
 
   return (
     <div
-      style={{ marginBottom: 16 }}
+      className="assistant-message"
+      data-streaming={isStreaming || undefined}
+      data-metadata-visible={alwaysShowMetadata || isStreaming || undefined}
+      style={{ marginBottom: 8 }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {/* Model label */}
-      <div
-        style={{
-          fontSize: 11,
-          color: "var(--text-dim)",
-          marginBottom: 4,
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-        }}
-      >
+      <div className="assistant-message-content" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {hasCollapsedToolProcess && (
+          <ToolProcessGroup
+            messages={toolProcessMessages!}
+            finalMessage={message}
+            finalPrevTimestamp={prevTimestamp}
+            toolResults={toolResults}
+            duration={totalDurationFromFile}
+          />
+        )}
+        {blocks.map((block, i) => {
+          // Only the current streaming block can show thinking; previous blocks stay hidden.
+          if (block.type === "thinking" && (!isStreaming || i !== blocks.length - 1)) return null;
+          if (hasCollapsedToolProcess && (block.type === "thinking" || block.type === "toolCall")) return null;
+          if (block.type === "toolCall" && toolLayout) {
+            const group = toolLayout.groups.get(block.toolCallId);
+            if (group) return (
+              <StreamingToolHistory
+                key={`tool-history:${group.id}`}
+                group={group}
+                activeToolIds={activeToolIds}
+                expanded={(expandedToolGroups ?? localExpandedToolGroups).has(group.id)}
+                onToggle={() => {
+                  if (onToggleToolGroup) onToggleToolGroup(group.id);
+                  else setLocalExpandedToolGroups((previous) => {
+                    const next = new Set(previous);
+                    if (next.has(group.id)) next.delete(group.id); else next.add(group.id);
+                    return next;
+                  });
+                }}
+                toolResults={toolResults}
+              />
+            );
+            if (toolLayout.hiddenToolIds.has(block.toolCallId)) return null;
+          }
+          // 失败消息会同时写入 text + errorMessage；UI 只展示红色错误框，避免重复。
+          if (
+            !isStreaming
+            && message.errorMessage
+            && block.type === "text"
+            && (block as TextContent).text === message.errorMessage
+          ) {
+            return null;
+          }
+          return (
+            <BlockView
+              key={block.type === "toolCall" ? block.toolCallId : i}
+              block={block}
+              toolResults={toolResults}
+              streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
+              toolCallDurations={toolCallDurations}
+              isStreaming={isStreaming}
+            />
+          );
+        })}
+        {!isStreaming && (message.errorMessage || message.stopReason === "error") && (
+          <div
+            style={{
+              padding: "8px 10px",
+              borderRadius: 8,
+              background: "rgba(239,68,68,0.08)",
+              border: "1px solid rgba(239,68,68,0.25)",
+              color: "rgba(200,60,60,0.95)",
+              fontSize: 12,
+              lineHeight: 1.55,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+            }}
+          >
+            {message.errorMessage
+              || "模型以错误状态结束，但没有返回具体错误信息。"}
+          </div>
+        )}
+      </div>
+
+      {!hideMetadata && !isStreaming && <div className="assistant-message-meta" style={{
+        display: "flex", flexWrap: "nowrap", alignItems: "center", gap: 8, marginTop: 2,
+        height: 22, overflowX: "auto", scrollbarWidth: "none", whiteSpace: "nowrap",
+        fontSize: 11, color: "var(--text-dim)",
+      }}>
         {message.provider && (
           <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
         )}
@@ -1086,81 +1174,6 @@ function AssistantMessageView({
             </>
           );
         })()}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {hasCollapsedToolProcess && (
-          <ToolProcessGroup
-            messages={toolProcessMessages!}
-            finalMessage={message}
-            finalPrevTimestamp={prevTimestamp}
-            toolResults={toolResults}
-            duration={totalDurationFromFile}
-          />
-        )}
-        {blocks.map((block, i) => {
-          if (block.type === "toolCall" && streamingToolLayout) {
-            const group = streamingToolLayout.groups.get(block.toolCallId);
-            if (group) return (
-              <StreamingToolHistory
-                key={`tool-history:${group.id}`}
-                group={group}
-                activeToolIds={activeToolIds}
-                expanded={expandedToolGroups?.has(group.id) ?? false}
-                onToggle={() => onToggleToolGroup?.(group.id)}
-                toolResults={toolResults}
-              />
-            );
-            if (streamingToolLayout.hiddenToolIds.has(block.toolCallId)) return null;
-          }
-          // 最终 assistant 自身的 reasoning/toolCall 也属于执行过程，随上方区块折叠；
-          // 最终文字和图片仍作为正式回答直接展示。
-          if (hasCollapsedToolProcess && (block.type === "thinking" || block.type === "toolCall")) {
-            return null;
-          }
-          // 失败消息会同时写入 text + errorMessage；UI 只展示红色错误框，避免重复。
-          if (
-            !isStreaming
-            && message.errorMessage
-            && block.type === "text"
-            && (block as TextContent).text === message.errorMessage
-          ) {
-            return null;
-          }
-          return (
-            <BlockView
-              key={block.type === "toolCall" ? block.toolCallId : i}
-              block={block}
-              toolResults={toolResults}
-              streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
-              toolCallDurations={toolCallDurations}
-              isStreaming={isStreaming}
-            />
-          );
-        })}
-        {!isStreaming && (message.errorMessage || message.stopReason === "error") && (
-          <div
-            style={{
-              padding: "8px 10px",
-              borderRadius: 8,
-              background: "rgba(239,68,68,0.08)",
-              border: "1px solid rgba(239,68,68,0.25)",
-              color: "rgba(200,60,60,0.95)",
-              fontSize: 12,
-              lineHeight: 1.55,
-              whiteSpace: "pre-wrap",
-              overflowWrap: "anywhere",
-            }}
-          >
-            {message.errorMessage
-              || "模型以错误状态结束，但没有返回具体错误信息。"}
-          </div>
-        )}
-      </div>
-
-      <div style={{
-        display: "flex", alignItems: "center", gap: 8, marginTop: 4,
-      }}>
         {message.usage && !isStreaming && (
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
             {formatMessageUsage(message.usage)}
@@ -1207,12 +1220,13 @@ function AssistantMessageView({
         {time && !isStreaming && (
           <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>
         )}
-      </div>
+      </div>}
     </div>
   );
 }
 
-function StreamingToolHistory({ group, expanded, onToggle, toolResults, activeToolIds }: {
+export function StreamingToolHistory({ group, expanded, onToggle, toolResults, activeToolIds, statusLabel }: {
+  statusLabel?: string;
   activeToolIds?: ReadonlySet<string>;
   group: StreamingToolGroup;
   expanded: boolean;
@@ -1221,15 +1235,31 @@ function StreamingToolHistory({ group, expanded, onToggle, toolResults, activeTo
 }) {
   const running = countRunningGroupTools(group, activeToolIds, toolResults);
   const errors = group.tools.filter(({ block }) => toolResults?.get(block.toolCallId)?.isError).length;
+  const summary = summarizeToolActivities(group.tools.map(({ block }) => block));
+  const current = !group.closedByText && !statusLabel
+    ? group.tools.filter(({ block }) => activeToolIds?.has(block.toolCallId) && !toolResults?.has(block.toolCallId)).at(-1)?.block
+    : undefined;
+  const pending = !group.closedByText && !current && !statusLabel
+    ? group.tools.filter(({ block }) => !toolResults?.has(block.toolCallId)).at(-1)?.block
+    : undefined;
+  const visibleTool = current ?? pending;
+  const label = statusLabel ?? (visibleTool
+    ? `${current ? "正在" : "等待执行："}${currentToolActivity(visibleTool)}${getToolPreview(visibleTool) ? ` · ${getToolPreview(visibleTool)}` : ""}`
+    : summary);
   return (
-    <div className="tool-history-group" style={{ paddingBottom: 5 }}>
-      <button type="button" aria-expanded={expanded} onClick={onToggle} style={{
-        width: "100%", padding: "5px 0", border: "none", background: "transparent",
-        color: "var(--text-muted)", fontSize: 13, textAlign: "left", cursor: "pointer",
-      }}>
-        {expanded ? "▾" : "▸"} {group.closedByText ? "工具调用" : "较早的工具调用"} · {group.tools.length} 个
-        {running > 0 && ` · ${running} 个执行中`}
-        {errors > 0 && ` · ${errors} 个失败`}
+    <div className="tool-history-group" style={{ minWidth: 0 }}>
+      <button type="button" className="tool-activity-row" aria-expanded={expanded} onClick={onToggle}
+        title={`${label}\n${summary} · ${group.tools.length} 次调用${errors ? ` · ${errors} 次失败` : ""}`}>
+        {current && <span aria-hidden="true" className="tool-activity-spinner">◌</span>}
+        <span className="tool-activity-viewport">
+          <span className="tool-activity-label" key={visibleTool?.toolCallId ?? "summary"}>{label}</span>
+        </span>
+        <svg className="tool-activity-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: expanded ? "rotate(90deg)" : "none" }}>
+          <path d="m9 5 7 7-7 7" />
+        </svg>
+        <span className="tool-activity-count" style={{ marginLeft: "auto" }}>{group.tools.length} 次</span>
+        {running > 0 && <span className="tool-activity-count">{running} 执行中</span>}
+        {errors > 0 && <span className="tool-activity-error">{errors} 失败</span>}
       </button>
       {expanded && <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "8px 0" }}>
         {group.tools.map(({ block, timestamp }) => {
@@ -1263,9 +1293,14 @@ function ToolProcessGroup({
     { message: finalMessage, prevTimestamp: finalPrevTimestamp },
   ];
   const toolLayout = buildCompletedToolLayout(processMessages.map(({ message }) => message));
+  const tools = Array.from(new Map(processMessages.flatMap(({ message }) => message.content
+    .filter((block): block is ToolCallContent => block.type === "toolCall")
+    .map((block) => [block.toolCallId, block] as const))).values());
+  const summary = summarizeToolActivities(tools);
+  const errors = tools.filter((tool) => toolResults?.get(tool.toolCallId)?.isError).length;
 
   return (
-    <div style={{ borderBottom: "1px solid var(--border)", marginBottom: 4 }}>
+    <div style={{ marginBottom: 4 }}>
       <button
         type="button"
         aria-expanded={expanded}
@@ -1287,7 +1322,9 @@ function ToolProcessGroup({
           textAlign: "left",
         }}
       >
-        <span>{duration === undefined ? "已处理" : `已处理 ${formatCompactDuration(duration)}`}</span>
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={summary}>{summary}</span>
+        {duration !== undefined && <span style={{ flexShrink: 0 }}>{formatCompactDuration(duration)}</span>}
+        {errors > 0 && <span className="tool-activity-error">{errors} 失败</span>}
         <svg
           width="11"
           height="11"
@@ -1304,7 +1341,7 @@ function ToolProcessGroup({
       </button>
 
       {expanded && (
-        <div className="tool-process-content" style={{ display: "flex", flexDirection: "column", gap: 8, paddingBottom: 10 }}>
+        <div className="tool-process-content" style={{ display: "flex", flexDirection: "column", gap: 4, paddingBottom: 4 }}>
           {processMessages.flatMap(({ message: processMessage, prevTimestamp: processPrevTimestamp }, messageIndex) => {
             const messageTimestamp = typeof processMessage.timestamp === "number" ? processMessage.timestamp : undefined;
             const thinkingDuration = messageTimestamp && processPrevTimestamp
@@ -1350,13 +1387,14 @@ function ToolProcessGroup({
 
 function BlockView({ block, toolResults, streamingDuration, toolCallDurations, isStreaming }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; streamingDuration?: number; toolCallDurations?: Map<string, number>; isStreaming?: boolean }) {
   if (block.type === "text") {
+    if (!block.text.trim()) return null;
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} />;
   }
   if (block.type === "thinking") {
     // Responses API 会先发 reasoning item，再按需补 summary 文本；部分模型或
     // 中转站只返回用于后续上下文回传的 signature，thinking 会始终为空。
     // 数据块必须保留，但没有可见内容时不应渲染空的“思考过程”卡片。
-    if (!(block as ThinkingContent).thinking?.trim()) return null;
+    if (!isStreaming || !(block as ThinkingContent).thinking?.trim()) return null;
     return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={isStreaming} />;
   }
   if (block.type === "toolCall") {

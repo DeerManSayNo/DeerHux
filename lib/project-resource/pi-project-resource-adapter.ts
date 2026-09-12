@@ -11,13 +11,13 @@ export class PiProjectResourceAdapter implements ProjectResourcePort {
       await loader.reload();
       const skill = loader.getSkills().skills.find((item) => item.name === name);
       if (skill?.filePath && existsSync(skill.filePath)) {
-        return { name, content: readFileSync(skill.filePath, "utf8") };
+        return { name, content: readFileSync(skill.filePath, "utf8"), filePath: skill.filePath };
       }
     } catch {
       // 回退到 DeerHux 内置 Skill。
     }
     const builtinPath = path.join(process.cwd(), "lib", "builtin-skills", name, "SKILL.md");
-    if (existsSync(builtinPath)) return { name, content: readFileSync(builtinPath, "utf8") };
+    if (existsSync(builtinPath)) return { name, content: readFileSync(builtinPath, "utf8"), filePath: builtinPath };
     return undefined;
   }
 }

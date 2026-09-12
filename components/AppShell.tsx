@@ -1,5 +1,6 @@
 "use client";
 
+import { getExplorerRevealTarget } from "@/lib/file-paths";
 import { AiLinkWorkspace } from "./AiOutputLink";
 
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
@@ -204,6 +205,7 @@ export function AppShell() {
   const [focusedChatSlotIndex, setFocusedChatSlotIndex] = useState(0);
   const focusedChatSlotIndexRef = useRef(0);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [explorerReveal, setExplorerReveal] = useState<{ id: number; path: string; root: string; sourceCwd: string } | null>(null);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
 
   useEffect(() => subscribeToAppNotification("deerhux.project-files-updated", () => {
@@ -664,6 +666,8 @@ export function AppShell() {
   const focusedExplorerCwd = chatLayoutMode !== "single" && !chatSlotIds[focusedChatSlotIndex]
     ? null
     : effectiveProjectCwd;
+  const currentExplorerReveal = explorerReveal?.sourceCwd === focusedExplorerCwd ? explorerReveal : null;
+  const explorerCwd = currentExplorerReveal?.root ?? focusedExplorerCwd;
   const visibleChatSlotCount = CHAT_LAYOUT_COUNTS[chatLayoutMode];
   const visibleChatSlotIds = chatSlotIds.slice(0, visibleChatSlotCount);
 
@@ -2226,6 +2230,13 @@ export function AppShell() {
                 modelsRefreshKey={modelsRefreshKey}
                 chatInputRef={chatInputRef}
                 onOpenFile={handleOpenFile}
+                onRevealFile={(filePath, cwd, slotIndex) => {
+                  handleFocusChatSlot(slotIndex);
+                  const target = getExplorerRevealTarget(filePath, cwd);
+                  setExplorerReveal((previous) => ({ ...target, sourceCwd: cwd, id: (previous?.id ?? 0) + 1 }));
+                  setRightPanelView("explorer");
+                  setRightPanelOpen(true);
+                }}
                 onOpenExplorer={() => {
                   setRightPanelView("explorer");
                   setRightPanelOpen(true);
@@ -2324,8 +2335,8 @@ export function AppShell() {
           </button>
         </div>
         <div className="workspace-panel-body" style={{ display: rightPanelView === "explorer" ? "flex" : "none" }}>
-          {rightPanelOpen && (focusedExplorerCwd ? (
-            <WorkspaceExplorer key={focusedExplorerCwd} cwd={focusedExplorerCwd} refreshKey={explorerRefreshKey} onOpenFile={handleOpenFile} onAtMention={handleAtMention} />
+          {rightPanelOpen && (explorerCwd ? (
+            <WorkspaceExplorer key={explorerCwd} cwd={explorerCwd} revealRequest={currentExplorerReveal} refreshKey={explorerRefreshKey} onOpenFile={handleOpenFile} onAtMention={handleAtMention} />
           ) : <div className="workspace-panel-empty">选择项目后浏览文件</div>)}
         </div>
         <div className="workspace-panel-body" style={{ display: rightPanelView === "preview" ? "flex" : "none" }}>

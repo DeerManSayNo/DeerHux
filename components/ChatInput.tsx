@@ -1,4 +1,6 @@
 "use client";
+import { useTheme } from "@/hooks/useTheme";
+import { SendIconButton } from "./SendIconButton";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
@@ -196,6 +198,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [imageUploadError, setImageUploadError] = useState<string | null>(null);
   const [fileReferences, setFileReferences] = useState<FileReference[]>(initialInputState?.fileReferences ?? []);
   const [pendingPastes, setPendingPastes] = useState(0);
+  const { isDark } = useTheme();
   const inputMaxWidth = fitContainer ? "100%" : compact ? 640 : 820;
   const inputHorizontalPadding = fitContainer ? 0 : compact ? 12 : 16;
 
@@ -1460,16 +1463,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             flexDirection: "column",
             gap: compact ? 7 : 8,
             alignItems: "stretch",
-            background: "var(--bg)",
-            border: `1px solid ${isStreaming && (onSteer || onFollowUp)
-              ? "rgba(234,179,8,0.4)"
-              : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
+            background: isDark ? "rgb(42, 42, 42)" : "var(--bg)",
+            border: "none",
             borderRadius: compact ? 16 : 14,
             padding: compact ? "9px 9px 4px 12px" : "10px 10px 4px 14px",
             boxShadow: compact
-              ? "0 1px 2px rgba(15,23,42,0.035), 0 12px 28px -22px rgba(15,23,42,0.22)"
-              : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
-            transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
+              ? "0 2px 4px rgba(15,23,42,0.06), 0 12px 28px -22px rgba(15,23,42,0.28)"
+              : "0 2px 4px rgba(15,23,42,0.07), 0 8px 24px -12px rgba(15,23,42,0.16)",
+            transition: "background 0.15s, box-shadow 0.15s",
           } as React.CSSProperties}
         >
           <div
@@ -2337,36 +2338,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </button>
             </div>
           ) : (
-            <button
-              type="button"
+            <SendIconButton
               onClick={handleSend}
               disabled={!hasSendableContent}
+              hasContent={hasComposerContent}
               title={isReadingClipboard ? "正在读取文件路径" : isUploadingImages ? "图片上传中" : agentMode === "plan" ? "生成计划" : agentMode === "ask" ? "发送 Ask" : "发送 Agent"}
-              aria-busy={isReadingClipboard || isUploadingImages}
-              style={{
-                flexShrink: 0,
-                alignSelf: "center",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 30,
-                height: 30,
-                padding: 0,
-                background: hasComposerContent ? "var(--accent)" : "var(--bg-panel)",
-                border: "none",
-                borderRadius: "50%",
-                color: hasComposerContent ? "#fff" : "var(--text-dim)",
-                cursor: hasSendableContent ? "pointer" : "not-allowed",
-                fontSize: 13,
-                fontWeight: 600,
-                letterSpacing: "-0.01em",
-                boxShadow: hasComposerContent ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
-                transition: "background 0.15s, box-shadow 0.15s",
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="19" x2="12" y2="5" />
-                <polyline points="5 12 12 5 19 12" />
-              </svg>
-            </button>
+              busy={isReadingClipboard || isUploadingImages}
+            />
           )}
         </div>
         </div>

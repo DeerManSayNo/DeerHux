@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MessageView } from "../components/MessageView";
+const message = { role: "user" as const, content: "停止后消息" };
+const editable = renderToStaticMarkup(<MessageView message={message} onResend={() => {}} />);
+assert.match(editable, /点击编辑并重新发送/, "编辑不依赖持久化 entry ID");
+assert.match(editable, /role="button"/);
+assert.match(editable, /tabindex="0"/);
+assert.match(editable, /user-select:text/);
+const readOnly = renderToStaticMarkup(<MessageView message={message} />);
+assert.doesNotMatch(readOnly, /点击编辑并重新发送/);
+assert.match(readOnly, /user-select:text/, "没有重发回调也允许复制正文");
+console.log("user message edit availability tests passed");

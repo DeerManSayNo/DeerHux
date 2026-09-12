@@ -1068,7 +1068,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // running 置为 true。前台打开时仍须应用初始 JSONL 快照，否则订阅前
         // 已落盘的 user prompt（尤其是 subagent 任务设定）会永久缺失；这也能
         // 修复此前缓存过的不完整 worker 窗口。请求期间若收到
-        // message_end，messageMutationEpoch 会变化，仍能阻止旧快照覆盖实时消息。
+        // message_end，后台刷新仍禁止覆盖；前台恢复在下方合并实时尾部。
         && (!agentRunningRef.current || showLoading)
       );
       // 已加载完整历史时，以 recent 连续窗口的首个 entryId 为锚点替换尾部，
@@ -1089,7 +1089,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ? [...entryIdsRef.current.slice(0, mergeAnchorIndex), ...d.entryIds.slice(recentWindowStart)]
         : [...preservedPrefixEntryIds, ...d.entryIds.slice(recentWindowStart)];
       const historyWasRebased = fullHistoryLoadedRef.current && mergeAnchorIndex < 0;
-      const applyRecentMessages = messagesAreCurrent;
+      // Opening/remounting a running chat must hydrate the historical prefix
+      // even when message_end arrived during the request. Merge the live tail
+      // instead of rejecting the entire snapshot and losing the user prompt.
+      const applyRecentMessages = showLoading || messagesAreCurrent;
+      const loaded = normalizeLoadedMessages(mergedMessages, mergedEntryIds);
+      const reconciledLoaded = showLoading
+        ? reconcilePendingUserMessages(loaded.messages, loaded.entryIds, pendingUserMessagesRef.current)
+        : loaded;
+      const restored = showLoading
+        ? mergeFullSessionHistory(
+          reconciledLoaded.messages, reconciledLoaded.entryIds,
+          messagesRef.current, entryIdsRef.current,
+        )
+        : loaded;
       if (applyRecentMessages && historyWasRebased) fullHistoryLoadedRef.current = false;
       // Shape into SessionData so applySessionSnapshot handles normalization
       // and pending-message reconciliation identically.
@@ -1099,8 +1112,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         filePath: "",
         leafId: null,
         context: {
-          messages: mergedMessages,
-          entryIds: mergedEntryIds,
+          messages: restored.messages,
+          entryIds: restored.entryIds,
           thinkingLevel: d.thinkingLevel,
           model: d.model,
           roleId: d.roleId ?? null,
@@ -1781,9 +1794,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 const existingIndex = prev.findIndex((m): m is UserMessage => m.role === "user" && m.clientMessageId === incomingClientMessageId);
                 if (existingIndex >= 0) {
                   const existing = prev[existingIndex] as UserMessage;
-                  if (!existing.deliveryState || existing.deliveryState === "accepted") return prev;
+                  if ((!existing.deliveryState || existing.deliveryState === "accepted") && !normalized.skillContext) return prev;
                   const next = [...prev];
-                  next[existingIndex] = withDeliveryState(existing, "accepted");
+                  next[existingIndex] = {
+                    ...withDeliveryState(existing, "accepted"),
+                    ...(normalized.skillContext ? { skillContext: normalized.skillContext } : {}),
+                  };
                   return next;
                 }
 
@@ -1801,7 +1817,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                     if (candidate.clientMessageId) continue;
                     if (userMessageTextKey(candidate.content) !== incomingKey) continue;
                     const next = [...prev];
-                    next[i] = { ...normalized, ...candidate, clientMessageId: incomingClientMessageId } as AgentMessage;
+                    next[i] = { ...normalized, ...candidate, clientMessageId: incomingClientMessageId,
+                      ...(normalized.skillContext ? { skillContext: normalized.skillContext } : {}),
+                    } as AgentMessage;
                     return next;
                   }
                 }

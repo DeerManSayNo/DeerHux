@@ -67,11 +67,17 @@ export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent
 
 export type MessageDeliveryState = "submitting" | "accepted" | "unknown" | "failed";
 
+export interface TurnSkillContext {
+  cwd?: string;
+  injected: { name: string; filePath?: string }[];
+}
+
 export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
   references?: FileReference[];
   skill?: SkillReference;
+  skillContext?: TurnSkillContext;
   agentMode?: AgentMode;
   timestamp?: number;
   /** Client-generated id used for optimistic reconciliation and idempotent prompt admission. */

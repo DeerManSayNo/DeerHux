@@ -8,7 +8,7 @@ import { getRelativeFilePath } from "@/lib/file-paths";
 import styles from "./AiFileLinkMenu.module.css";
 
 export function AiFileLinkMenu({ cwd, children }: { cwd?: string | null; children: ReactNode }) {
-  const [menu, setMenu] = useState<{ path: string; x: number; y: number; anchor: HTMLElement } | null>(null);
+  const [menu, setMenu] = useState<{ path: string; x: number; y: number; anchor: HTMLElement; allowDefaultOpen: boolean } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -52,11 +52,12 @@ export function AiFileLinkMenu({ cwd, children }: { cwd?: string | null; childre
 
   function openMenu(event: MouseEvent<HTMLDivElement>) {
     if (!(event.target instanceof Element)) return;
-    const anchor = event.target.closest<HTMLAnchorElement>("[data-ai-output] a[href]");
+    const anchor = event.target.closest<HTMLElement>("[data-file-menu-path], [data-ai-output] a[href]");
     if (!anchor) return;
     // Remove source line references before resolving a filesystem path.
     const href = (anchor.getAttribute("href") ?? "").replace(/#.*$/, "").replace(/:\d+(?::\d+)?$/, "");
-    const path = resolveLocalFileHref(href, cwd);
+    const filePath = anchor.getAttribute("data-file-menu-path");
+    const path = filePath ?? resolveLocalFileHref(href, cwd);
     if (!path) return;
     event.preventDefault();
     event.stopPropagation();
@@ -64,21 +65,21 @@ export function AiFileLinkMenu({ cwd, children }: { cwd?: string | null; childre
     setError("");
     setBusy(false);
     const rect = anchor.getBoundingClientRect();
-    setMenu({ path, anchor, x: event.clientX || rect.left, y: event.clientY || rect.bottom });
+    setMenu({ path, anchor, allowDefaultOpen: filePath !== null, x: event.clientX || rect.left, y: event.clientY || rect.bottom });
   }
 
-  async function act(action: "relative" | "absolute" | "reveal") {
+  async function act(action: "relative" | "absolute" | "reveal" | "open") {
     if (!menu || busy) return;
     const currentRevision = revision.current;
     setBusy(true);
     setError("");
     try {
-      if (action === "reveal") {
-        const response = await fetch("/api/files/reveal", {
+      if (action === "reveal" || action === "open") {
+        const response = await fetch(`/api/files/${action}`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ filePath: menu.path }),
         });
-        if (!response.ok) throw new Error(response.status === 404 ? "文件不存在或已移动" : "无法打开所在文件夹");
+        if (!response.ok) throw new Error(response.status === 404 ? "文件不存在或已移动" : action === "open" ? "无法使用默认应用打开" : "无法打开所在文件夹");
       } else {
         await navigator.clipboard.writeText(action === "relative" ? getRelativeFilePath(menu.path, cwd ?? undefined) : menu.path);
       }
@@ -87,7 +88,7 @@ export function AiFileLinkMenu({ cwd, children }: { cwd?: string | null; childre
         setMenu(null);
       }
     } catch (cause) {
-      if (revision.current === currentRevision) setError(action === "reveal" && cause instanceof Error ? cause.message : "复制失败，请重试");
+      if (revision.current === currentRevision) setError((action === "reveal" || action === "open") && cause instanceof Error ? cause.message : "复制失败，请重试");
     } finally {
       if (revision.current === currentRevision) setBusy(false);
     }
@@ -118,6 +119,7 @@ export function AiFileLinkMenu({ cwd, children }: { cwd?: string | null; childre
           <button role="menuitem" disabled={busy} onClick={() => void act("reveal")}>
             {/Mac/i.test(navigator.platform) ? "在 Finder 中显示" : "打开所在文件夹"}
           </button>
+          {menu.allowDefaultOpen && <button role="menuitem" disabled={busy} onClick={() => void act("open")}>使用默认应用打开</button>}
           {error && <div className={styles.error} role="alert">{error}</div>}
         </div>, document.body,
       )}

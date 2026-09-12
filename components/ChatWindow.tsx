@@ -6,8 +6,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { AgentMessage, AssistantMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import type { CollaborationMuxSnapshot } from "@/lib/parallel-agent/collaboration-mux";
-import { MessageView, type ToolProcessMessage, type StreamingToolViewProps } from "./MessageView";
-import { buildStreamingToolLayout } from "@/lib/streaming-tool-layout";
+import { MessageView, StreamingToolHistory, type ToolProcessMessage, type StreamingToolViewProps } from "./MessageView";
+import { buildStreamingToolLayout, moveCurrentToolGroupToBottom } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { CompactionConfirmModal } from "./CompactionConfirmModal";
@@ -63,6 +63,7 @@ interface Props {
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
+  onRevealFile?: (filePath: string) => void;
   onOpenRoleConfig?: () => void;
   projectOptions?: ProjectOption[];
   onNewSessionCwdChange?: (cwd: string) => void;
@@ -620,7 +621,7 @@ function Typewriter({ phrases, paused = false }: { phrases: string[]; paused?: b
   );
 }
 
-export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", simpleWaitingIndicator = false, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, wechatHeaderTargetId, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
+export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", simpleWaitingIndicator = false, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, wechatHeaderTargetId, onSessionStatsChange, onContextUsageChange, onOpenFile, onRevealFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
@@ -1438,11 +1439,11 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const activeToolIds = useMemo(() => new Set(
     isRunning && agentPhase?.kind === "running_tools" ? agentPhase.tools.map((tool) => tool.id) : [],
   ), [isRunning, agentPhase]);
-  const streamingToolLayout = useMemo(() => buildStreamingToolLayout(
+  const streamingToolLayout = useMemo(() => moveCurrentToolGroupToBottom(buildStreamingToolLayout(
     messages,
     streamState.isStreaming ? streamState.streamingMessage : null,
     isRunning,
-  ), [messages, streamState.isStreaming, streamState.streamingMessage, isRunning]);
+  )), [messages, streamState.isStreaming, streamState.streamingMessage, isRunning]);
   // 展开状态由回合外层保存，流式 bubble 落盘后也不会被重新收起。
   const [expandedToolGroups, setExpandedToolGroups] = useState<ReadonlySet<string>>(() => new Set());
   const toggleToolGroup = useCallback((id: string) => {
@@ -1478,17 +1479,13 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         }
         const finalAssistantIndex = assistantIndexes.at(-1);
         if (finalAssistantIndex !== undefined) {
-          const finalAssistant = messages[finalAssistantIndex] as AssistantMessage;
-          const hasFinalAnswer = (finalAssistant.content ?? []).some(
-            (block) => block.type === "text" && block.text.trim().length > 0,
-          );
           const processIndexes = assistantIndexes.slice(0, -1);
-          const hasToolProcess = processIndexes.some((index) => {
+          const hasToolProcess = assistantIndexes.some((index) => {
             const assistant = messages[index] as AssistantMessage;
             return (assistant.content ?? []).some((block) => block.type === "toolCall");
           });
 
-          if (hasFinalAnswer && hasToolProcess) {
+          if (hasToolProcess) {
             const processMessages = processIndexes.map((index): ToolProcessMessage => ({
               message: messages[index] as AssistantMessage,
               prevTimestamp: parseMessageTimestamp(messages[index - 1]),
@@ -1960,10 +1957,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
           onScroll={handleScroll}
           onWheel={markUserScrollIntent}
           onTouchStart={markUserScrollIntent}
-          className={`${compact ? "pt-3" : "pt-4"} flex-1 overflow-y-auto scrollbar-none [scrollbar-width:none]`}
+          className="flex-1 overflow-y-auto scrollbar-none [scrollbar-width:none]"
           style={{ overflowX: "hidden", overflowAnchor: shouldAutoScroll ? "none" : "auto" }}
         >
-          <div className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingBottom: compact ? 12 : 18 }}>
+          <div className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingTop: 18, paddingBottom: compact ? 12 : 18 }}>
 
             {/* TODO 3 — first-paint pagination: older messages were truncated. */}
             {hasOlderMessages && session?.id && (
@@ -1993,13 +1990,32 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               for (let i = messages.length - 1; i >= 0; i--) {
                 if (messages[i].role === "user") { lastUserIdx = i; break; }
               }
+              const hasVisibleStream = streamState.isStreaming && streamState.streamingMessage
+                && !streamingToolLayout.hiddenMessageIndexes.has(messages.length)
+                && hasRenderableStreamOutput(streamState.streamingMessage);
+              let latestVisibleIndex = -1;
+              if (!hasVisibleStream) {
+                for (let i = messages.length - 1; i >= 0; i--) {
+                  const candidate = messages[i];
+                  if (toolProcessLayout.hiddenMessageIndexes.has(i) || streamingToolLayout.hiddenMessageIndexes.has(i)) continue;
+                  if (candidate.role === "user" || (candidate.role === "assistant" && hasRenderableStreamOutput(candidate))) {
+                    latestVisibleIndex = i;
+                    break;
+                  }
+                }
+              }
               let refIdx = 0;
+              let previousContentRole: "user" | "assistant" | undefined;
               return messages.map((msg, idx) => {
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = isVisible ? refIdx++ : -1;
                 // 折叠的消息仍占用 ref 序号，与 userMsgIdxToRefIdx 保持一致，
                 // 否则后续提示词会定位到错误节点或空 ref。
                 if (toolProcessLayout.hiddenMessageIndexes.has(idx) || streamingToolLayout.hiddenMessageIndexes.has(idx)) return null;
+                const needsUserTimeGap = msg.role === "user" && previousContentRole === "user";
+                if (msg.role === "user" || (msg.role === "assistant" && hasRenderableStreamOutput(msg))) {
+                  previousContentRole = msg.role;
+                }
                 let showTimestamp = false;
                 let isLastAssistantInTurn = false;
                 if (msg.role === "assistant") {
@@ -2071,6 +2087,8 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                   <MessageView
                     key={messageRenderKey}
                     message={msg}
+                    alwaysShowMetadata={idx === latestVisibleIndex}
+                    hideMetadata={isRunning && idx > lastUserIdx}
                     activeToolIds={activeToolIds}
                     streamingToolLayout={streamingToolLayout.byMessage.get(idx)}
                     expandedToolGroups={expandedToolGroups}
@@ -2088,10 +2106,14 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                     turnDurationSeconds={turnKey ? completedTurnDurations[turnKey] : undefined}
                     toolProcessMessages={toolProcessLayout.messagesByFinalIndex.get(idx)}
                     nextUserTimestamp={nextUser}
-                    onResend={session && entryIds[idx] ? handleResend : undefined}
+                    onResend={handleResend}
                     onRetryDelivery={msg.role === "user" && msg.deliveryRetryable && (msg.deliveryState === "failed" || msg.deliveryState === "unknown") ? handleRetryDelivery : undefined}
                     onRestoreToInput={msg.role === "user" && (msg.deliveryState === "failed" || msg.deliveryState === "unknown") ? (failedMessage) => chatInputRef?.current?.insertText(parseUserMessageText(failedMessage)) : undefined}
                     systemPrompt={systemPrompt}
+                    turnSkillMessages={msg.role === "user" ? [
+                      ...messages.slice(idx + 1, nextUserIndex),
+                      ...(nextUserIndex >= messages.length && streamState.isStreaming && streamState.streamingMessage ? [streamState.streamingMessage as AgentMessage] : []),
+                    ] : undefined}
                     collaborationRuns={collaborationRuns}
                     turnEntryIds={turnEntryIds}
                     onOpenSession={onOpenSession}
@@ -2100,7 +2122,9 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                 );
                 if (!isVisible) return view;
                 return (
-                  <div key={messageRenderKey} ref={(el) => {
+                  <div key={messageRenderKey}
+                    data-running-assistant={isRunning && idx > lastUserIdx && msg.role === "assistant" || undefined}
+                    style={{ paddingTop: needsUserTimeGap ? 12 : 0 }} ref={(el) => {
                     messageRefs.current[currentRefIdx] = el;
                     if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
                   }}>
@@ -2139,9 +2163,33 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               </div>
             )}
 
-            {isRunning && !hasRenderableStreamOutput(streamState.streamingMessage) && (
+            {isRunning && (streamingToolLayout.bottomGroup || !hasRenderableStreamOutput(streamState.streamingMessage)) && (
               <div className="py-2 text-[13px] text-text-muted">
-                {simpleWaitingIndicator ? (
+                {streamingToolLayout.bottomGroup ? (
+                  <>
+                    <StreamingToolHistory
+                      group={streamingToolLayout.bottomGroup}
+                      activeToolIds={activeToolIds}
+                      toolResults={toolResultsMap}
+                      expanded={expandedToolGroups.has(streamingToolLayout.bottomGroup.id)}
+                      onToggle={() => toggleToolGroup(streamingToolLayout.bottomGroup!.id)}
+                      statusLabel={agentPhase?.kind === "running_tools" ? undefined : phaseLabel(agentPhase, {
+                        serverStatus, retryInfo, isCompacting, stallLevel, compactionMessage: compactionProgress?.message,
+                      })}
+                    />
+                    {!simpleWaitingIndicator && <AgentStatusTicker
+                      serverStatus={serverStatus}
+                      watchdog={watchdogInfo}
+                      agentPhase={agentPhase}
+                      thinkingLevel={thinkingLevel}
+                      retryInfo={retryInfo}
+                      contextUsage={contextUsage}
+                      isCompacting={isCompacting}
+                      stallLevel={stallLevel}
+                      autoRecoveryMode={autoRecoveryMode}
+                    />}
+                  </>
+                ) : simpleWaitingIndicator ? (
                   <SimpleWaitingIndicator />
                 ) : (
                   <div className="flex items-center gap-0 flex-wrap">
@@ -2170,10 +2218,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               <ChangedFilesList
                 files={changedFiles}
                 cwd={session?.cwd ?? newSessionCwd ?? null}
-                onOpenFile={onOpenFile ? (filePath) => {
+                onOpenFile={onRevealFile ?? (onOpenFile ? (filePath) => {
                   const fileName = filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
                   onOpenFile(filePath, fileName);
-                } : undefined}
+                } : undefined)}
               />
             )}
             <div ref={messagesEndRef} />

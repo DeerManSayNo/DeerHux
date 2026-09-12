@@ -170,6 +170,8 @@ pre, code {
 }
 .markdown-body th { background: var(--bg-panel); font-weight: 600; }
 .markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+/* Hidden historical separators must not leave empty vertical space. */
+.tool-process-content .markdown-body hr { display: none; }
 .markdown-body .streaming-code-block {
   margin: 8px 0;
   padding: 10px 12px;
@@ -808,15 +810,6 @@ span.linenumber {
 }
 
 
-.tool-history-group {
-  border-bottom: 1px solid var(--border);
-}
-
-/* 末尾工具分组与外层过程共用分隔线，避免出现相邻双线。 */
-.tool-process-content > .tool-history-group:last-child {
-  border-bottom: none;
-}
-
 /* Application controls do not participate in chat text selection. */
 .chat-window-wrap, button, [role="button"], .sidebar-session-item,
 .sidebar-section-title-button, .sidebar-icon-button {
@@ -869,3 +862,33 @@ span.linenumber {
   background-color: transparent !important;
   color: inherit;
 }
+
+/* Reveal the prompt action from the bubble; keep it reachable across the gap. */
+.user-message-prompt-icon { opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+.user-message-bubble-row:has(.user-message-bubble:hover) .user-message-prompt-icon,
+.user-message-bubble-row:has(.user-message-bubble:focus-within) .user-message-prompt-icon,
+.user-message-prompt-icon:hover,
+.user-message-prompt-icon:focus-visible { opacity: 1; pointer-events: auto; transition-delay: 0s; }
+.user-message-prompt-icon { position: relative; transition: opacity 0.15s 0.15s; }
+.user-message-prompt-icon::after { content: ""; position: absolute; top: 0; bottom: 0; left: 100%; width: 8px; }
+
+/* Message metadata keeps its space and appears only for the corresponding content. */
+.user-message-time,
+.assistant-message > .assistant-message-meta { opacity: 0; visibility: hidden; transition: opacity 0.15s, visibility 0s 0.15s; }
+.user-message:has(.user-message-bubble:hover) .user-message-time,
+.user-message:has(.user-message-bubble:focus-within) .user-message-time,
+.assistant-message:has(> .assistant-message-content:hover) > .assistant-message-meta,
+.assistant-message:has(> .assistant-message-content:focus-within) > .assistant-message-meta,
+.assistant-message:has(> .assistant-message-meta:hover) > .assistant-message-meta,
+.assistant-message:has(> .assistant-message-meta:focus-within) > .assistant-message-meta {
+  opacity: 1; visibility: visible; transition-delay: 0s;
+}
+
+.assistant-message > .assistant-message-meta > * { flex-shrink: 0; }
+
+/* Running turns hide stats without reserving space, including tool-wait phases. */
+[data-running-assistant] > .assistant-message > .assistant-message-meta,
+.assistant-message[data-streaming] > .assistant-message-meta { display: none !important; }
+
+.user-message[data-metadata-visible] .user-message-time,
+.assistant-message[data-metadata-visible] > .assistant-message-meta { opacity: 1; visibility: visible; transition-delay: 0s; }

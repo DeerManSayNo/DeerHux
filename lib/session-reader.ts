@@ -1,3 +1,5 @@
+import { normalizeTurnSkillContext } from "./turn-skill-evidence";
+import type { TurnSkillContext } from "./types";
 import { skillNames, skillReference } from "@/lib/skill-selection";
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { statSync } from "fs";
@@ -512,8 +514,8 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   // 协作 run 快照：同一个 runId 可能因状态更新被 upsert 多次，这里按出现顺序
   // 覆盖，最终保留每个 runId 在 path 上的最后一条（即最新快照）。
   const collabRunsByRunId = new Map<string, CollaborationRunSnapshot>();
-  const turnContextByMessageId = new Map<string, { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference }>();
-  let pendingTurnContext: { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference } | null = null;
+  const turnContextByMessageId = new Map<string, { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference; skillContext?: TurnSkillContext }>();
+  let pendingTurnContext: { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference; skillContext?: TurnSkillContext } | null = null;
   for (const e of path) {
     if (e.type === "custom" && (e as { customType?: string }).customType === "role_profile") {
       const data = (e as { data?: { roleId?: unknown } }).data;
@@ -530,11 +532,12 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       }
     }
     if (e.type === "custom" && (e as { customType?: string }).customType === "turn_context") {
-      const data = (e as { data?: { mode?: unknown; references?: unknown; skill?: { name?: unknown; names?: unknown } } }).data;
+      const data = (e as { data?: { mode?: unknown; skillContext?: unknown; references?: unknown; skill?: { name?: unknown; names?: unknown } } }).data;
       const references = normalizeReferences(data?.references);
       const skill = skillReference(skillNames(data?.skill));
       pendingTurnContext = {
         agentMode: normalizeAgentMode(data?.mode),
+        skillContext: normalizeTurnSkillContext(data?.skillContext),
         ...(references.length ? { references } : {}),
         ...(skill ? { skill } : {}),
       };
@@ -646,6 +649,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       if (displayMessage) return {
         ...normalized,
         content: displayMessage.content as typeof normalized.content,
+        ...(turnContext?.skillContext ? { skillContext: turnContext.skillContext } : {}),
         ...(displayMessage.references ?? turnContext?.references ? { references: displayMessage.references ?? turnContext?.references } : {}),
         ...(displayMessage.skill ?? turnContext?.skill ? { skill: displayMessage.skill ?? turnContext?.skill } : {}),
         agentMode: displayMessage.agentMode ?? turnContext?.agentMode ?? messageMode,
@@ -657,6 +661,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
           content: stripInternalUserContext(normalized.content),
           ...(turnContext?.references ? { references: turnContext.references } : {}),
           ...(turnContext?.skill ? { skill: turnContext.skill } : {}),
+          ...(turnContext?.skillContext ? { skillContext: turnContext.skillContext } : {}),
           ...(turnContext?.agentMode || messageMode ? { agentMode: turnContext?.agentMode ?? messageMode } : {}),
         };
       }
@@ -668,6 +673,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
         content: strippedContent as typeof normalized.content,
         ...(turnContext?.references ? { references: turnContext.references } : {}),
         ...(turnContext?.skill ? { skill: turnContext.skill } : {}),
+        ...(turnContext?.skillContext ? { skillContext: turnContext.skillContext } : {}),
         ...(turnContext?.agentMode || messageMode ? { agentMode: turnContext?.agentMode ?? messageMode } : {}),
       };
       // Always strip image data from user messages to keep API responses lean.

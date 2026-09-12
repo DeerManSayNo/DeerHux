@@ -36,7 +36,7 @@ function buildToolLayout(
     return layout;
   };
   const flush = (closedByText: boolean) => {
-    const hidden = segment.slice(0, closedByText ? segment.length : Math.max(0, segment.length - 5));
+    const hidden = segment;
     if (hidden.length) {
       const first = hidden[0];
       layoutFor(first.messageIndex).groups.set(first.block.toolCallId, {
@@ -72,7 +72,7 @@ function buildToolLayout(
     if (!message.content.some((block: AssistantContentBlock) => {
       if (block.type === "toolCall") return layout.groups.has(block.toolCallId) || !layout.hiddenToolIds.has(block.toolCallId);
       if (block.type === "text") return Boolean(block.text.trim());
-      if (block.type === "thinking") return Boolean(block.thinking.trim());
+      if (block.type === "thinking") return index === messages.length && Boolean(streamingMessage) && Boolean(block.thinking.trim());
       return true;
     }) && !message.errorMessage) hiddenMessageIndexes.add(index);
   }
@@ -95,7 +95,49 @@ export function buildStreamingToolLayout(messages: AgentMessage[], streamingMess
   return buildToolLayout(messages, streamingMessage, isRunning);
 }
 
-/** 传入单轮过程消息；展开「已处理」时每个工具段仍默认收起。 */
+/** 传入单轮过程消息；展开历史过程时每个工具段仍默认收起。 */
 export function buildCompletedToolLayout(messages: AgentMessage[]) {
   return buildToolLayout(messages, null, true, true);
+}
+
+const TOOL_ACTIVITIES: Record<string, { summary: string; current: string }> = {
+  read: { summary: "读取文件", current: "读取文件" },
+  bash: { summary: "运行了命令", current: "运行命令" },
+  edit: { summary: "修改文件", current: "修改文件" },
+  write: { summary: "写入文件", current: "写入文件" },
+  grep: { summary: "搜索内容", current: "搜索内容" },
+  code_search: { summary: "搜索内容", current: "搜索内容" },
+  codegraph: { summary: "查询代码关系", current: "查询代码关系" },
+  find: { summary: "查找文件", current: "查找文件" },
+  ls: { summary: "查看目录", current: "查看目录" },
+};
+
+/** Classify declared tools, never guess command effects from shell text. */
+export function summarizeToolActivities(tools: readonly ToolCallContent[]): string {
+  const categories = new Set(tools.map((tool) => TOOL_ACTIVITIES[tool.toolName]?.summary ?? "调用其他工具"));
+  const order = ["读取文件", "查看目录", "查找文件", "搜索内容", "查询代码关系", "修改文件", "写入文件", "运行了命令", "调用其他工具"];
+  const labels = order.filter((label) => categories.has(label));
+  if (!labels.length) return "已处理";
+  if (labels.length === 1) return labels[0] === "运行了命令" ? labels[0] : `已${labels[0]}`;
+  return `已${labels.slice(0, -1).join("、")}并${labels.at(-1)}`;
+}
+
+export function currentToolActivity(tool: ToolCallContent): string {
+  return TOOL_ACTIVITIES[tool.toolName]?.current ?? `调用 ${tool.toolName}`;
+}
+
+/** Move the open segment into the bottom status area, retaining message usage rows. */
+export function moveCurrentToolGroupToBottom(layout: ReturnType<typeof buildStreamingToolLayout>) {
+  const byMessage = new Map(layout.byMessage);
+  let bottomGroup: StreamingToolGroup | undefined;
+  for (const [index, messageLayout] of byMessage) {
+    for (const [id, group] of messageLayout.groups) {
+      if (group.closedByText) continue;
+      bottomGroup = group;
+      const groups = new Map(messageLayout.groups);
+      groups.delete(id);
+      byMessage.set(index, { ...messageLayout, groups });
+    }
+  }
+  return { ...layout, byMessage, bottomGroup };
 }

@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useRef, type CSSProperties } from "react";
 import { FILE_REFERENCE_DRAG_TYPE } from "@/hooks/useDragDrop";
 import { getFileIcon, FolderIcon } from "./FileIcons";
-import { encodeFilePathForApi, getRelativeFilePath, joinFilePath } from "@/lib/file-paths";
+import { encodeFilePathForApi, getRelativeFilePath, joinFilePath, getExplorerRevealTarget } from "@/lib/file-paths";
 
 interface FileEntry {
   name: string;
@@ -24,6 +24,7 @@ interface Props {
   refreshKey?: number;
   onAtMention?: (relativePath: string) => void;
   initialExpandedPaths?: string[];
+  revealRequest?: { id: number; path: string } | null;
   activePath?: string | null;
   onExplorerStateChange?: (state: { expandedPaths: string[]; activePath: string | null }) => void;
 }
@@ -144,9 +145,11 @@ function TreeNode({
   }, [node.fullPath, node.name, node.isDir, onContextMenu]);
 
   return (
-    <div>
+    <div data-explorer-loading={node.isDir && open && (!loaded || loading) || undefined}>
       <div
         onClick={handleClick}
+        data-explorer-path={node.fullPath}
+        data-explorer-active={active || undefined}
         draggable
         onDragStart={(event) => {
           event.dataTransfer.effectAllowed = "link";
@@ -259,7 +262,9 @@ function TreeNode({
   );
 }
 
-export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, initialExpandedPaths = [], activePath = null, onExplorerStateChange }: Props) {
+export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, revealRequest, initialExpandedPaths = [], activePath = null, onExplorerStateChange }: Props) {
+  const [revealedId, setRevealedId] = useState<number | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
   const [roots, setRoots] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -371,11 +376,55 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, initial
 
     setLoading(cwdChanged);
     setError(null);
+    if (revealRequest) return;
+    let cancelled = false;
     fetchEntries(cwd, !cwdChanged)
-      .then((entries) => setRoots(entries))
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
-  }, [cwd, refreshKey, initialExpandedPathsRef, initialActivePathRef]);
+      .then((entries) => { if (!cancelled) setRoots(entries); })
+      .catch((e) => { if (!cancelled) setError(String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [cwd, refreshKey, revealRequest, initialExpandedPathsRef, initialActivePathRef]);
+
+  useEffect(() => {
+    if (!revealRequest) return;
+    let cancelled = false;
+    setRevealError(null);
+    setRevealedId(null);
+    const reveal = async () => {
+      const target = getExplorerRevealTarget(revealRequest.path, cwd);
+      try {
+        // Refresh ancestors so newly created files are visible despite the directory cache.
+        const rootEntries = await fetchEntries(cwd, true);
+        if (cancelled) return;
+        setRoots(rootEntries);
+        let entries = rootEntries;
+        for (const parent of target.expandedPaths) {
+          if (cancelled) return;
+          if (!entries.some((entry) => entry.fullPath === parent && entry.isDir)) {
+            throw new Error("无法定位文件：所在目录不存在或已被隐藏");
+          }
+          entries = await fetchEntries(parent, true);
+        }
+        if (cancelled) return;
+        if (!entries.some((entry) => entry.fullPath === target.path && !entry.isDir)) {
+          throw new Error("无法定位文件：文件不存在或已被隐藏");
+        }
+        const expanded = new Set([...explorerStateRef.current.expandedPaths, ...target.expandedPaths]);
+        explorerStateRef.current = { expandedPaths: expanded, activePath: target.path };
+        setExpandedPaths(expanded);
+        setActiveFilePath(target.path);
+        setRoots(rootEntries);
+        setRevealedId(revealRequest.id);
+        onExplorerStateChangeRef.current?.({ expandedPaths: [...expanded], activePath: target.path });
+      } catch (cause) {
+        if (!cancelled) setRevealError(cause instanceof Error ? cause.message : "无法定位文件，请重试");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void reveal();
+    return () => { cancelled = true; };
+  }, [cwd, revealRequest, refreshKey]);
 
   if (loading) {
     return (
@@ -411,10 +460,11 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, initial
   const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
 
   return (
-    <div style={{ padding: "2px 4px" }}>
+    <div style={{ padding: "2px 4px" }} data-explorer-reveal-id={revealedId}>
+      {revealError && <div role="alert" style={{ padding: 8, color: "var(--danger, #ef4444)", fontSize: 12 }}>{revealError}</div>}
       {roots.map((node) => (
         <TreeNode
-          key={node.fullPath}
+          key={`${node.fullPath}:${revealedId ?? "initial"}`}
           node={node}
           depth={0}
           cwd={cwd}

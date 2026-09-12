@@ -1,0 +1,27 @@
+.tool-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.tool-activity-row:hover { color: var(--text); }
+.tool-activity-row:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.tool-activity-viewport { flex: 0 1 auto; min-width: 0; height: 20px; overflow: hidden; }
+.tool-activity-label { display: block; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; animation: tool-activity-roll 180ms ease-out; }
+.tool-activity-count, .tool-activity-error, .tool-activity-chevron, .tool-activity-spinner { flex-shrink: 0; white-space: nowrap; }
+.tool-activity-chevron { transition: transform 150ms ease; }
+.tool-activity-count { color: var(--text-dim); font-size: 11px; }
+.tool-activity-error { color: var(--danger, #ef4444); font-size: 11px; }
+.tool-activity-spinner { animation: tool-activity-spin 1s linear infinite; }
+@keyframes tool-activity-roll { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes tool-activity-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .tool-activity-label, .tool-activity-spinner { animation: none; } .tool-activity-chevron { transition: none; } }

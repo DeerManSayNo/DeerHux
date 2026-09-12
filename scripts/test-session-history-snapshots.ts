@@ -114,3 +114,26 @@ const snapshot = (text: string, fullHistoryLoaded = false) => ({
 }
 
 console.log("session history snapshot tests passed");
+
+// A layout remount can receive message_end before its history GET returns.
+// Recover the missing user prefix, dedupe the id-less SSE overlap, retain live tail.
+{
+  const user = { role: "user", timestamp: 1, content: "question" };
+  const answer = { role: "assistant", timestamp: 2, content: "first answer" };
+  const live = { role: "assistant", timestamp: 3, content: "continued answer" };
+  const restored = mergeFullSessionHistory([user, answer], ["u", "a"], [answer, live], []);
+  assert.deepEqual(restored.messages, [user, answer, live]);
+  assert.deepEqual(restored.entryIds, ["u", "a", ""]);
+  const repeated = { ...user, timestamp: 4 };
+  assert.deepEqual(
+    mergeFullSessionHistory([user], ["u"], [user, repeated], []).messages,
+    [user, repeated],
+    "Repeated prompt text with a different timestamp is a separate message",
+  );
+  assert.equal(
+    mergeFullSessionHistory([answer], ["a"], [answer, answer], ["a", ""]).messages.length,
+    2,
+    "An entry-id match must consume its fingerprint occurrence",
+  );
+}
+console.log("running history hydration race tests passed");
