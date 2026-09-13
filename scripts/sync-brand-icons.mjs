@@ -20,7 +20,7 @@ try {
     copyFileSync(input, path.join(root, target));
   }
   for (const [generated, target] of [
-    ["icon.icns", "src-tauri/icons/icon copy.icns"],
+    ["icon.icns", "src-tauri/icons/icon.icns"],
     ["icon.ico", "src-tauri/icons/icon.ico"],
     ["icon.ico", "app/favicon.ico"],
   ]) copyFileSync(path.join(temporary, "generated", generated), path.join(root, target));
