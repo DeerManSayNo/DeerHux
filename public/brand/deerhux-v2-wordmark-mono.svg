@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 600 160" fill="none" role="img" aria-labelledby="title">
+  <title id="title">DeerHux custom wordmark</title>
+  <g stroke="#292a2b" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M34 44V120H62C86 120 102 105 102 82C102 59 86 44 62 44H34Z"/>
+    <path d="M130 94H180C180 77 171 67 156 67C140 67 129 79 129 94C129 111 140 122 157 122C166 122 173 119 179 114"/>
+    <path d="M208 94H258C258 77 249 67 234 67C218 67 207 79 207 94C207 111 218 122 235 122C244 122 251 119 257 114"/>
+    <path d="M284 120V69M284 89C289 73 301 65 315 69"/>
+    <path d="M346 44V120M396 44V120M346 82H396"/>
+    <path d="M427 69V99C427 114 435 122 448 122C463 122 473 111 473 96M473 69V120"/>
+    <path d="M504 69C513 81 521 89 530 96C539 103 547 112 555 120M554 69C547 80 539 89 530 96C521 103 513 112 505 120"/>
+  </g>
+  <path d="M310 68L321 52L319 40" stroke="#292a2b" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M321 52L333 45" stroke="#292a2b" stroke-width="7" stroke-linecap="round"/>
+</svg>

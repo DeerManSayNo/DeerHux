@@ -220,6 +220,7 @@ export interface SessionInfo {
 }
 
 export interface SessionContext {
+  fileChangeSnapshot?: import("./file-change-snapshot").FileChangeSnapshot | null;
   messages: AgentMessage[];
   entryIds: string[]; // parallel to messages — the session entry id for each message
   thinkingLevel: string;

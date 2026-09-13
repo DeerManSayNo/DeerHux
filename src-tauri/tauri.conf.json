@@ -30,7 +30,8 @@
     },
     "icon": [
       "icons/icon.png",
-      "icons/icon copy.icns"
+      "icons/icon copy.icns",
+      "icons/icon.ico"
     ],
     "windows": {
       "nsis": {

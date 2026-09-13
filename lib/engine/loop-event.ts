@@ -1,3 +1,4 @@
+import type { FileChange } from "../file-changes.ts";
 /**
  * LoopEvent 事件模型（discriminated union）。
  *
@@ -54,6 +55,7 @@ export interface AgentToolResult<T = unknown> {
   isError?: boolean;
   /** 本次执行修改了哪些文件（绝对路径）。 */
   changedFiles?: string[];
+  fileChanges?: FileChange[];
   /** 终止 hint：本批所有工具都 terminate=true 时 loop 提前停。 */
   terminate?: boolean;
 }
@@ -114,6 +116,7 @@ export type LoopEvent =
       result: AgentToolResult<unknown>;
       isError: boolean;
       changedFiles?: string[];
+      fileChanges?: FileChange[];
     }
   // ─── 队列（M5）──────────────────────────────────────────
   | {

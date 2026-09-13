@@ -39,6 +39,9 @@ assert.doesNotMatch(html, /tool-activity-row/, "消息中不重复显示当前�
 html = renderToStaticMarkup(<StreamingToolHistory group={bottom.bottomGroup!} expanded={false} onToggle={() => {}} statusLabel="工具已完成，等待模型继续..." />);
 assert.match(html, /工具已完成，等待模型继续/);
 assert.doesNotMatch(html, /等待执行：/);
+html = renderToStaticMarkup(<StreamingToolHistory group={bottom.bottomGroup!} activeToolIds={new Set(["b"])} toolResults={new Map([["r", results.get("r")!]])} expanded={false} onToggle={() => {}} statusLabel="正在运行工具：运行命令…" />);
+assert.match(html, /正在运行工具：运行命令…/);
+assert.match(html, /tool-activity-spinner/);
 console.log("bottom tool status rendering tests passed");
 
 for (const props of [{ isStreaming: true }, { hideMetadata: true, alwaysShowMetadata: true }]) {

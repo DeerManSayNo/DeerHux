@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
+import { AppIcon } from "./AppIcon";
 const WeChatConfig = dynamic(() => import("./WeChatConfig").then((module) => module.WeChatConfig));
 import styles from "./window-wechat.module.css";
 
@@ -78,11 +79,7 @@ export function WindowWeChatButton({ sessionId, project, role, ensureSession, he
             }
           });
         }}>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M14.5 9.2C14 5.7 10.5 3.5 7 4.2S1.3 8 2.2 11.2a6.4 6.4 0 0 0 2.1 3.1L3.5 17l3-1.4" />
-          <path d="M21.8 14c0-3-2.9-5.4-6.5-5.4S8.8 11 8.8 14s2.9 5.4 6.5 5.4c.7 0 1.5-.1 2.1-.3l3.1 1.4-.8-2.6a5 5 0 0 0 2.1-3.9Z" />
-          <path d="M6.5 8h.01M10.5 8h.01M12.8 13.4h.01M17.8 13.4h.01" strokeWidth="2.5" />
-        </svg>
+        <AppIcon name="wechat" size="compact" />
         {bound && <span aria-hidden="true" className={`${styles.status} ${label === "微信已接入" ? styles.connected : styles.warning}`} />}
       </button>;
   return <>

@@ -1,0 +1,56 @@
+:root {
+  --radius-small: 4px;
+  --radius-control: 6px;
+  --radius-panel: 8px;
+  --radius-composer: 12px;
+  --radius-window: 16px;
+  --radius-circle: 50%;
+  --radius-window-inner: calc(var(--radius-window) - 1px);
+}
+
+/*
+ * 字号档位：五档固定值，深浅主题共用，不随视口缩放。
+ * 新增界面文本一律引用令牌，不写裸数值；11/12/13px 的历史散值按角色归并。
+ */
+:root {
+  --text-2xs: 10px;   /* 徽标、极紧凑元数据 */
+  --text-xs: 11px;    /* 分组标题、辅助说明、pill */
+  --text-sm: 12px;    /* 次级正文、按钮、表单标签、表单元数据 */
+  --text-base: 13px;  /* 列表主文本、表单输入值、正文紧凑档 */
+  --text-lg: 15px;    /* 面板标题、正文阅读档 */
+  --text-xl: 16px;    /* 二级窗口标题、区块标题 */
+}
+
+/* 字重档位：只用四档，避免 500/600/700/800 混用。 */
+:root {
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+}
+
+/* 行高档位：按用途而非字号缩放。 */
+:root {
+  --leading-tight: 1.35;   /* 单行控件、标题 */
+  --leading-normal: 1.55;  /* 表单说明、元数据 */
+  --leading-relaxed: 1.7;  /* 正文段落 */
+}
+
+/*
+ * 层级令牌：与既有实现数值一致，只做命名归并，不改变层叠结果。
+ * 新增浮层必须引用令牌，不写裸数值。
+ */
+:root {
+  --z-sticky: 100;        /* 面板内粘性头部 */
+  --z-dropdown: 500;      /* 菜单、下拉、右键菜单 */
+  --z-popover: 700;       /* 浮卡片、悬停卡片 */
+  --z-window: 1000;       /* 二级弹窗 */
+  --z-window-raised: 1100;/* 弹窗之上的嵌套弹窗 */
+  --z-dialog: 2000;       /* 二次确认 */
+  --z-modal: 2100;        /* 阻塞式确认（压缩进度等） */
+  --z-toast: 9000;        /* 全局提示 */
+}
+
+.radius-small { border-radius: var(--radius-small); }
+.radius-control { border-radius: var(--radius-control); }
+.radius-circle { border-radius: var(--radius-circle); }

@@ -1,0 +1,15 @@
+/*
+ * 记忆配置。弹窗外壳见 components/ui/Modal.module.css，
+ * 列表与表单等通用样式复用 components/ui/Form.module.css。
+ */
+
+.mainBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.draftRow {
+  display: flex;
+  gap: 8px;
+}

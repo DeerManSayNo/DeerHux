@@ -1,0 +1,41 @@
+/* Tool commands change foreground only; list selection and native window controls are separate. */
+:is(.app-tool-button, .app-header-actions > button, .deer-workbench .sidebar-heading-action,
+  .deer-workbench .workbench-navigation-header button, .deer-workbench .workbench-session-heading button,
+  .deer-workbench .workspace-panel-toolbar button,
+  .deer-workbench .latest-prompt button, .deer-workbench [data-composer-toolbar] button) {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  color: var(--text-muted) !important;
+  transition: color 150ms ease !important;
+}
+:is(.app-tool-button, .app-header-actions > button, .deer-workbench .sidebar-heading-action,
+  .deer-workbench .workbench-navigation-header button, .deer-workbench .workbench-session-heading button,
+  .deer-workbench .workspace-panel-toolbar button,
+  .deer-workbench .latest-prompt button, .deer-workbench [data-composer-toolbar] button):hover:not(:disabled) {
+  color: var(--text) !important;
+}
+:is(.app-tool-button, .app-header-actions > button, .deer-workbench .sidebar-heading-action,
+  .deer-workbench .workbench-navigation-header button, .deer-workbench .workbench-session-heading button,
+  .deer-workbench .workspace-panel-toolbar button,
+  .deer-workbench .latest-prompt button, .deer-workbench [data-composer-toolbar] button):is([aria-pressed="true"], [aria-expanded="true"], [data-active="true"]) {
+  color: var(--accent) !important;
+}
+:is(.app-tool-button, .app-header-actions > button, .deer-workbench .sidebar-heading-action,
+  .deer-workbench .workbench-navigation-header button, .deer-workbench .workbench-session-heading button,
+  .deer-workbench .workspace-panel-toolbar button,
+  .deer-workbench .latest-prompt button, .deer-workbench [data-composer-toolbar] button):active:not(:disabled) {
+  color: var(--accent-hover) !important;
+}
+:is(.app-tool-button, .app-header-actions > button, .deer-workbench .sidebar-heading-action,
+  .deer-workbench .workbench-navigation-header button, .deer-workbench .workbench-session-heading button,
+  .deer-workbench .workspace-panel-toolbar button,
+  .deer-workbench .latest-prompt button, .deer-workbench [data-composer-toolbar] button):disabled:not([data-active="true"]) {
+  color: var(--text-dim) !important;
+}
+.deer-workbench [data-composer-toolbar] button:has(> [data-app-icon="stop"]) { color: var(--danger) !important; }
+.deer-workbench [data-composer-toolbar] button:has(> [data-app-icon="stop"]):active { color: var(--text) !important; }
+.app-tool-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  .app-tool-button, .app-header-actions > button { transition: none !important; }
+}

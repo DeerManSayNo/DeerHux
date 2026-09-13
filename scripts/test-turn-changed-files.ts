@@ -7,6 +7,9 @@ import type { ToolCall } from "@earendil-works/pi-ai";
 import type { AgentToolResult, LoopEvent } from "../lib/engine/loop-event.ts";
 import { ToolExecutor } from "../lib/engine/tool-executor.ts";
 import { ToolRegistry, type AnyToolDefinition } from "../lib/engine/tool-registry.ts";
+import { createStandardCodingTools } from "../lib/engine/coding-tools.ts";
+import { resolveChangedFilePath } from "../lib/changed-file-path.ts";
+import { fileChangeKind, mergeFileChanges, readFileChanges } from "../lib/file-changes.ts";
 import {
   WorkspaceMutationCoordinator,
   diffWorkspaceSnapshots,
@@ -145,6 +148,114 @@ try {
   const nonGit = fs.mkdtempSync(path.join(os.tmpdir(), "deerhux-non-git-"));
   try {
     assert.equal(await readWorkspaceSnapshot(nonGit), null, "non-Git workspace must degrade to explicit paths");
+    const outside = path.join(nonGit, "外部 file.txt");
+    assert.equal(resolveChangedFilePath(outside, root), outside);
+    assert.equal(resolveChangedFilePath(path.relative(root, outside), root), outside);
+    assert.equal(resolveChangedFilePath("\0bad", root), null);
+    assert.equal(resolveChangedFilePath(".", root), null);
+
+    const standardRegistry = new ToolRegistry();
+    for (const tool of createStandardCodingTools(root)) standardRegistry.register(tool);
+    standardRegistry.setActive(["read", "write", "edit", "bash"]);
+    const standardExecutor = new ToolExecutor(standardRegistry, { cwd: root });
+    const execute = async (name: string, args: Record<string, unknown>) => {
+      const events: LoopEvent[] = [];
+      const [output] = await standardExecutor.executeBatch(
+        [{ id: `external-${name}`, name, arguments: args } as ToolCall],
+        new AbortController().signal, {} as never, (event) => events.push(event),
+      );
+      const end = events.find((event) => event.type === "tool_execution_end");
+      assert.ok(end && end.type === "tool_execution_end");
+      assert.deepEqual(end.changedFiles, output.changedFiles, "verified paths must reach the SSE source event");
+      assert.deepEqual(end.fileChanges, output.fileChanges, "change kinds must reach the SSE source event");
+      return output;
+    };
+    const addedOutput = await execute("write", { filePath: outside, content: "original" });
+    assert.deepEqual(addedOutput.changedFiles, [outside]);
+    assert.deepEqual(addedOutput.fileChanges?.map(fileChangeKind), ["added"]);
+    const editedOutput = await execute("edit", { path: path.relative(root, outside), oldString: "original", newString: "updated" });
+    assert.deepEqual(editedOutput.changedFiles, [outside]);
+    assert.deepEqual(editedOutput.fileChanges?.map(fileChangeKind), ["modified"]);
+    assert.deepEqual(mergeFileChanges(addedOutput.fileChanges!, editedOutput.fileChanges!).map(fileChangeKind), ["added"]);
+    const failedEdit = await execute("edit", { filePath: outside, oldString: "not present", newString: "wrong" });
+    assert.equal(failedEdit.isError, true);
+    assert.equal(failedEdit.changedFiles, undefined, "failed edit must not claim its target");
+    assert.equal((await execute("read", { filePath: outside })).changedFiles, undefined);
+
+    const created = path.join(nonGit, "新增.txt");
+    const unrelated = path.join(nonGit, "unrelated.txt");
+    fs.writeFileSync(unrelated, "pre-existing dirty content");
+    const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+    const mixed = await execute("bash", {
+      command: `printf created > ${quote(created)}; rm ${quote(outside)}`,
+      affectedFiles: [created, outside, unrelated, created],
+    });
+    assert.deepEqual(new Set(mixed.changedFiles), new Set([created, outside]), "shell creation/deletion exclude unchanged and unrelated files");
+    assert.deepEqual(new Map(mixed.fileChanges?.map((change) => [change.filePath, fileChangeKind(change)])), new Map([[created, "added"], [outside, "deleted"]]));
+    assert.equal(fileChangeKind(mergeFileChanges(
+      [{ filePath: outside, beforeExists: true, afterExists: false }],
+      [{ filePath: outside, beforeExists: false, afterExists: true }],
+    )[0]), "modified", "delete then recreate an original file remains modified");
+    assert.deepEqual(readFileChanges([null, {}, { filePath: outside, beforeExists: "false", afterExists: true }]), []);
+    assert.equal(resolveChangedFilePath(outside, root), outside, "deleted files remain valid list entries");
+    assert.equal((await execute("bash", { command: "true", affectedFiles: [created, outside] })).changedFiles, undefined);
+    const moved = path.join(nonGit, "renamed.txt");
+    assert.deepEqual(new Set((await execute("bash", {
+      command: `mv ${quote(created)} ${quote(moved)}`,
+      affectedFiles: [created, moved],
+    })).changedFiles), new Set([created, moved]));
+    assert.deepEqual((await execute("bash", {
+      command: `printf partial > ${quote(moved)}; exit 1`, affectedFiles: [moved],
+    })).changedFiles, [moved], "nonzero shell exit must retain actual changes");
+
+    const partialRegistry = new ToolRegistry();
+    partialRegistry.register({ name: "write", parameters: {}, execute: async () => {
+      fs.writeFileSync(outside, "partial");
+      throw new Error("failed after external write");
+    } } as unknown as AnyToolDefinition);
+    partialRegistry.setActive(["write"]);
+    const [partial] = await new ToolExecutor(partialRegistry, { cwd: nonGit }).executeBatch(
+      [{ type: "toolCall", id: "partial", name: "write", arguments: { filePath: outside } } as ToolCall],
+      new AbortController().signal, {} as never, () => {},
+    );
+    assert.equal(partial.isError, true);
+    assert.deepEqual(partial.changedFiles, [outside], "partial failures are detected even without Git");
+
+    // 不同项目同时声明同一外部文件：第二个只读操作不能认领第一个的修改。
+    let entered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const mayFinish = new Promise<void>((resolve) => { release = resolve; });
+    const writer = runTrackedWorkspaceMutation({ cwd: root, filePaths: [outside], signal: new AbortController().signal, operation: async () => {
+      entered();
+      await mayFinish;
+      fs.writeFileSync(outside, "only writer");
+    } });
+    await firstEntered;
+    const reader = runTrackedWorkspaceMutation({ cwd: nonGit, filePaths: [outside], signal: new AbortController().signal, operation: async () => {} });
+    release();
+    const [writerResult, readerResult] = await Promise.all([writer, reader]);
+    assert.deepEqual(writerResult.changedFiles, [outside]);
+    assert.deepEqual(readerResult.changedFiles, []);
+
+    // 目标所在项目的普通 shell 快照（不显式声明文件）也不能认领外部写入。
+    execFileSync("git", ["init"], { cwd: nonGit, stdio: "ignore" });
+    let snapshotEntered!: () => void;
+    const snapshotReady = new Promise<void>((resolve) => { snapshotEntered = resolve; });
+    let endSnapshot!: () => void;
+    const snapshotMayEnd = new Promise<void>((resolve) => { endSnapshot = resolve; });
+    const otherProject = runTrackedWorkspaceMutation({ cwd: nonGit, signal: new AbortController().signal, operation: async () => {
+      snapshotEntered();
+      await snapshotMayEnd;
+    } });
+    await snapshotReady;
+    const externalWriter = runTrackedWorkspaceMutation({ cwd: root, filePaths: [outside], signal: new AbortController().signal, operation: async () => {
+      fs.writeFileSync(outside, "external writer owns this");
+    } });
+    endSnapshot();
+    const [otherProjectResult, externalWriterResult] = await Promise.all([otherProject, externalWriter]);
+    assert.deepEqual(otherProjectResult.changedFiles, []);
+    assert.deepEqual(externalWriterResult.changedFiles, [outside]);
   } finally {
     fs.rmSync(nonGit, { recursive: true, force: true });
   }

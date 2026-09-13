@@ -25,7 +25,6 @@ interface Props {
   projectOptions: { cwd: string; displayName: string }[];
   newSessionRequestKey?: number;
   modelsRefreshKey?: number;
-  simpleWaitingIndicator?: boolean;
   locked: boolean;
   onClose: () => void;
   onToggleLocked: () => void;
@@ -100,7 +99,6 @@ export function QuickSessionDrawer({
   projectOptions,
   newSessionRequestKey = 0,
   modelsRefreshKey,
-  simpleWaitingIndicator,
   locked,
   onClose,
   onToggleLocked,
@@ -488,7 +486,7 @@ export function QuickSessionDrawer({
             || runningIds.has(session.id)
             || (open && index >= visibleStartIndex && index < visibleStartIndex + visibleSessionCount);
           return (
-            <section key={sessionRenderKeysRef.current.get(session.id) ?? session.id} className={styles.sessionCard} data-session-index={index}>
+            <section key={sessionRenderKeysRef.current.get(session.id) ?? session.id} className={`${styles.sessionCard} chat-session-frame`} data-session-index={index}>
               <header className={styles.sessionHeader} onDoubleClick={handleHeaderDoubleClick} title="双击切换单会话/三会话显示">
                 <span className={`${styles.statusDot} ${runningIds.has(session.id) ? styles.runningDot : ""}`} aria-hidden="true" />
                 <strong title={session.name || session.firstMessage || session.id}>{sessionTitle(session)}</strong>
@@ -506,7 +504,6 @@ export function QuickSessionDrawer({
                   activeTabId={`quick-session:${session.id}`}
                   isFocused={open && isActive}
                   streamRenderPriority={open ? (isActive ? "focused" : "visible") : "hidden"}
-                  simpleWaitingIndicator={simpleWaitingIndicator}
                   session={isPlaceholder ? null : session}
                   newSessionCwd={isPlaceholder ? session.cwd : null}
                   compact
@@ -529,7 +526,7 @@ export function QuickSessionDrawer({
             </section>
           );
         }) : (
-          <section className={styles.sessionCard} data-session-index="0">
+          <section className={`${styles.sessionCard} chat-session-frame`} data-session-index="0">
             <header className={styles.sessionHeader} onDoubleClick={handleHeaderDoubleClick} title="双击切换单会话/三会话显示"><span className={styles.statusDot} aria-hidden="true" /><strong>{sessionsLoaded ? "暂无会话" : "正在加载"}</strong>{projectOptions[0]?.cwd && <button type="button" className={styles.cardActionButton} onClick={() => handleNewSession(projectOptions[0].cwd)} title="新建会话" aria-label="新建会话">+</button>}<DrawerLockButton locked={locked} onToggle={onToggleLocked} /></header>
             <div className={styles.sessionBody}>
               <div className={styles.loading}>{sessionsLoaded ? "暂无最近会话" : "正在加载最近会话..."}</div>

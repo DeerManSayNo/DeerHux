@@ -15,6 +15,7 @@
 
 # next.js
 /.next/
+/.next-design-preview/
 /out/
 
 # production
@@ -53,6 +54,10 @@ __pycache__/
 /src-tauri/target/
 /src-tauri/binaries/
 placeholder-dist/
+!/src-tauri/placeholder-dist/
+/src-tauri/placeholder-dist/*
+!/src-tauri/placeholder-dist/deerhux-v2-lockup.svg
+!/src-tauri/placeholder-dist/deerhux-v2-lockup-dark.svg
 /.deerhux-build-home/
 
 # backup files

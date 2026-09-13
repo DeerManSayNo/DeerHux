@@ -10,7 +10,7 @@
 .brandMark { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 11px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg)); }
 .brandSub { font-size: 12px; font-weight: 400; color: var(--text-muted); margin-left: 7px; letter-spacing: 0; }
 .primary, .secondary, .iconButton, .danger, .pillButton { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border-radius: 9px; min-height: 38px; padding: 8px 14px; font-weight: 550; border: 1px solid transparent; white-space: nowrap; }
-.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.primary { background: var(--accent); color: var(--accent-foreground); border-color: var(--accent); }
 .primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
 .secondary, .iconButton { color: var(--text); background: var(--bg); border-color: var(--border); }
 .secondary:hover:not(:disabled), .iconButton:hover:not(:disabled) { background: var(--bg-hover); }

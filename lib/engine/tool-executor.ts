@@ -1,3 +1,5 @@
+import type { FileChange } from "../file-changes.ts";
+import { readFileChanges } from "../file-changes.ts";
 /**
  * ToolExecutor —— 按执行模式（sequential / parallel）调度工具（M2 产出）。
  *
@@ -37,7 +39,7 @@ import {
   makeSubagentToolCallLimitDetails,
 } from "../parallel-agent/subagent-concurrency.ts";
 import { buildPreview, spillLargeText, SPILL_PREVIEW_MAX_BYTES, SPILL_PREVIEW_MAX_LINES } from "./context-archive.ts";
-import { mayMutateWorkspace, runTrackedWorkspaceMutation } from "./workspace-mutation-coordinator.ts";
+import { getToolMutationPaths, mayMutateWorkspace, runTrackedWorkspaceMutation } from "./workspace-mutation-coordinator.ts";
 
 export interface ToolExecutorOptions {
   /** 用于长工具输出 spill；缺失时跳过落盘。 */
@@ -60,6 +62,7 @@ export interface ToolExecOutput {
   isError: boolean;
   /** 本次执行修改的文件（绝对路径，从 result.changedFiles 透传）。 */
   changedFiles?: string[];
+  fileChanges?: FileChange[];
 }
 
 /** 单工具执行的事件发射回调（deer-loop 注入，转发为 LoopEvent）。 */
@@ -251,6 +254,7 @@ export class ToolExecutor {
             // 就把失败洗成成功，否则 ToolResult/UI 都会显示绿色完成。
             isError: (result as { isError?: boolean }).isError === true,
             changedFiles,
+            fileChanges: readFileChanges((result as { fileChanges?: unknown })?.fileChanges),
           };
         } catch (err) {
           // 错误隔离：不向上抛，转成 isError 结果。工具即便失败也可能已经落盘，
@@ -269,6 +273,7 @@ export class ToolExecutor {
         const tracked = await runTrackedWorkspaceMutation({
           cwd: this.cwd,
           signal,
+          filePaths: getToolMutationPaths(toolName, params, this.cwd),
           operation: executeTool,
         });
         const changedFiles = [...new Set([
@@ -278,6 +283,8 @@ export class ToolExecutor {
         return {
           ...tracked.value,
           changedFiles: changedFiles.length > 0 ? changedFiles : undefined,
+          fileChanges: [...new Map([...(tracked.value.fileChanges ?? []), ...tracked.fileChanges]
+            .map((change) => [change.filePath, change])).values()],
         };
       } catch (err) {
         const isAborted = signal.aborted || this.isAbortError(err);
@@ -460,6 +467,7 @@ export class ToolExecutor {
       result: output.result,
       isError: output.isError,
       changedFiles: output.changedFiles,
+      fileChanges: output.fileChanges,
     });
   }
 

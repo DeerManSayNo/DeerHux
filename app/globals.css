@@ -11,45 +11,100 @@
   --color-text-dim: var(--text-dim);
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-brand: var(--brand);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
   --color-user-bg: var(--user-bg);
   --color-assistant-bg: var(--assistant-bg);
   --color-tool-bg: var(--tool-bg);
   --color-bg-subtle: var(--bg-subtle);
   --font-mono-font: var(--font-mono);
+  --text-2xs: var(--text-2xs);
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-base: var(--text-base);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --shadow-control: var(--shadow-control);
+  --shadow-popover: var(--shadow-popover);
+  --shadow-modal: var(--shadow-modal);
 }
 
 :root {
+  --shadow-control: 0 1px 2px #20202208, 0 4px 12px #20202205;
+  --shadow-popover: 0 8px 24px #2020221a;
+  --shadow-modal: 0 18px 60px #20202247;
+  --shadow-overlay: rgb(0 0 0 / 0.35);
+  --shadow-overlay-strong: rgb(0 0 0 / 0.45);
+  --action: #ff6b1a;
+  --action-hover: #ed5b0b;
+  --action-foreground: #251408;
   --bg: #ffffff;
   --bg-panel: #f5f5f5;
   --bg-hover: #eeeeee;
-  --bg-selected: #e8e8e8;
-  --border: #e0e0e0;
-  --text: #1a1a1a;
-  --text-muted: #6b7280;
-  --text-dim: #9ca3af;
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --user-bg: #eff6ff;
+  --bg-selected: #fff0e6;
+  --border: #e3e3e5;
+  --text: #202022;
+  --text-muted: #626268;
+  --text-dim: #6d6d73;
+  --brand: #ff6b1a;
+  --accent: #b94708;
+  --accent-hover: #a83e08;
+  --accent-foreground: #ffffff;
+  --success: #087b57;
+  --success-bg: #e7f5ef;
+  --warning: #936000;
+  --warning-bg: #fff5d6;
+  --danger: #c52c50;
+  --danger-bg: #fdebf0;
+  --info: #2563b0;
+  --info-bg: #edf4ff;
+  --user-bg: #fafafa;
   --assistant-bg: #ffffff;
-  --tool-bg: #f9fafb;
+  --tool-bg: #f7f7f8;
   --bg-subtle: rgba(0,0,0,0.03);
 }
 
 html.dark {
+  --shadow-control: 0 1px 2px #00000030, 0 4px 12px #00000018;
+  --shadow-popover: 0 8px 24px #0000004d;
+  --shadow-modal: 0 18px 60px #0000008c;
+  --shadow-overlay: rgb(0 0 0 / 0.5);
+  --shadow-overlay-strong: rgb(0 0 0 / 0.6);
+  --action: #ff8a45;
+  --action-hover: #ffa066;
+  --action-foreground: #251408;
   color-scheme: dark;
   --bg: rgb(25, 26, 27);
   --bg-panel: rgb(31, 32, 34);
   --bg-hover: rgb(39, 40, 42);
-  --bg-selected: rgb(47, 48, 51);
-  --border: rgb(57, 58, 61);
-  --text: #e8e8e8;
-  --text-muted: #a3a7ae;
-  --text-dim: #747980;
-  --accent: #60a5fa;
-  --accent-hover: #93c5fd;
-  --user-bg: #202b3a;
+  --bg-selected: #38291f;
+  --border: #3c3c40;
+  --text: #ededee;
+  --text-muted: #b0b0b6;
+  --text-dim: #929298;
+  --brand: #ff8a45;
+  --accent: #ff9a5c;
+  --accent-hover: #ffb583;
+  --accent-foreground: #24170f;
+  --success: #65d6ac;
+  --success-bg: #18382d;
+  --warning: #efc666;
+  --warning-bg: #382f1b;
+  --danger: #ff8ba6;
+  --danger-bg: #3c222c;
+  --info: #8fbbf4;
+  --info-bg: #202f43;
+  --user-bg: #2a2a2a;
   --assistant-bg: rgb(25, 26, 27);
-  --tool-bg: rgb(29, 34, 41);
+  --tool-bg: #202022;
   --bg-subtle: rgba(255,255,255,0.04);
 }
 
@@ -70,6 +125,10 @@ html.dark {
 
 * {
   box-sizing: border-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-app-icon="loading"] { animation: none; }
 }
 
 html, body {
@@ -116,6 +175,33 @@ body {
   -ms-overflow-style: none;
 }
 .scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * 统一滚轮：二级窗口、弹窗与面板的滚动容器使用。
+ * 4px 圆角细线、轨道透明、无箭头，thumb 常态 border 色、悬停 text-dim。
+ * 侧栏等有显隐动画的场景使用 .sidebar-navigation-scroll，不复用本类。
+ */
+.app-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.app-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.app-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.app-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+.app-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
+}
+.app-scrollbar::-webkit-scrollbar-button {
   display: none;
 }
 
@@ -179,7 +265,7 @@ pre, code {
   white-space: pre-wrap;
   overflow-wrap: normal;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-panel);
   background: var(--bg-panel);
   color: var(--text);
   font-family: var(--font-mono);
@@ -202,7 +288,7 @@ pre, code {
 .markdown-file-preview pre {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-panel);
   padding: 12px 16px;
   overflow-x: auto;
   font-family: var(--font-mono);
@@ -214,14 +300,14 @@ pre, code {
   font-size: 0.9em;
   background: var(--bg-panel);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--radius-small);
 }
 .markdown-file-preview pre code {
   background: none;
   padding: 0;
 }
 .markdown-editable-preview img::selection {
-  background: rgba(37, 99, 235, 0.25);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .markdown-editable-preview:focus {
   box-shadow: inset 3px 0 0 var(--accent);
@@ -389,7 +475,7 @@ span.linenumber {
   color: var(--text-dim);
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
@@ -410,7 +496,7 @@ span.linenumber {
   color: var(--text);
   background: var(--bg-hover);
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
@@ -430,7 +516,7 @@ span.linenumber {
   color: var(--text-muted);
   background: transparent;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   font-size: 11px;
   text-align: left;
   cursor: pointer;
@@ -555,7 +641,7 @@ span.linenumber {
 .session-running-dot {
   width: 10px;
   height: 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-circle);
   border: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
   border-top-color: var(--accent);
   border-right-color: var(--accent);
@@ -865,8 +951,8 @@ span.linenumber {
 
 /* Reveal the prompt action from the bubble; keep it reachable across the gap. */
 .user-message-prompt-icon { opacity: 0; pointer-events: none; transition: opacity 0.15s; }
-.user-message-bubble-row:has(.user-message-bubble:hover) .user-message-prompt-icon,
-.user-message-bubble-row:has(.user-message-bubble:focus-within) .user-message-prompt-icon,
+.user-message[data-hovered] .user-message-prompt-icon,
+.user-message:focus-within .user-message-prompt-icon,
 .user-message-prompt-icon:hover,
 .user-message-prompt-icon:focus-visible { opacity: 1; pointer-events: auto; transition-delay: 0s; }
 .user-message-prompt-icon { position: relative; transition: opacity 0.15s 0.15s; }
@@ -875,12 +961,10 @@ span.linenumber {
 /* Message metadata keeps its space and appears only for the corresponding content. */
 .user-message-time,
 .assistant-message > .assistant-message-meta { opacity: 0; visibility: hidden; transition: opacity 0.15s, visibility 0s 0.15s; }
-.user-message:has(.user-message-bubble:hover) .user-message-time,
-.user-message:has(.user-message-bubble:focus-within) .user-message-time,
-.assistant-message:has(> .assistant-message-content:hover) > .assistant-message-meta,
-.assistant-message:has(> .assistant-message-content:focus-within) > .assistant-message-meta,
-.assistant-message:has(> .assistant-message-meta:hover) > .assistant-message-meta,
-.assistant-message:has(> .assistant-message-meta:focus-within) > .assistant-message-meta {
+.user-message[data-hovered] .user-message-time,
+.user-message:focus-within .user-message-time,
+.assistant-message:focus-within > .assistant-message-meta,
+.assistant-message[data-hovered] > .assistant-message-meta {
   opacity: 1; visibility: visible; transition-delay: 0s;
 }
 

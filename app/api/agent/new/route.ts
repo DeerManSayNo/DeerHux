@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
+import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionCreationStore, SessionCreationError, findPromptReceipt } from "@/lib/session/creation-store";
 import { addAllowedRoot } from "@/lib/file-access";
-import { getCreatedSessionId, startRpcSession, SessionCapacityError } from "@/lib/rpc-manager";
-import { ensureRpcSession } from "@/lib/agent-runtime/session-service";
-import { forceRefreshSessionList, listAllSessions, readSessionFileCached } from "@/lib/session-reader";
+import { startRpcSession, SessionCapacityError } from "@/lib/rpc-manager";
+import { forceRefreshSessionList, listAllSessions, readSessionFileCached, getAgentDir } from "@/lib/session-reader";
 import { normalizeAgentMode, type AgentMode } from "@/lib/agent-modes";
 import { isSessionPersistenceError } from "@/lib/session/errors";
 
@@ -28,77 +31,77 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
     }
 
-    // Stable creationRequestId makes concurrent/retried new-session requests share
-    // startRpcSession's lock and alias. The prompt's clientMessageId then provides
-    // the durable per-session idempotency check after creation completes.
     const { provider, modelId, toolNames, thinkingLevel, roleId, agentMode, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; roleId?: string; agentMode?: AgentMode; [key: string]: unknown };
-
-    const tempKey = creationRequestId ? `__new__${creationRequestId}` : `__new__${Date.now()}`;
-    const mode = agentMode === undefined ? undefined : normalizeAgentMode(agentMode);
-    let previouslyCreatedId = creationRequestId ? getCreatedSessionId(tempKey) : undefined;
-    // Survive a Next.js/process restart: the durable display_user_message entry
-    // is the source of truth when the in-memory creation map is gone.
-    if (!previouslyCreatedId && creationRequestId) {
-      const sessions = await listAllSessions();
-      for (const candidate of sessions) {
-        if (candidate.cwd !== cwd) continue;
-        const { context } = readSessionFileCached(candidate.path);
-        if (context.messages.some((message) => message.role === "user" && message.clientMessageId === creationRequestId)) {
-          previouslyCreatedId = candidate.id;
-          break;
-        }
-      }
-    }
-    const { session, realSessionId } = previouslyCreatedId
-      ? { session: await ensureRpcSession(previouslyCreatedId), realSessionId: previouslyCreatedId }
-      : await startRpcSession(
-          tempKey,
-          "",
-          cwd,
-          toolNames,
-          undefined,
-          mode,
-          provider && modelId ? { provider, modelId } : undefined,
-        );
-    commandSignal.throwIfAborted();
-
     const clientMessageId = typeof promptCommand.clientMessageId === "string" ? promptCommand.clientMessageId.trim() : "";
-    const previousAcceptance = clientMessageId ? session.findAcceptedPrompt(clientMessageId) : null;
-    if (previousAcceptance) {
-      return NextResponse.json({
-        success: true,
-        sessionId: realSessionId,
-        data: { accepted: true, duplicate: true, clientMessageId, turnId: previousAcceptance.turnId },
+    if (rawCreationRequestId !== undefined && !creationRequestId) {
+      return NextResponse.json({ error: "Invalid creationRequestId" }, { status: 400 });
+    }
+    if (creationRequestId && command.type === "prompt" && clientMessageId !== creationRequestId) {
+      return NextResponse.json({ error: "creationRequestId must match clientMessageId" }, { status: 400 });
+    }
+    const requestId = creationRequestId ?? `v2_${randomUUID()}`;
+    const store = new SessionCreationStore(join(getAgentDir(), "session-creations"));
+    return await store.withRequest(cwd, requestId, commandSignal, async () => {
+      const record = await store.prepare(cwd, requestId, () => {
+        const manager = SessionManager.create(cwd);
+        return { sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile()!, header: manager.getHeader()! };
+      }, async () => {
+        for (const candidate of await listAllSessions()) {
+          if (resolve(candidate.cwd) !== resolve(cwd)) continue;
+          if (await findPromptReceipt(candidate.path, requestId, commandSignal)) {
+            return { sessionId: candidate.id, sessionFile: candidate.path };
+          }
+        }
+        return undefined;
       });
-    }
+      // Read the durable acceptance receipt before restoring a runtime, including
+      // retries of sessions that have subsequently grown beyond the UI read limit.
+      const receipt = clientMessageId ? await findPromptReceipt(record.sessionFile, clientMessageId, commandSignal) : null;
+      if (receipt) {
+        return NextResponse.json({ success: true, sessionId: record.sessionId,
+          data: { accepted: true, duplicate: true, clientMessageId, turnId: receipt.turnId } });
+      }
+      let context;
+      try { context = readSessionFileCached(record.sessionFile).context; }
+      catch { throw new SessionCreationError("此前创建的会话无法读取（文件过大或内容异常），已停止重试以避免重复执行"); }
+      const mode = agentMode === undefined ? context.agentMode : normalizeAgentMode(agentMode);
+      const { session, realSessionId } = await startRpcSession(
+        record.sessionId, record.sessionFile, cwd, toolNames, context.roleId,
+        mode, provider && modelId ? { provider, modelId } : undefined,
+      );
+      commandSignal.throwIfAborted();
 
-    addAllowedRoot(cwd);
+      const previousAcceptance = clientMessageId ? session.findAcceptedPrompt(clientMessageId) : null;
+      if (previousAcceptance) {
+        return NextResponse.json({
+          success: true,
+          sessionId: realSessionId,
+          data: { accepted: true, duplicate: true, clientMessageId, turnId: previousAcceptance.turnId },
+        });
+      }
 
-    // 新会话的 mode/model 已作为 composition 输入原子应用；恢复已创建会话时才补发，
-    // 避免创建后 set_mode 覆盖用户显式选择的工具集。
-    if (previouslyCreatedId && mode) {
-      await session.send({ type: "set_mode", mode });
-    }
-    if (previouslyCreatedId && provider && modelId) {
-      await session.send({ type: "set_model", provider, modelId });
-    }
+      addAllowedRoot(cwd);
 
-    // Apply pre-selected thinking level before sending the prompt
-    if (thinkingLevel) {
-      await session.send({ type: "set_thinking_level", level: thinkingLevel });
-    }
+      // Apply pre-selected thinking level before sending the prompt
+      if (thinkingLevel) {
+        await session.send({ type: "set_thinking_level", level: thinkingLevel });
+      }
 
-    // Persist/apply the role selection for the new session before sending the first prompt.
-    if (roleId) {
-      await session.send({ type: "set_role", roleId });
-    }
+      // Persist/apply the role selection for the new session before sending the first prompt.
+      if (roleId) {
+        await session.send({ type: "set_role", roleId });
+      }
 
-    const result = await session.send(promptCommand, commandSignal);
-    forceRefreshSessionList();
+      const result = await session.send(promptCommand, commandSignal);
+      forceRefreshSessionList();
 
-    return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+      return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+    });
   } catch (error) {
-    if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    if (error instanceof SessionCreationError) {
+      return NextResponse.json({ error: error.message, errorCode: "SESSION_CREATION_FAILED" }, { status: error.status });
+    }
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
       return NextResponse.json({ error: "会话启动超时，本次发送已安全取消" }, { status: 504 });
     }
     if (isSessionPersistenceError(error)) {

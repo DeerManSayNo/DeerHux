@@ -1,0 +1,18 @@
+:root {
+  --inline-code-bg: #edf0f2;
+}
+html.dark {
+  --inline-code-bg: #34383e;
+}
+.markdown-body .inline-code {
+  background: var(--inline-code-bg);
+  color: var(--text);
+  border: 0;
+  box-shadow: none;
+  padding: 2px 5px;
+  border-radius: var(--radius-small);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}

@@ -1,5 +1,10 @@
 "use client";
 
+import { ProjectPicker } from "./ProjectPicker";
+
+import { AppIcon } from "./AppIcon";
+import FallingText from "./FallingText";
+
 import { getExplorerRevealTarget } from "@/lib/file-paths";
 import { AiLinkWorkspace } from "./AiOutputLink";
 
@@ -13,6 +18,8 @@ import { CHAT_LAYOUT_COUNTS, ChatWorkspace, type ChatLayoutMode } from "./ChatWo
 import { FilePreviewPanel } from "./FilePreviewPanel";
 import { WorkspaceExplorer } from "./WorkspaceExplorer";
 import "./workspace-panel.css";
+import "./workbench.css";
+import "./tool-buttons.css";
 import { WindowControls, useNeedsWindowControls } from "./WindowControls";
 import type { Tab } from "./TabBar";
 import { getLocalStorageItem } from "@/lib/client-storage";
@@ -70,7 +77,7 @@ function ConfigurationPanelLoading() {
         style={{
           padding: "12px 18px",
           border: "1px solid var(--border)",
-          borderRadius: 10,
+          borderRadius: "var(--radius-panel)",
           background: "var(--bg-panel)",
           color: "var(--text-muted)",
           boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
@@ -171,7 +178,6 @@ function layoutModeForSlotCount(count: number): ChatLayoutMode {
 }
 
 const CUSTOM_CWDS_STORAGE_KEY = "deerhux.custom-cwds";
-const SIMPLE_WAITING_INDICATOR_STORAGE_KEY = "deerhux.simple-waiting-indicator";
 
 function readCustomCwds(): string[] {
   if (typeof window === "undefined") return [];
@@ -287,6 +293,7 @@ export function AppShell() {
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const activeCwdRef = useRef<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
+  const [idleProjectCwd, setIdleProjectCwd] = useState<string | null>(null);
   const [customCwds, setCustomCwds] = useState<string[]>([]);
   const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
@@ -324,7 +331,6 @@ export function AppShell() {
     void sync();
     return () => { cancelled = true; clearTimeout(timer); };
   }, [sidebarOpen, settingsMenuOpen, headerFocused]);
-  const [simpleWaitingIndicator, setSimpleWaitingIndicator] = useState(false);
   // Windows/Linux 无边框主窗口需要在左上角自绘仿 macOS 红绿灯窗口控制按钮。
   const needsWindowControls = useNeedsWindowControls();
 
@@ -398,7 +404,6 @@ export function AppShell() {
     }
     setRightPanelPinned(getLocalStorageItem("deerhux.right-panel-pinned") === "true");
     setCustomCwds(readCustomCwds());
-    setSimpleWaitingIndicator(getLocalStorageItem(SIMPLE_WAITING_INDICATOR_STORAGE_KEY) === "true");
   }, []);
 
   useEffect(() => {
@@ -899,7 +904,9 @@ export function AppShell() {
     replaceUrl("/");
   }, [getTargetChatSlotIndex, hasOpenChatWindowCapacity, placeSessionInFocusedSlot, replaceUrl, showChatWindowLimitMessage]);
 
-  const topNewSessionCwd = effectiveProjectCwd ?? projectOptions[0]?.cwd ?? defaultCwd;
+  const topNewSessionCwd = sessionTabs.length === 0
+    ? idleProjectCwd ?? defaultCwd
+    : effectiveProjectCwd ?? projectOptions[0]?.cwd ?? defaultCwd;
   const canCreateTopSession = Boolean(topNewSessionCwd);
 
   const handleTopNewSession = useCallback(() => {
@@ -1581,13 +1588,7 @@ export function AppShell() {
             onClick: () => setModelsConfigOpen(true),
             disabled: false,
             icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
-                <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-              </svg>
+              <AppIcon name="model" size="compact" />
             ),
           },
           {
@@ -1595,12 +1596,7 @@ export function AppShell() {
             onClick: () => setQuickConfigOpen("memory"),
             disabled: false,
             icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 1 4 17.5z" />
-                <path d="M8 8h8" />
-                <path d="M8 12h6" />
-                <path d="M8 16h7" />
-              </svg>
+              <AppIcon name="memory" size="compact" />
             ),
           },
           {
@@ -1608,14 +1604,7 @@ export function AppShell() {
             onClick: () => setQuickConfigOpen("mcp"),
             disabled: false,
             icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="7" height="7" rx="1.5" />
-                <rect x="14" y="3" width="7" height="7" rx="1.5" />
-                <rect x="8.5" y="14" width="7" height="7" rx="1.5" />
-                <path d="M10 6.5h4" />
-                <path d="M17.5 10v2a2 2 0 0 1-2 2H12" />
-                <path d="M6.5 10v2a2 2 0 0 0 2 2H12" />
-              </svg>
+              <AppIcon name="mcp" size="compact" />
             ),
           },
           {
@@ -1623,10 +1612,7 @@ export function AppShell() {
             onClick: () => setQuickConfigOpen("role"),
             disabled: false,
             icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="8" r="4" />
-                <path d="M4 21a8 8 0 0 1 16 0" />
-              </svg>
+              <AppIcon name="role" size="compact" />
             ),
           },
           {
@@ -1634,11 +1620,7 @@ export function AppShell() {
             onClick: () => setSkillsConfigOpen(true),
             disabled: false,
             icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
+              <AppIcon name="skills" size="compact" />
             ),
           },
           {
@@ -1646,15 +1628,13 @@ export function AppShell() {
             onClick: () => setSchedulerPanelOpen(true),
             disabled: false,
             icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10" />
-                <polyline points="12 6 12 12 16 14" />
-              </svg>
+              <AppIcon name="schedule" size="compact" />
             ),
           },
         ] as { label: string; onClick: () => void; disabled: boolean; icon: ReactNode }[]).map(({ label, onClick, disabled, icon }, index) => (
           <button
             key={`${label}-${index}`}
+            className="app-tool-button"
             onClick={onClick}
             disabled={disabled}
             title={label}
@@ -1666,7 +1646,7 @@ export function AppShell() {
               padding: 0,
               background: "none",
               border: "none",
-              borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
+              borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
               fontSize: 12, opacity: disabled ? 0.35 : 1,
               transition: "background 0.12s, color 0.12s",
             }}
@@ -1693,7 +1673,7 @@ export function AppShell() {
           transform: "translateX(-50%)",
           zIndex: 1200,
           padding: "9px 14px",
-          borderRadius: 999,
+          borderRadius: "var(--radius-control)",
           background: "var(--bg-panel)",
           border: "1px solid color-mix(in srgb, var(--accent) 42%, var(--border))",
           color: "var(--text)",
@@ -1729,7 +1709,7 @@ export function AppShell() {
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
-        borderRadius: 8,
+        borderRadius: "var(--radius-control)",
         border: "none",
         background: "transparent",
         color: "var(--text-muted)",
@@ -1745,10 +1725,7 @@ export function AppShell() {
         e.currentTarget.style.color = "var(--text-muted)";
       }}
     >
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M5 3h4v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" fill="currentColor" fillOpacity="0.18" stroke="none" />
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
-      </svg>
+      <AppIcon name="panel-left" size="toolbar" />
     </button>
             {([
               {
@@ -1757,10 +1734,7 @@ export function AppShell() {
                 disabled: !canCreateTopSession,
                 active: false,
                 icon: (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                    <line x1="12" y1="3" x2="12" y2="21" />
-                    <line x1="3" y1="12" x2="21" y2="12" />
-                  </svg>
+                  <AppIcon name="add" size="toolbar" />
                 ),
               },
               {
@@ -1772,12 +1746,7 @@ export function AppShell() {
                 disabled: false,
                 active: settingsMenuOpen,
                 icon: (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <g transform="translate(2.1818 2.1818) scale(0.81818)">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                    </g>
-                  </svg>
+                  <AppIcon name="settings" size="toolbar" />
                 ),
               },
               {
@@ -1789,19 +1758,9 @@ export function AppShell() {
                 disabled: false,
                 active: isDark,
                 icon: isDark ? (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <g transform="translate(2.1818 2.1818) scale(0.81818)">
-                    <circle cx="12" cy="12" r="5" />
-                    <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                    <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-                    </g>
-                  </svg>
+                  <AppIcon name="theme-light" size="toolbar" />
                 ) : (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                  </svg>
+                  <AppIcon name="theme-dark" size="toolbar" />
                 ),
               },
               {
@@ -1810,12 +1769,7 @@ export function AppShell() {
                 disabled: false,
                 active: rightPanelOpen,
                 icon: (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <g transform="translate(24 0) scale(-1 1)">
-                      <path d="M5 3h4v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" fill="currentColor" fillOpacity="0.18" stroke="none" />
-                      <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
-                    </g>
-                  </svg>
+                  <AppIcon name="panel-right" size="toolbar" />
                 ),
               },
             ] as { label: string; onClick: (event: MouseEventType<HTMLButtonElement>) => void; disabled: boolean; active: boolean; icon: ReactNode }[]).map(({ label, onClick, disabled, active, icon }, index) => (
@@ -1836,7 +1790,7 @@ export function AppShell() {
                   padding: 0,
                   background: active ? "var(--bg-selected)" : "transparent",
                   border: "none",
-                  borderRadius: 8,
+                  borderRadius: "var(--radius-control)",
                   color: active ? "var(--text)" : disabled ? "var(--text-dim)" : "var(--text-muted)",
                   cursor: disabled ? "default" : "pointer",
                   opacity: disabled ? 0.35 : 1,
@@ -1862,73 +1816,12 @@ export function AppShell() {
                 padding: 6,
                 background: "var(--bg-panel)",
                 border: "1px solid var(--border)",
-                borderRadius: 10,
+                borderRadius: "var(--radius-panel)",
                 boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
                 zIndex: 710,
               }}
               onClick={(e) => e.stopPropagation()}
             >
-              <button
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={simpleWaitingIndicator}
-                onClick={() => {
-                  setSimpleWaitingIndicator((current) => {
-                    const next = !current;
-                    try {
-                      window.localStorage.setItem(SIMPLE_WAITING_INDICATOR_STORAGE_KEY, String(next));
-                    } catch { /* localStorage unavailable */ }
-                    return next;
-                  });
-                }}
-                style={{
-                  width: "100%",
-                  padding: "8px 9px",
-                  border: "none",
-                  borderRadius: 8,
-                  background: "transparent",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                  textAlign: "left",
-                  fontSize: 12,
-                }}
-                onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; event.currentTarget.style.color = "var(--text-muted)"; }}
-              >
-                <span>
-                  <span style={{ display: "block" }}>简洁等待动画</span>
-                  <span style={{ display: "block", marginTop: 2, color: "var(--text-dim)", fontSize: 10 }}>隐藏模型响应前的详细状态</span>
-                </span>
-                <span
-                  aria-hidden="true"
-                  style={{
-                    position: "relative",
-                    width: 30,
-                    height: 18,
-                    flexShrink: 0,
-                    borderRadius: 999,
-                    background: simpleWaitingIndicator ? "var(--accent)" : "var(--border)",
-                    transition: "background 0.15s ease",
-                  }}
-                >
-                  <span style={{
-                    position: "absolute",
-                    top: 2,
-                    left: simpleWaitingIndicator ? 14 : 2,
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    background: "#fff",
-                    boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
-                    transition: "left 0.15s ease",
-                  }} />
-                </span>
-              </button>
-              <div style={{ height: 1, margin: "4px 5px", background: "var(--border)" }} />
               {([
                 { label: "分享窗口", disabled: false, onClick: () => { setSettingsMenuOpen(false); setShareManagerOpen(true); } },
                 { label: "扩展总览", disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd, onClick: () => { setSettingsMenuOpen(false); setExtensionsConfigOpen(true); } },
@@ -1943,7 +1836,7 @@ export function AppShell() {
                     width: "100%",
                     padding: "8px 9px",
                     border: "none",
-                    borderRadius: 8,
+                    borderRadius: "var(--radius-control)",
                     background: "transparent",
                     color: item.disabled ? "var(--text-dim)" : "var(--text-muted)",
                     cursor: item.disabled ? "default" : "pointer",
@@ -1962,7 +1855,8 @@ export function AppShell() {
 
     <div
       onPointerDownCapture={handleWindowDragPointerDown}
-      style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}
+      className="deer-workbench"
+      style={{ display: "flex", height: "100dvh", overflow: "hidden" }}
     >
       {/* Mobile overlay backdrop */}
       <div
@@ -1984,8 +1878,7 @@ export function AppShell() {
         style={{
           width: sidebarOpen ? sidebarWidth : 0,
           minWidth: sidebarOpen ? SIDEBAR_MIN : 0,
-          background: "var(--bg-panel)",
-          borderRight: "1px solid var(--border)",
+          background: "transparent",
           display: "flex",
           flexDirection: "column",
           flexShrink: 0,
@@ -2017,197 +1910,54 @@ export function AppShell() {
         />
       )}
 
+      <div className="workbench-content-layout">
       {/* Center: chat */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+      <div className={`workbench-main${!hasSessionTabs ? " workbench-idle-surface" : ""}`} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {/* Watermark when no session tabs */}
-          {!hasSessionTabs && (
-            <div
-              aria-hidden="true"
-              style={{
-                position: "absolute",
-                inset: 0,
-                zIndex: 0,
-                pointerEvents: "none",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: 64,
-                overflow: "hidden",
-              }}
-            >
-              <div
-                style={{
-                  maxWidth: "96%",
-                  boxSizing: "border-box",
-                  color: "var(--text)",
-                  opacity: isDark ? 0.035 : 0.045,
-                  fontSize: "clamp(48px, 10vw, 160px)",
-                  fontWeight: 900,
-                  letterSpacing: "-0.05em",
-                  lineHeight: 1.15,
-                  padding: "0.12em 0.08em",
-                  textAlign: "center",
-                  whiteSpace: "normal",
-                  overflowWrap: "anywhere",
-                  userSelect: "none",
-                }}
-              >
-                DeerHux
-              </div>
+          {!hasSessionTabs && initialSessionRestored && topNewSessionCwd && (
+            <div className="workbench-idle-project">
+              <ProjectPicker
+                currentCwd={topNewSessionCwd}
+                projectOptions={[
+                  ...(defaultCwd ? [{ cwd: defaultCwd, displayName: "默认" }] : []),
+                  ...headerProjectOptions.filter((project) => project.cwd !== defaultCwd),
+                ]}
+                onSelect={setIdleProjectCwd}
+              />
             </div>
           )}
           {!hasSessionTabs && initialSessionRestored && (
             <div
+              className="workbench-empty"
               aria-label="快速新建会话"
-              style={{
-                position: "absolute",
-                left: "50%",
-                bottom: 112,
-                transform: "translateX(-50%)",
-                zIndex: 2,
-                width: "min(560px, calc(100% - 96px))",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 10,
-                textAlign: "center",
-              }}
             >
+              <h1 className="workbench-empty-brand workbench-falling-brand">
+                <FallingText
+                  text="DeerHux deerhux DEERHUX Deerhux DEERhux deerHUX dEERhUX DEERHux"
+                  ariaLabel="DeerHux"
+                  className="workbench-falling-words"
+                  trigger="hover"
+                  backgroundColor="transparent"
+                  wireframes={false}
+                  gravity={0.56}
+                  fontSize="16px"
+                  mouseConstraintStiffness={0.9}
+                  wordSpacing="4px"
+                  bounceOnClick
+                  bounceRadius={130}
+                />
+              </h1>
               <button
+                className="workbench-create"
                 onClick={handleTopNewSession}
                 disabled={!canCreateTopSession}
                 title={topNewSessionCwd ? `在 ${topNewSessionCwd} 新建会话` : "请先在左侧选择项目目录"}
-                style={{
-                  minHeight: 58,
-                  minWidth: 300,
-                  maxWidth: "100%",
-                  padding: "8px 12px 8px 10px",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 11,
-                  borderRadius: 18,
-                  border: canCreateTopSession
-                    ? "1px solid color-mix(in srgb, var(--text) 18%, var(--border))"
-                    : "1px solid var(--border)",
-                  background: canCreateTopSession
-                    ? isDark
-                      ? "linear-gradient(135deg, color-mix(in srgb, var(--text) 7%, var(--bg-panel)), var(--bg-panel) 62%, color-mix(in srgb, #fff 3%, var(--bg)))"
-                      : "linear-gradient(135deg, #ffffff, var(--bg-panel) 62%, color-mix(in srgb, var(--text) 3%, var(--bg)))"
-                    : "var(--bg-panel)",
-                  color: canCreateTopSession ? "var(--text)" : "var(--text-dim)",
-                  boxShadow: canCreateTopSession
-                    ? isDark
-                      ? "0 18px 42px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.06)"
-                      : "0 18px 42px rgba(15,23,42,0.10), inset 0 1px 0 rgba(255,255,255,0.7)"
-                    : "inset 0 1px 0 rgba(255,255,255,0.08)",
-                  cursor: canCreateTopSession ? "pointer" : "not-allowed",
-                  fontSize: 14,
-                  fontFamily: "inherit",
-                  textAlign: "left",
-                  userSelect: "none",
-                  transition: "transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease",
-                }}
-                onMouseEnter={(e) => {
-                  if (!canCreateTopSession) return;
-                  e.currentTarget.style.transform = "translateY(-2px)";
-                  e.currentTarget.style.borderColor = "color-mix(in srgb, var(--text) 28%, var(--border))";
-                  e.currentTarget.style.boxShadow = isDark
-                    ? "0 24px 56px rgba(0,0,0,0.34), 0 0 0 4px color-mix(in srgb, #fff 7%, transparent), inset 0 1px 0 rgba(255,255,255,0.08)"
-                    : "0 24px 56px rgba(15,23,42,0.14), 0 0 0 4px rgba(0,0,0,0.045), inset 0 1px 0 rgba(255,255,255,0.78)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.transform = "translateY(0)";
-                  e.currentTarget.style.borderColor = canCreateTopSession
-                    ? "color-mix(in srgb, var(--text) 18%, var(--border))"
-                    : "var(--border)";
-                  e.currentTarget.style.boxShadow = canCreateTopSession
-                    ? isDark
-                      ? "0 18px 42px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.06)"
-                      : "0 18px 42px rgba(15,23,42,0.10), inset 0 1px 0 rgba(255,255,255,0.7)"
-                    : "inset 0 1px 0 rgba(255,255,255,0.08)";
-                }}
               >
-                <span
-                  aria-hidden="true"
-                  style={{
-                    width: 38,
-                    height: 38,
-                    borderRadius: 14,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                    color: canCreateTopSession ? (isDark ? "#111" : "#fff") : "var(--text-dim)",
-                    background: canCreateTopSession
-                      ? isDark
-                        ? "linear-gradient(135deg, #f3f4f6, #c7c7c7)"
-                        : "linear-gradient(135deg, #111827, #3f3f46)"
-                      : "var(--bg-hover)",
-                    boxShadow: canCreateTopSession
-                      ? isDark
-                        ? "0 10px 24px rgba(255,255,255,0.08), inset 0 1px 0 rgba(255,255,255,0.45)"
-                        : "0 10px 24px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.18)"
-                      : "none",
-                  }}
-                >
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 5v14" />
-                    <path d="M5 12h14" />
-                  </svg>
-                </span>
-                <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3, flex: 1 }}>
-                  <span style={{ fontSize: 15, lineHeight: 1.15, fontWeight: 750, letterSpacing: "-0.01em" }}>新建会话</span>
-                  <span
-                    style={{
-                      maxWidth: 210,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      fontSize: 12,
-                      lineHeight: 1.2,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    {topNewSessionCwd ? `在 ${getProjectDisplayName(topNewSessionCwd)} 中开始` : "请先选择项目目录"}
-                  </span>
-                </span>
-                <span
-                  aria-hidden="true"
-                  style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: 999,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                    color: canCreateTopSession ? "var(--text-muted)" : "var(--text-dim)",
-                    background: "var(--bg-hover)",
-                    opacity: canCreateTopSession ? 1 : 0.55,
-                  }}
-                >
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M5 12h14" />
-                    <path d="m13 6 6 6-6 6" />
-                  </svg>
-                </span>
+                <AppIcon name="add" size="compact" />
+                <span>新建会话</span>
               </button>
-              <div
-                style={{
-                  padding: "4px 10px",
-                  borderRadius: 999,
-                  color: "var(--text-dim)",
-                  background: "color-mix(in srgb, var(--bg-panel) 70%, transparent)",
-                  border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
-                  fontSize: 12,
-                  lineHeight: 1.45,
-                }}
-              >
-                {canCreateTopSession ? "也可以从左侧新建会话，布局会自动适配" : "从左侧选择项目后，这里会变成快速入口"}
-              </div>
+
             </div>
           )}
           {showChat ? (
@@ -2219,7 +1969,6 @@ export function AppShell() {
                 focusedSlotIndex={focusedChatSlotIndex}
                 isPlaceholderSession={isPlaceholderSession}
                 runningSessionIds={new Set(runningSessionStatuses.keys())}
-                simpleWaitingIndicator={simpleWaitingIndicator}
                 onFocusSlot={handleFocusChatSlot}
                 onClearSlot={handleClearChatSlot}
                 onAgentEnd={handleAgentEnd}
@@ -2257,9 +2006,7 @@ export function AppShell() {
               </div>
             ) : (
               <div style={{ position: "absolute", top: 64, left: 12, display: "flex", alignItems: "flex-start", gap: 8, userSelect: "none", pointerEvents: "none" }}>
-                <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7, flexShrink: 0 }}>
-                  <line x1="20" y1="12" x2="4" y2="12" /><polyline points="10 6 4 12 10 18" />
-                </svg>
+                <AppIcon name="back" size="section" style={{color: "var(--accent)", ...({ opacity: 0.7, flexShrink: 0 })}} />
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>开始使用</div>
                   <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.8 }}>
@@ -2312,8 +2059,16 @@ export function AppShell() {
       >
         <div className="workspace-panel-toolbar" role="group" aria-label="右侧扩展栏视图">
           {(["explorer", "preview"] as const).map((view) => (
-            <button key={view} type="button" aria-pressed={rightPanelView === view} onClick={() => setRightPanelView(view)}>
-              {view === "explorer" ? "资源管理器" : "预览"}
+            <button
+              key={view}
+              type="button"
+              className="workspace-panel-view"
+              aria-label={view === "explorer" ? "资源管理器" : "预览"}
+              aria-pressed={rightPanelView === view}
+              title={view === "explorer" ? "资源管理器" : "预览"}
+              onClick={() => setRightPanelView(view)}
+            >
+              <AppIcon name={view === "explorer" ? "files" : "preview"} size="toolbar" />
             </button>
           ))}
           <button
@@ -2328,10 +2083,39 @@ export function AppShell() {
               try { window.localStorage.setItem("deerhux.right-panel-pinned", String(next)); } catch { /* Keep the toggle usable when storage is unavailable. */ }
             }}
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M16 3 21 8l-4 1-3 5v4l-8-8h4l5-3 1-4Z" />
-              <path d="m9 15-6 6" />
-            </svg>
+            <AppIcon name="pin" size="toolbar" />
+          </button>
+          <button
+            type="button"
+            className="workspace-panel-toggle"
+            onClick={() => setRightPanelOpen((open) => !open)}
+            title={rightPanelOpen ? "隐藏右侧扩展栏" : "显示资源管理器与预览"}
+            aria-label={rightPanelOpen ? "隐藏右侧扩展栏" : "显示资源管理器与预览"}
+            aria-pressed={rightPanelOpen}
+            style={{
+              width: 28,
+              height: 28,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 0,
+              background: rightPanelOpen ? "var(--bg-selected)" : "transparent",
+              border: "none",
+              borderRadius: "var(--radius-control)",
+              color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
+              cursor: "pointer",
+              transition: "background 0.12s, color 0.12s",
+            }}
+            onMouseEnter={(event) => {
+              event.currentTarget.style.background = "var(--bg-hover)";
+              event.currentTarget.style.color = "var(--text)";
+            }}
+            onMouseLeave={(event) => {
+              event.currentTarget.style.background = rightPanelOpen ? "var(--bg-selected)" : "transparent";
+              event.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)";
+            }}
+          >
+            <AppIcon name="panel-right" size="toolbar" />
           </button>
         </div>
         <div className="workspace-panel-body" style={{ display: rightPanelView === "explorer" ? "flex" : "none" }}>
@@ -2356,6 +2140,7 @@ export function AppShell() {
             />
           )}
         </div>
+      </div>
       </div>
     </div>
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} onSaved={() => setModelsRefreshKey((k) => k + 1)} />}

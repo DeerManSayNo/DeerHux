@@ -1,5 +1,6 @@
 "use client";
-import { useTheme } from "@/hooks/useTheme";
+
+import { AppIcon } from "./AppIcon";
 import { SendIconButton } from "./SendIconButton";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
@@ -198,7 +199,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [imageUploadError, setImageUploadError] = useState<string | null>(null);
   const [fileReferences, setFileReferences] = useState<FileReference[]>(initialInputState?.fileReferences ?? []);
   const [pendingPastes, setPendingPastes] = useState(0);
-  const { isDark } = useTheme();
   const inputMaxWidth = fitContainer ? "100%" : compact ? 640 : 820;
   const inputHorizontalPadding = fitContainer ? 0 : compact ? 12 : 16;
 
@@ -214,6 +214,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const skillsFetchRef = useRef<AbortController | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const skillRowRef = useRef<HTMLDivElement>(null);
   useAutoGrowTextarea(textareaRef, value);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
@@ -526,8 +527,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (cwd && query) {
       const ta = textareaRef.current;
       if (ta) {
-        const rect = ta.getBoundingClientRect();
-        setSkillPickerRect({ top: rect.top, left: rect.left, width: rect.width });
+        const taRect = ta.getBoundingClientRect();
+        // Anchor the picker above the skill row when present, else above the textarea.
+        const anchor = skillRowRef.current?.getBoundingClientRect().top ?? taRect.top;
+        setSkillPickerRect({ top: anchor, left: taRect.left, width: taRect.width });
       }
       if (!skillPickerOpen) {
         fetchSkills(cwd);
@@ -659,13 +662,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
 
+      const hasDraft = e.currentTarget.value.length > 0
+        || attachedImages.length > 0
+        || fileReferences.length > 0
+        || selectedSkills.length > 0
+        || pendingPastes > 0;
+      if (
+        isStreamingRef.current
+        && e.key === " "
+        && !e.repeat
+        && !e.shiftKey
+        && !e.ctrlKey
+        && !e.altKey
+        && !e.metaKey
+        && !hasDraft
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        onAbort();
+        return;
+      }
+
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         e.stopPropagation();
         runSendAction();
       }
     },
-    [runSendAction, skillPickerOpen, visibleSkillPickerSkills.length, handleSkillPickerKeyDown, selectedSkills]
+    [runSendAction, onAbort, skillPickerOpen, visibleSkillPickerSkills.length, handleSkillPickerKeyDown, selectedSkills, attachedImages.length, fileReferences.length, pendingPastes]
   );
 
   const handleInput = useCallback(() => {
@@ -960,7 +984,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       style={{
         position: "relative",
         outlineOffset: -2,
-        borderRadius: 12,
+        borderRadius: "var(--radius-panel)",
         flexShrink: 0,
         background: "transparent",
         padding: `0 ${inputHorizontalPadding}px ${compact ? 10 : 8}px`,
@@ -973,7 +997,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           background: "color-mix(in srgb, var(--bg) 78%, transparent)",
           backdropFilter: "blur(3px)", border: "3px dashed var(--accent)",
         }}>
-          <div style={{ padding: "24px 36px", borderRadius: 16, background: "var(--bg-panel)", color: "var(--text)", textAlign: "center", boxShadow: "0 8px 32px rgba(0,0,0,0.12)" }}>
+          <div style={{ padding: "24px 36px", borderRadius: "var(--radius-panel)", background: "var(--bg-panel)", color: "var(--text)", textAlign: "center", boxShadow: "0 8px 32px rgba(0,0,0,0.12)" }}>
             <div style={{ fontSize: 18, fontWeight: 600 }}>松开以添加到此对话</div>
             <div style={{ marginTop: 8, fontSize: 13, color: "var(--text-muted)" }}>文件作为路径引用，图片作为图片附件</div>
           </div>
@@ -996,14 +1020,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{
             marginBottom: 8, padding: "5px 10px",
             background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
-            borderRadius: 6, fontSize: 12, color: "rgba(200,60,60,0.9)",
+            borderRadius: "var(--radius-control)", fontSize: 12, color: "rgba(200,60,60,0.9)",
             display: "flex", alignItems: "center", gap: 6,
           }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
+            <AppIcon name="warning" size="inline" style={{...({ flexShrink: 0 })}} />
             <span style={{ flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5 }}>
               {modelCatalogError}
             </span>
@@ -1014,13 +1034,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{
             marginBottom: 8, padding: "5px 10px",
             background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.25)",
-            borderRadius: 6, fontSize: 12, color: "rgba(180,130,0,0.9)",
+            borderRadius: "var(--radius-control)", fontSize: 12, color: "rgba(180,130,0,0.9)",
             display: "flex", alignItems: "center", gap: 6,
           }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-            </svg>
+            <AppIcon name="refresh" size="inline" style={{...({ flexShrink: 0 })}} />
             {retryInfo.userMessage ?? "正在自动重试"}
             <span style={{ opacity: 0.7, marginLeft: 4 }}>
               ({retryInfo.attempt}/{retryInfo.maxAttempts})
@@ -1032,14 +1049,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{
             marginBottom: 8, padding: "5px 10px",
             background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
-            borderRadius: 6, fontSize: 12, color: "rgba(200,60,60,0.9)",
+            borderRadius: "var(--radius-control)", fontSize: 12, color: "rgba(200,60,60,0.9)",
             display: "flex", alignItems: "center", gap: 6,
           }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <circle cx="12" cy="12" r="10" />
-              <line x1="15" y1="9" x2="9" y2="15" />
-              <line x1="9" y1="9" x2="15" y2="15" />
-            </svg>
+            <AppIcon name="error" size="inline" style={{...({ flexShrink: 0 })}} />
             <span style={{ flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5 }}>
               模型调用失败{lastModelError ? `：${lastModelError}` : ""}
             </span>
@@ -1063,14 +1076,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{
             marginBottom: 8, padding: "5px 10px",
             background: "rgba(148,163,184,0.10)", border: "1px solid rgba(148,163,184,0.30)",
-            borderRadius: 6, fontSize: 12, color: "var(--text-muted, rgba(148,163,184,0.95))",
+            borderRadius: "var(--radius-control)", fontSize: 12, color: "var(--text-muted, rgba(148,163,184,0.95))",
             display: "flex", alignItems: "flex-start", gap: 6,
           }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2 }}>
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
+            <AppIcon name="warning" size="inline" style={{...({ flexShrink: 0, marginTop: 2 })}} />
             <span style={{ flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5 }}>
               {terminalNotice.title}
               {terminalNotice.detail ? `\n${terminalNotice.detail}` : ""}
@@ -1094,13 +1103,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{
             marginBottom: 8, padding: "6px 12px",
             background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.25)",
-            borderRadius: 8, fontSize: 12, color: "rgba(96,165,250,0.9)",
+            borderRadius: "var(--radius-panel)", fontSize: 12, color: "rgba(96,165,250,0.9)",
             display: "flex", alignItems: "center", gap: 6,
           }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <polyline points="23 4 23 10 17 10" />
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-            </svg>
+            <AppIcon name="refresh" size="inline" style={{...({ flexShrink: 0 })}} />
             正在中断旧连接并续跑…
           </div>
         )}
@@ -1109,14 +1115,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{
             marginBottom: 8, padding: "5px 10px",
             background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
-            borderRadius: 6, fontSize: 12, color: "rgba(200,60,60,0.9)",
+            borderRadius: "var(--radius-control)", fontSize: 12, color: "rgba(200,60,60,0.9)",
             display: "flex", alignItems: "center", gap: 6,
           }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
+            <AppIcon name="warning" size="inline" style={{...({ flexShrink: 0 })}} />
             <span style={{ flex: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5 }}>
               {imageUploadError}
             </span>
@@ -1143,10 +1145,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <img
                   src={img.previewUrl}
                   alt=""
-                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block", opacity: img.fileUrl || img.data ? 1 : 0.65 }}
+                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: "var(--radius-control)", border: "1px solid var(--border)", display: "block", opacity: img.fileUrl || img.data ? 1 : 0.65 }}
                   />
                 ) : (
-                  <div aria-label="正在准备图片预览" style={{ width: 56, height: 56, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-panel)" }} />
+                  <div aria-label="正在准备图片预览" style={{ width: 56, height: 56, borderRadius: "var(--radius-control)", border: "1px solid var(--border)", background: "var(--bg-panel)" }} />
                 )}
                 {!img.fileUrl && !img.data && (
                   <span
@@ -1156,27 +1158,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     style={{
                       position: "absolute", inset: 0,
                       display: "flex", alignItems: "center", justifyContent: "center",
-                      color: "#fff", background: "rgba(0,0,0,0.18)", borderRadius: 6,
+                      color: "#fff", background: "rgba(0,0,0,0.18)", borderRadius: "var(--radius-control)",
                     }}
                   >
-                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
-                      <path d="M21 12a9 9 0 1 1-6.2-8.6" />
-                    </svg>
+                    <AppIcon name="loading" size="toolbar" className="animate-spin" />
                   </span>
                 )}
                 <button
                   onClick={() => removeImage(i)}
                   style={{
                     position: "absolute", top: -4, right: -4,
-                    width: 16, height: 16, borderRadius: "50%",
+                    width: 16, height: 16, borderRadius: "var(--radius-circle)",
                     background: "var(--bg-panel)", border: "1px solid var(--border)",
                     display: "flex", alignItems: "center", justifyContent: "center",
                     cursor: "pointer", padding: 0, color: "var(--text-muted)",
                   }}
                 >
-                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
-                  </svg>
+                  <AppIcon name="close" size="inline" />
                 </button>
               </div>
             ))}
@@ -1195,7 +1193,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               position: "fixed",
               bottom, left: skillPickerRect.left,
               zIndex: 501, background: "var(--bg)", border: "1px solid var(--border)",
-              borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.12)",
+              borderRadius: "var(--radius-panel)", boxShadow: "0 -4px 16px rgba(0,0,0,0.12)",
               overflow: "hidden", width: "max-content", minWidth: Math.max(skillPickerRect.width, 320), maxWidth: 480,
               maxHeight: maxH, overflowY: "auto",
             }}>
@@ -1283,6 +1281,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         {/* Input context row: project skills on the left, file references on the right */}
         {(commonProjectSkills.length > 0 || hasFileReferences) && (
           <div
+            ref={skillRowRef}
+            data-chat-skill-row
             style={{
               display: "flex",
               alignItems: "flex-end",
@@ -1299,7 +1299,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 display: "flex",
                 alignItems: "center",
                 gap: 6,
-                overflowX: "auto",
+                overflowX: "hidden",
+                overflowY: "auto",
+                flexWrap: "wrap",
+                maxHeight: 64,
                 paddingRight: hasFileReferences ? 18 : 0,
                 scrollbarWidth: "none",
                 WebkitMaskImage: hasFileReferences
@@ -1328,36 +1331,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       type="button"
                       onMouseDown={(e) => {
                         e.preventDefault();
-                        selectSkill(skill);
                       }}
+                      onClick={() => selectSkill(skill)}
                       title={skill.description ? `${skill.name} — ${skill.description}` : skill.name}
                       style={{
                         flexShrink: 0,
                         display: "inline-flex",
                         alignItems: "center",
                         gap: 5,
-                        maxWidth: 180,
+                        maxWidth: "min(180px, 100%)",
                         height: 26,
                         padding: "0 9px",
-                        borderRadius: 999,
-                        border: "1px solid color-mix(in srgb, var(--accent) 16%, var(--border))",
-                        background: "color-mix(in srgb, var(--accent) 5%, var(--bg))",
-                        color: "color-mix(in srgb, var(--accent) 60%, var(--text-muted))",
+                        borderRadius: "var(--radius-small)",
+                        border: "1px solid transparent",
+                        background: "var(--bg-panel)",
+                        color: "var(--text-muted)",
                         cursor: "pointer",
                         fontSize: 12,
                         fontWeight: 500,
-                        letterSpacing: "-0.01em",
+                        letterSpacing: 0,
                       }}
                       onMouseEnter={(e) => {
-                        e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 10%, var(--bg-hover))";
-                        e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 28%, var(--border))";
+                        e.currentTarget.style.background = "var(--bg-hover)";
                       }}
                       onMouseLeave={(e) => {
-                        e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 5%, var(--bg))";
-                        e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 16%, var(--border))";
+                        e.currentTarget.style.background = "var(--bg-panel)";
                       }}
                     >
-                      <span aria-hidden="true" style={{ opacity: 0.72 }}>✦</span>
+                      <AppIcon name="skills" size="inline" />
                       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {skill.name}
                       </span>
@@ -1394,18 +1395,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           maxWidth: 180,
                           height: 24,
                           padding: "0 6px 0 8px",
-                          borderRadius: 999,
-                          background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
-                          border: "1px solid color-mix(in srgb, var(--accent) 16%, var(--border))",
-                          color: "color-mix(in srgb, var(--accent) 62%, var(--text-muted))",
+                          borderRadius: "var(--radius-small)",
+                          background: "var(--bg-panel)",
+                          border: "1px solid transparent",
+                          color: "var(--text-muted)",
                           fontSize: 12,
                           fontWeight: 500,
                         }}
                       >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                          <polyline points="14 2 14 8 20 8" />
-                        </svg>
+                        <AppIcon name="file" size="inline" style={{...({ flexShrink: 0 })}} />
                         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {ref.name}
                         </span>
@@ -1423,7 +1421,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                             height: 14,
                             marginRight: -2,
                             border: "none",
-                            borderRadius: "50%",
+                            borderRadius: "var(--radius-circle)",
                             background: "transparent",
                             color: "inherit",
                             cursor: "pointer",
@@ -1433,10 +1431,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.9"; e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; }}
                           onMouseLeave={(e) => { e.currentTarget.style.opacity = "0.45"; e.currentTarget.style.background = "transparent"; }}
                         >
-                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
-                            <path d="M18 6 6 18" />
-                            <path d="m6 6 12 12" />
-                          </svg>
+                          <AppIcon name="close" size="inline" />
                         </button>
                       </span>
                     );
@@ -1463,13 +1458,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             flexDirection: "column",
             gap: compact ? 7 : 8,
             alignItems: "stretch",
-            background: isDark ? "rgb(42, 42, 42)" : "var(--bg)",
+            background: "var(--composer-bg, var(--bg))",
             border: "none",
-            borderRadius: compact ? 16 : 14,
-            padding: compact ? "9px 9px 4px 12px" : "10px 10px 4px 14px",
-            boxShadow: compact
-              ? "0 2px 4px rgba(15,23,42,0.06), 0 12px 28px -22px rgba(15,23,42,0.28)"
-              : "0 2px 4px rgba(15,23,42,0.07), 0 8px 24px -12px rgba(15,23,42,0.16)",
+            borderRadius: "var(--radius-composer)",
+            padding: compact ? "12px 10px 6px 12px" : "16px 12px 6px 16px",
+            boxShadow: "var(--shadow-composer, var(--shadow-control))",
             transition: "background 0.15s, box-shadow 0.15s",
           } as React.CSSProperties}
         >
@@ -1497,15 +1490,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       maxWidth: 200,
                       height: 22,
                       padding: "0 5px 0 7px",
-                      borderRadius: 999,
-                      background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
-                      border: "1px solid color-mix(in srgb, var(--accent) 13%, transparent)",
-                      color: "color-mix(in srgb, var(--accent) 55%, var(--text-muted))",
+                      borderRadius: "var(--radius-small)",
+                      background: "var(--bg-panel)",
+                      border: "1px solid transparent",
+                      color: "var(--text-muted)",
                       fontSize: 12,
                       fontWeight: 500,
-                      letterSpacing: "-0.01em",
-                      backdropFilter: "blur(8px)",
-                      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.10), 0 1px 2px rgba(15,23,42,0.03)",
+                      letterSpacing: 0,
                     }}
                   >
                     <span
@@ -1513,7 +1504,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       style={{
                         width: 4,
                         height: 4,
-                        borderRadius: "50%",
+                        borderRadius: "var(--radius-circle)",
                         background: "currentColor",
                         opacity: 0.45,
                         flexShrink: 0,
@@ -1543,7 +1534,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                         height: 14,
                         marginRight: -2,
                         border: "none",
-                        borderRadius: "50%",
+                        borderRadius: "var(--radius-circle)",
                         background: "transparent",
                         color: "inherit",
                         cursor: "pointer",
@@ -1557,10 +1548,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.9"; }}
                       onBlur={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
                     >
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
-                        <path d="M18 6 6 18" />
-                        <path d="m6 6 12 12" />
-                      </svg>
+                      <AppIcon name="close" size="inline" />
                     </button>
                   </span>
                 ))}
@@ -1602,7 +1590,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 display: "block",
                 boxSizing: "border-box",
                 minHeight: compact ? 40 : 44,
-                overflow: "hidden",
+                maxHeight: "min(200px, 40dvh)",
+                overflowX: "hidden",
+                overflowY: "auto",
+                overscrollBehaviorY: "contain",
                 // Only reserve space for the skill chip on the first visual line.
                 // Wrapped/subsequent lines should start from the normal left edge.
               }}
@@ -1624,7 +1615,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 flexShrink: 0, display: textOnly ? "none" : "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
                 background: "none", border: "none",
-                borderRadius: 9,
+                borderRadius: "var(--radius-control)",
                 color: fileReferences.length ? "var(--accent)" : "var(--text-muted)",
                 cursor: "pointer",
                 transition: "background 0.12s, color 0.12s",
@@ -1638,9 +1629,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 e.currentTarget.style.color = fileReferences.length ? "var(--accent)" : "var(--text-muted)";
               }}
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l10-10a4 4 0 0 1 5.66 5.66l-10 10a2 2 0 0 1-2.83-2.83l9.19-9.19" />
-              </svg>
+              <AppIcon name="attachment" size="toolbar" />
             </button>
             {/* Role selector */}
             {selectedRole && onRoleChange && (
@@ -1654,20 +1643,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   }}
                   disabled={isStreaming}
                   title={roleSettingCount ? `当前角色有 ${roleSettingCount} 条设定` : "选择角色"}
+                  aria-expanded={roleDropdownOpen}
                   style={{
                     display: "flex", alignItems: "center", gap: 6,
                     padding: compact ? "0 8px" : "0 12px", lineHeight: "16px", height: 32, maxWidth: compact ? 92 : 180, width: "100%", minWidth: 0,
                     background: roleDropdownOpen ? "var(--bg-hover)" : "none",
-                    border: "none", borderRadius: 9,
-                    color: roleSettingCount ? "var(--accent)" : "var(--text-muted)",
+                    border: "none", borderRadius: "var(--radius-control)",
+                    color: "var(--text-muted)",
                     cursor: isStreaming ? "not-allowed" : "pointer",
                     fontSize: 12, opacity: isStreaming ? 0.5 : 1,
                     transition: "background 0.12s, color 0.12s",
                   }}
                   onMouseEnter={(e) => { if (!isStreaming) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = roleDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = roleSettingCount ? "var(--accent)" : "var(--text-muted)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = roleDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
                 >
-                  <span style={{ fontWeight: 600 }}>@</span>
+                  <AppIcon name="role" size="compact" />
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedRole.name}</span>
                 </button>
                 {roleDropdownOpen && roleDropdownRect && (() => {
@@ -1678,7 +1668,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <div ref={roleDropdownPanelRef} style={{
                     position: "fixed", bottom, left: roleDropdownRect.left,
                     zIndex: 500, background: "var(--bg)", border: "1px solid var(--border)",
-                    borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+                    borderRadius: "var(--radius-panel)", boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                     overflow: "hidden", width: "max-content", minWidth: Math.max(roleDropdownRect.width, 260), maxHeight: maxH, overflowY: "auto",
                   }}>
                     <div style={{ padding: "6px 12px 4px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>角色</div>
@@ -1703,7 +1693,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                         onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "var(--bg-hover)"; }}
                         onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "none"; }}
                       >
-                        {active ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg> : <span style={{ width: 10 }} />}
+                        {active ? <AppIcon name="check" size="inline" style={{color: "var(--accent)", }} /> : <span style={{ width: 10 }} />}
                         <span style={{ flex: 1 }}>{role.name}</span>
                         <span style={{ fontSize: 10, color: scope === "project" ? "var(--accent)" : "var(--text-dim)" }}>{scopeText}</span>
                         {count > 0 && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{count} 条</span>}
@@ -1716,7 +1706,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                         onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
                         onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
                       >
-                        <span style={{ width: 10, textAlign: "center" }}>＋</span>
+                        <AppIcon name="add" size="inline" />
                         <span style={{ flex: 1 }}>创建 / 管理角色</span>
                       </button>
                     </div>
@@ -1729,6 +1719,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             {modelOptions.length > 0 && currentName && onModelChange && (
                 <div ref={dropdownRef} style={{ position: "relative", minWidth: 0 }}>
                   <button
+                    aria-expanded={modelDropdownOpen}
                     onClick={(e) => {
                       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                       setModelDropdownRect({ top: rect.top, left: rect.left, width: rect.width });
@@ -1743,7 +1734,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       maxWidth: compact ? 118 : 220, width: "100%", minWidth: 0, overflow: "hidden",
                       background: modelDropdownOpen ? "var(--bg-hover)" : "none",
                       border: "none",
-                      borderRadius: 9,
+                      borderRadius: "var(--radius-control)",
                       color: "var(--text-muted)",
                       cursor: isStreaming ? "not-allowed" : "pointer",
                       fontSize: 12,
@@ -1760,14 +1751,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       e.currentTarget.style.color = "var(--text-muted)";
                     }}
                   >
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="4" y="4" width="16" height="16" rx="2" />
-                      <rect x="9" y="9" width="6" height="6" />
-                      <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                      <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                      <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                      <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-                    </svg>
+                    <AppIcon name="model" size="inline" />
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{currentName}</span>
                   </button>
                   {modelDropdownOpen && modelDropdownRect && (() => {
@@ -1779,7 +1763,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       position: "fixed",
                       bottom, left: modelDropdownRect.left,
                       zIndex: 500, background: "var(--bg)", border: "1px solid var(--border)",
-                      borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+                      borderRadius: "var(--radius-panel)", boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                       overflow: "hidden", width: "max-content", minWidth: modelDropdownRect.width, maxHeight: maxH, overflowY: "auto",
                     }}>
                       {modelsByProvider.map((group, gi) => (
@@ -1814,7 +1798,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                 onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
                               >
                                 {isActive
-                                  ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                                  ? <AppIcon name="check" size="inline" style={{color: "var(--accent)", ...({ flexShrink: 0 })}} />
                                   : <span style={{ width: 10, flexShrink: 0 }} />}
                                 {opt.name}
                               </button>
@@ -1849,29 +1833,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   height: 32,
                   padding: 0,
                   marginRight: 2,
-                  background: subagentEnabled ? "rgba(37,99,235,0.10)" : "none",
+                  background: subagentEnabled ? "var(--bg-selected)" : "none",
                   border: "none",
-                  borderRadius: 9,
+                  borderRadius: "var(--radius-control)",
                   color: subagentEnabled ? "var(--accent)" : "var(--text-muted)",
                   cursor: "pointer",
                   transition: "background 0.12s, color 0.12s",
                 }}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.background = subagentEnabled ? "rgba(37,99,235,0.16)" : "var(--bg-hover)";
+                  e.currentTarget.style.background = subagentEnabled ? "var(--bg-selected)" : "var(--bg-hover)";
                   e.currentTarget.style.color = "var(--text)";
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.background = subagentEnabled ? "rgba(37,99,235,0.10)" : "none";
+                  e.currentTarget.style.background = subagentEnabled ? "var(--bg-selected)" : "none";
                   e.currentTarget.style.color = subagentEnabled ? "var(--accent)" : "var(--text-muted)";
                 }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="18" r="2.5" />
-                  <circle cx="5" cy="6" r="2" />
-                  <circle cx="19" cy="6" r="2" />
-                  <path d="M10 16 L7 8" />
-                  <path d="M14 16 L17 8" />
-                </svg>
+                <AppIcon name="subagent" size="compact" />
               </button>
             )}
             <button
@@ -1889,7 +1867,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 padding: 0,
                 background: moreMenuOpen ? "var(--bg-hover)" : "none",
                 border: "none",
-                borderRadius: 9,
+                borderRadius: "var(--radius-control)",
                 color: moreMenuOpen ? "var(--text)" : "var(--text-muted)",
                 cursor: "pointer",
                 fontSize: 18,
@@ -1907,11 +1885,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 e.currentTarget.style.color = moreMenuOpen ? "var(--text)" : "var(--text-muted)";
               }}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style={{ display: "block", flexShrink: 0 }}>
-                <circle cx="5" cy="12" r="2" />
-                <circle cx="12" cy="12" r="2" />
-                <circle cx="19" cy="12" r="2" />
-              </svg>
+              <AppIcon name="more" size="toolbar" style={{...({ display: "block", flexShrink: 0 })}} />
             </button>
             {moreMenuOpen && (
               <div
@@ -1925,7 +1899,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   gap: 3,
                   padding: 6,
                   border: "1px solid var(--border)",
-                  borderRadius: 12,
+                  borderRadius: "var(--radius-panel)",
                   background: "var(--bg)",
                   boxShadow: "0 -8px 26px rgba(0,0,0,0.14)",
                   overflow: "visible",
@@ -1938,13 +1912,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   onClick={() => !isStreaming && setThinkingDropdownOpen((v) => !v)}
                   disabled={isStreaming}
                   title="切换推理强度"
+                  aria-expanded={thinkingDropdownOpen}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "8px 12px",
                     height: 32,
                     background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
-                    borderRadius: 9,
+                    borderRadius: "var(--radius-control)",
                     color: "var(--text-muted)",
                     cursor: isStreaming ? "not-allowed" : "pointer",
                     fontSize: 12,
@@ -1961,11 +1936,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     e.currentTarget.style.color = "var(--text-muted)";
                   }}
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
-                    <line x1="7" y1="18" x2="12" y2="18" />
-                    <line x1="8" y1="21" x2="11" y2="21" />
-                  </svg>
+                  <AppIcon name="thinking" size="inline" />
                   <span>{(() => {
                     const lvl = thinkingLevel ?? "auto";
                     if (lvl === "auto" || !thinkingLevelMap) return lvl;
@@ -1977,7 +1948,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", right: 0,
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
-                    borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+                    borderRadius: "var(--radius-panel)", boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                     overflow: "hidden", minWidth: 180,
                   }}>
                     {THINKING_LEVELS.filter((lvl) => {
@@ -2008,7 +1979,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
                         >
                           {isActive
-                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                            ? <AppIcon name="check" size="inline" style={{color: "var(--accent)", ...({ flexShrink: 0 })}} />
                             : <span style={{ width: 10, flexShrink: 0 }} />}
                           <span style={{ flex: 1 }}>
                             {displayLabel}
@@ -2028,13 +1999,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   onClick={() => !isStreaming && setToolDropdownOpen((v) => !v)}
                   disabled={isStreaming}
                   title="切换 Ask / Plan / Agent 模式"
+                  aria-expanded={toolDropdownOpen}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "8px 12px",
                     height: 32,
                     background: toolDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
-                    borderRadius: 9,
+                    borderRadius: "var(--radius-control)",
                     color: "var(--text-muted)",
                     cursor: isStreaming ? "not-allowed" : "pointer",
                     fontSize: 12,
@@ -2051,16 +2023,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     e.currentTarget.style.color = "var(--text-muted)";
                   }}
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-                  </svg>
+                  <AppIcon name="tools" size="inline" />
                   <span>{AGENT_MODES.find((mode) => mode.id === agentMode)?.label ?? "Agent"}</span>
                 </button>
                 {toolDropdownOpen && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", right: 0,
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
-                    borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+                    borderRadius: "var(--radius-panel)", boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                     overflow: "hidden", minWidth: 210,
                   }}>
                     {AGENT_MODES.map((mode) => {
@@ -2083,7 +2053,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
                         >
                           {isActive
-                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                            ? <AppIcon name="check" size="inline" style={{color: "var(--accent)", ...({ flexShrink: 0 })}} />
                             : <span style={{ width: 10, flexShrink: 0 }} />}
                           <span style={{ flex: 1 }}>{mode.label}</span>
                           <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{mode.desc}</span>
@@ -2105,7 +2075,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   height: 32,
                   background: "var(--accent)",
                   border: "none",
-                  borderRadius: 9,
+                  borderRadius: "var(--radius-control)",
                   color: "#fff",
                   cursor: "pointer",
                   fontSize: 12,
@@ -2123,7 +2093,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", right: 0,
                     background: "#1f2937", color: "#f87171",
-                    fontSize: 11, padding: "4px 8px", borderRadius: 5,
+                    fontSize: 11, padding: "4px 8px", borderRadius: "var(--radius-small)",
                     whiteSpace: "nowrap", pointerEvents: "none",
                     boxShadow: "0 2px 8px rgba(0,0,0,0.2)", zIndex: 50,
                   }}>
@@ -2139,7 +2109,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     height: 32,
                     background: isCompacting ? "rgba(239,68,68,0.08)" : "none",
                     border: "none",
-                    borderRadius: 9,
+                    borderRadius: "var(--radius-control)",
                     color: isCompacting ? "#ef4444" : "var(--text-muted)",
                     cursor: (isStreaming && !isCompacting) ? "not-allowed" : "pointer",
                     fontSize: 12, opacity: (isStreaming && !isCompacting) ? 0.5 : 1,
@@ -2157,12 +2127,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   title={isCompacting ? "停止压缩" : "压缩上下文"}
                 >
                   {isCompacting ? (
-                    <><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="2" y="2" width="6" height="6" rx="1" fill="currentColor" /></svg>压缩中…</>
+                    <><AppIcon name="stop" size="inline" />压缩中…</>
                   ) : (
-                    <><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" />
-                      <line x1="10" y1="14" x2="3" y2="21" /><line x1="21" y1="3" x2="14" y2="10" />
-                    </svg>压缩</>
+                    <><AppIcon name="compact" size="inline" />压缩</>
                   )}
                 </button>
               </div>
@@ -2172,12 +2139,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <button
                 onClick={onSoundToggle}
                 title={soundEnabled ? "关闭完成提示音" : "开启完成提示音"}
+                aria-pressed={soundEnabled}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",
                   width: 32, height: 32, padding: 0,
                   background: "none",
                   border: "none",
-                  borderRadius: 9,
+                  borderRadius: "var(--radius-control)",
                   color: soundEnabled ? "var(--text-muted)" : "var(--text-dim)",
                   cursor: "pointer",
                   opacity: soundEnabled ? 1 : 0.55,
@@ -2195,17 +2163,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 }}
               >
                 {soundEnabled ? (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                  </svg>
+                  <AppIcon name="sound-on" size="inline" />
                 ) : (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                    <line x1="23" y1="9" x2="17" y2="15" />
-                    <line x1="17" y1="9" x2="23" y2="15" />
-                  </svg>
+                  <AppIcon name="sound-off" size="inline" />
                 )}
               </button>
             )}
@@ -2224,7 +2184,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   height: 32,
                   background: autoRecoveryMode === "aggressive" ? "rgba(234,179,8,0.1)" : "none",
                   border: autoRecoveryMode === "aggressive" ? "1px solid rgba(234,179,8,0.2)" : "1px solid transparent",
-                  borderRadius: 9,
+                  borderRadius: "var(--radius-control)",
                   color: autoRecoveryMode === "off" ? "var(--text-dim)" : "var(--text-muted)",
                   cursor: "pointer",
                   fontSize: 11, fontWeight: autoRecoveryMode === "aggressive" ? 600 : 400,
@@ -2242,10 +2202,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   e.currentTarget.style.borderColor = autoRecoveryMode === "aggressive" ? "rgba(234,179,8,0.2)" : "transparent";
                 }}
               >
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                  <path d="M3 3v5h5" />
-                </svg>
+                <AppIcon name="refresh" size="inline" style={{...({ flexShrink: 0 })}} />
                 {autoRecoveryMode === "off" ? "关闭" : autoRecoveryMode === "conservative" ? "保守" : "激进"}
               </button>
             )}
@@ -2269,16 +2226,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     padding: 0,
                     background: hasSendableContent ? "var(--bg-panel)" : "var(--bg-panel)",
                     border: "none",
-                    borderRadius: "50%",
+                    borderRadius: "var(--radius-circle)",
                     color: hasSendableContent ? "var(--text-muted)" : "var(--text-dim)",
                     cursor: hasSendableContent ? "pointer" : "not-allowed",
                     boxShadow: "none",
                     transition: "background 0.15s, box-shadow 0.15s",
                   }}
                 >
-                  <svg width="14" height="14" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M5 1 L9 5 L5 9" /><line x1="1" y1="5" x2="9" y2="5" />
-                  </svg>
+                  <AppIcon name="forward" size="compact" />
                 </button>
               )}
               {onFollowUp && (
@@ -2295,17 +2250,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     padding: 0,
                     background: hasSendableContent ? "var(--bg-panel)" : "var(--bg-panel)",
                     border: "none",
-                    borderRadius: "50%",
+                    borderRadius: "var(--radius-circle)",
                     color: hasSendableContent ? "var(--text-muted)" : "var(--text-dim)",
                     cursor: hasSendableContent ? "pointer" : "not-allowed",
                     boxShadow: "none",
                     transition: "background 0.15s, box-shadow 0.15s",
                   }}
                 >
-                  <svg width="14" height="14" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <line x1="5" y1="1" x2="5" y2="6" /><polyline points="2.5 3.5 5 1 7.5 3.5" />
-                    <line x1="2" y1="9" x2="8" y2="9" />
-                  </svg>
+                  <AppIcon name="steer" size="compact" />
                 </button>
               )}
               <button
@@ -2322,7 +2274,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   padding: 0,
                   background: "#ef4444",
                   border: "none",
-                  borderRadius: "50%",
+                  borderRadius: "var(--radius-circle)",
                   color: "#fff",
                   cursor: "pointer",
                   fontSize: 13,
@@ -2332,9 +2284,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   transition: "background 0.15s, box-shadow 0.15s",
                 }}
               >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
-                </svg>
+                <AppIcon name="stop" size="inline" />
               </button>
             </div>
           ) : (

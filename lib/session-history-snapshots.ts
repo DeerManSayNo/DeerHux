@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@/lib/types";
+import { readFileChangeSnapshot, type FileChangeSnapshot } from "./file-change-snapshot.ts";
 
 /**
  * Client-only, bounded snapshots of session history.
@@ -10,6 +11,7 @@ import type { AgentMessage } from "@/lib/types";
  * owned by useAgentSession and are always recreated on mount.
  */
 export interface SessionHistorySnapshot {
+  fileChangeSnapshot?: FileChangeSnapshot | null;
   messages: AgentMessage[];
   entryIds: string[];
   /** Prevent a later recent-100 response from downgrading already loaded history. */
@@ -36,6 +38,7 @@ export class SessionHistorySnapshotStore {
     if (!sessionId) return;
     const normalized: SessionHistorySnapshot = {
       messages: snapshot.messages,
+      fileChangeSnapshot: readFileChangeSnapshot(snapshot.fileChangeSnapshot),
       entryIds: snapshot.entryIds,
       fullHistoryLoaded: snapshot.fullHistoryLoaded,
       hasOlderMessages: snapshot.hasOlderMessages,

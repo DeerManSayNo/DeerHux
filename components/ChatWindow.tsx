@@ -1,13 +1,18 @@
 "use client";
 
 import { WindowWeChatButton } from "./WindowWeChatButton";
+import { AppIcon } from "./AppIcon";
+import FallingText from "./FallingText";
+import "./chat-surface.css";
 import { useChatSelectAll } from "@/hooks/useChatSelectAll";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { getChatMessageScrollTop } from "@/lib/chat-message-scroll";
+import { animatePromptScroll } from "@/lib/chat-scroll-animation";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, AssistantMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import type { CollaborationMuxSnapshot } from "@/lib/parallel-agent/collaboration-mux";
 import { MessageView, StreamingToolHistory, type ToolProcessMessage, type StreamingToolViewProps } from "./MessageView";
-import { buildStreamingToolLayout, moveCurrentToolGroupToBottom } from "@/lib/streaming-tool-layout";
+import { buildStreamingToolLayout, formatToolActivityList, moveCurrentToolGroupToBottom } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { CompactionConfirmModal } from "./CompactionConfirmModal";
@@ -20,6 +25,7 @@ import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useCodeIndex } from "@/hooks/useCodeIndex";
 import { useAudio } from "@/hooks/useAudio";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
+import { useMinDisplayValue } from "@/hooks/useMinDisplayValue";
 import { subscribeToAppNotification, notifyApp } from "@/lib/app-notifications";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { needsCompaction, type CompactionModelRef } from "@/lib/compaction-ui";
@@ -27,6 +33,7 @@ import { subscribeSubagentRuns } from "@/lib/agent-event-client";
 import { getProjectDisplayName } from "@/lib/project-name";
 import { collaborationNeedsHydration, isCollaborationSnapshotOlder, mergeCollaborationMuxSnapshot } from "@/lib/collaboration-ui-state";
 
+import { ProjectHeaderSlot, ProjectPicker } from "./ProjectPicker";
 interface AgentRole {
   id: string;
   name: string;
@@ -46,7 +53,6 @@ interface Props {
   activeTabId?: string | null;
   isFocused?: boolean;
   streamRenderPriority?: StreamRenderPriority;
-  simpleWaitingIndicator?: boolean;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   compact?: boolean;
@@ -59,6 +65,7 @@ interface Props {
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   wechatHeaderTargetId?: string;
+  projectHeaderTargetId?: string;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
@@ -140,11 +147,15 @@ function phaseLabel(
   if (phase?.kind === "stopping") return "停止请求已发送，正在等待当前操作安全收尾...";
 
   if (phase?.kind === "running_tools") {
-    const names = phase.tools.map((t) => t.name);
-    if (names.length === 0) return "正在运行工具...";
-    if (names.length === 1) return `正在运行 ${names[0]}...`;
-    if (names.length <= 3) return `正在运行 ${names.join(", ")}...`;
-    return `正在运行 ${names.slice(0, 2).join(", ")} (+${names.length - 2})...`;
+    const activities = formatToolActivityList(phase.tools);
+    return activities ? `正在运行工具：${activities}…` : "正在运行工具…";
+  }
+
+  if (phase?.kind === "thinking_after_tool") {
+    const activities = formatToolActivityList(phase.tools);
+    return activities
+      ? `正在分析工具调用结果（${activities}）…`
+      : "正在分析工具调用结果…";
   }
 
   if (phase?.kind === "waiting_model") {
@@ -153,8 +164,12 @@ function phaseLabel(
         return "正在等待模型首个响应，服务高峰时可能排队…";
       case "after_message":
         return "回复已生成，正在等待回合收尾...";
-      case "after_tool":
-        return "工具已完成，等待模型继续...";
+      case "after_tool": {
+        const activities = formatToolActivityList(phase.tools);
+        return activities
+          ? `工具调用已结束（${activities}），等待模型继续…`
+          : "工具调用已结束，等待模型继续…";
+      }
       case "recovery":
         return "正在恢复连接并续写...";
       case "restored":
@@ -228,41 +243,11 @@ function formatRate(rate: number): string {
 function StatusPill({ label, value, accent, title }: { label: string; value: string; accent?: boolean; title?: string }) {
   return (
     <span
-      className={`inline-flex items-center gap-0.5 shrink-0 rounded px-1.5 py-0.5 text-[11px] leading-none font-mono border whitespace-nowrap ${accent ? "bg-accent/10 border-accent/30 text-accent" : "bg-bg-hover border-border text-text-muted"}`}
+      className={`inline-flex items-center gap-0.5 shrink-0 radius-small px-1.5 py-0.5 text-[11px] leading-none font-mono border whitespace-nowrap ${accent ? "bg-accent/10 border-accent/30 text-accent" : "bg-bg-hover border-border text-text-muted"}`}
       title={title ?? `${label}: ${value}`}
     >
       <span className="opacity-60">{label}</span>
       <span className={accent ? "font-semibold" : ""}>{value}</span>
-    </span>
-  );
-}
-
-const SIMPLE_WAITING_DOT_COUNT = 12;
-
-function SimpleWaitingIndicator() {
-  const [litDots, setLitDots] = useState(1);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setLitDots((current) => current >= SIMPLE_WAITING_DOT_COUNT ? 0 : current + 1);
-    }, 300);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  return (
-    <span
-      role="status"
-      aria-label="正在等待 AI 响应"
-      className="inline-flex h-4 items-center gap-1"
-    >
-      {Array.from({ length: SIMPLE_WAITING_DOT_COUNT }, (_, index) => (
-        <span
-          key={index}
-          aria-hidden="true"
-          className="h-1.5 w-1.5 rounded-full transition-colors duration-150"
-          style={{ background: index < litDots ? "var(--accent)" : "var(--border)" }}
-        />
-      ))}
     </span>
   );
 }
@@ -281,105 +266,6 @@ function hasRenderableStreamOutput(message: Partial<AgentMessage> | null): boole
   return message?.role === "assistant"
     && Array.isArray(message.content)
     && message.content.some((block) => block.type === "toolCall");
-}
-
-function revealStreamMessage(message: Partial<AgentMessage>, visibleChars: number): AgentMessage {
-  if (message.role !== "assistant" || !Array.isArray(message.content)) return message as AgentMessage;
-  let remaining = visibleChars;
-  let waitingForEarlierText = false;
-  const content: typeof message.content = [];
-  for (const block of message.content) {
-    if (waitingForEarlierText) break;
-    if (block.type === "text") {
-      const source = block.text ?? "";
-      const visible = source.slice(0, Math.max(0, remaining));
-      remaining -= visible.length;
-      if (visible) content.push({ ...block, text: visible });
-      waitingForEarlierText = visible.length < source.length;
-    } else if (block.type === "thinking") {
-      const source = block.thinking ?? "";
-      const visible = source.slice(0, Math.max(0, remaining));
-      remaining -= visible.length;
-      if (visible) content.push({ ...block, thinking: visible });
-      waitingForEarlierText = visible.length < source.length;
-    } else {
-      content.push(block);
-    }
-  }
-  return { ...message, content } as AgentMessage;
-}
-
-function SmoothStreamingMessage({
-  message,
-  isBackground,
-  modelNames,
-  watchdogInfo,
-  onOpenSession,
-  toolResults,
-  ...streamingToolProps
-}: StreamingToolViewProps & {
-  toolResults?: Map<string, import("@/lib/types").ToolResultMessage>;
-  message: Partial<AgentMessage>;
-  isBackground: boolean;
-  modelNames?: Record<string, string>;
-  watchdogInfo: WatchdogInfo | null;
-  onOpenSession?: (sessionId: string) => void;
-}) {
-  const targetRef = useRef(message);
-  const targetLengthRef = useRef(getStreamTextLength(message));
-  const [visibleChars, setVisibleChars] = useState(() => Math.min(1, targetLengthRef.current));
-  const visibleCharsRef = useRef(visibleChars);
-  const carryRef = useRef(0);
-
-  targetRef.current = message;
-  targetLengthRef.current = getStreamTextLength(message);
-
-  useEffect(() => {
-    if (isBackground) {
-      const target = targetLengthRef.current;
-      visibleCharsRef.current = target;
-      setVisibleChars(target);
-      return;
-    }
-
-    let frame = 0;
-    let previousAt = performance.now();
-    const tick = (now: number) => {
-      const elapsed = Math.min(100, now - previousAt);
-      previousAt = now;
-      const target = targetLengthRef.current;
-      const current = visibleCharsRef.current;
-      const backlog = Math.max(0, target - current);
-      if (backlog > 0) {
-        // 基础速度保持稳定；积压较多时有限加速，避免网络突发分片造成长期落后。
-        const charsPerSecond = Math.min(240, 42 + backlog * 0.45);
-        carryRef.current += charsPerSecond * elapsed / 1000;
-        const increment = Math.max(1, Math.floor(carryRef.current));
-        carryRef.current = Math.max(0, carryRef.current - increment);
-        const next = Math.min(target, current + increment);
-        visibleCharsRef.current = next;
-        setVisibleChars(next);
-      }
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [isBackground]);
-
-  const visibleMessage = revealStreamMessage(message, visibleChars);
-
-  return (
-    <MessageView
-      message={visibleMessage}
-      toolResults={toolResults}
-      {...streamingToolProps}
-      isStreaming
-      isBackground={isBackground}
-      modelNames={modelNames}
-      watchdogInfo={watchdogInfo}
-      onOpenSession={onOpenSession}
-    />
-  );
 }
 
 function AgentStatusTicker(props: TickerProps) {
@@ -514,7 +400,7 @@ function AgentStatusTicker(props: TickerProps) {
   if (items.length === 0) return null;
 
   return (
-    <span className="inline-flex items-center gap-1 ml-2 overflow-x-auto max-w-[480px] scrollbar-none">
+    <span className="inline-flex flex-wrap items-center gap-1 ml-2 min-w-0">
       {items.map((item, i) => (
         <StatusPill key={i} label={item.label} value={item.value} accent={item.accent} title={item.title} />
       ))}
@@ -522,28 +408,10 @@ function AgentStatusTicker(props: TickerProps) {
   );
 }
 
-const TYPEWRITER_PHRASES = [
-  "随时准备为您服务。",
-  "问我任何问题。",
-  "让我们一起构建酷炫的项目。",
-  "探索您的代码库。",
-  "撰写一封邮件。",
-  "总结那篇论文。",
-  "规划您的周末。",
-  "用最通俗的话向我解释。",
-  "和我结对编程。",
-  "修复那个烦人的Bug。",
-  "翻译成中文。",
-  "写一首俳句。",
-  "头脑风暴构思创意。",
-  "审查我的拉取请求。",
-  "今晚吃什么？",
-  "发布上线。",
-  "让它更美观。",
-  "做您的小黄鸭。",
-];
-
 const AUTO_SCROLL_THRESHOLD = 80;
+
+/** 阶段文案的最小显示时长，避免 SSE 高频事件导致文案闪烁。 */
+const PHASE_LABEL_MIN_DISPLAY_MS = 800;
 
 const ActiveTurnElapsed = memo(function ActiveTurnElapsed({
   startedAt,
@@ -585,46 +453,8 @@ const ActiveTurnElapsed = memo(function ActiveTurnElapsed({
   );
 });
 
-function Typewriter({ phrases, paused = false }: { phrases: string[]; paused?: boolean }) {
-  const [phraseIdx, setPhraseIdx] = useState(() => Math.floor(Math.random() * phrases.length));
-  const [text, setText] = useState("");
-  const [deleting, setDeleting] = useState(false);
-  const [caretOn, setCaretOn] = useState(true);
 
-  useEffect(() => {
-    if (paused) return;
-    const blink = setInterval(() => setCaretOn((v) => !v), 530);
-    return () => clearInterval(blink);
-  }, [paused]);
-
-  useEffect(() => {
-    if (paused) return;
-    const current = phrases[phraseIdx];
-    let timeout: ReturnType<typeof setTimeout>;
-    if (!deleting && text === current) {
-      timeout = setTimeout(() => setDeleting(true), 1800);
-    } else if (deleting && text === "") {
-      setDeleting(false);
-      setPhraseIdx((i) => (i + 1) % phrases.length);
-    } else {
-      const next = deleting ? current.slice(0, text.length - 1) : current.slice(0, text.length + 1);
-      timeout = setTimeout(() => setText(next), deleting ? 28 : 55);
-    }
-    return () => clearTimeout(timeout);
-  }, [text, deleting, phraseIdx, phrases, paused]);
-
-  return (
-    <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>
-      {text}
-      <span style={{ opacity: caretOn ? 1 : 0, color: "var(--accent)", marginLeft: 1 }}>▍</span>
-    </span>
-  );
-}
-
-export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", simpleWaitingIndicator = false, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, wechatHeaderTargetId, onSessionStatsChange, onContextUsageChange, onOpenFile, onRevealFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
-  // Track changed files from agent_end event per session so switching chats
-  // does not show another session's bottom "x files modified" banner.
-  const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
+export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, wechatHeaderTargetId, projectHeaderTargetId, onSessionStatsChange, onContextUsageChange, onOpenFile, onRevealFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
   const [liveCollaborationRuns, setLiveCollaborationRuns] = useState<CollaborationRunSnapshot[]>([]);
   const [hasAuthoritativeCollaborationRuns, setHasAuthoritativeCollaborationRuns] = useState(false);
   const liveCollaborationRunsRef = useRef<Map<string, CollaborationRunSnapshot>>(new Map());
@@ -635,7 +465,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const collaborationSessionIdRef = useRef<string | null>(session?.id ?? null);
   const collaborationSessionGenerationRef = useRef(0);
   const activeSessionKey = session?.id ?? null;
-  const changedFiles = activeSessionKey ? (changedFilesBySession[activeSessionKey] ?? []) : [];
   const [currentRoleId, setCurrentRoleId] = useState("default");
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [pendingRoleSetting, setPendingRoleSetting] = useState<{ roleId: string; roleName: string; block: string; setting: string } | null>(null);
@@ -651,17 +480,9 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const [compactionBusy, setCompactionBusy] = useState(false);
   const [compactionDialogError, setCompactionDialogError] = useState<string | null>(null);
   const [lastUserMsgExpanded, setLastUserMsgExpanded] = useState(false);
-  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
-  const wrappedOnAgentEnd = useCallback((sessionId: string, cf?: string[]) => {
-    setChangedFilesBySession((prev) => ({
-      ...prev,
-      [sessionId]: cf && cf.length > 0 ? cf : [],
-    }));
-    onAgentEnd?.(sessionId, cf);
-  }, [onAgentEnd]);
-
+  const latestPromptContentId = useId();
   const {
-    loading, error, data, messages, entryIds, streamState,
+    loading, error, data, messages, entryIds, streamState, fileChangeSnapshot,
     agentRunning, modelNames, modelList, modelsLoadError, modelThinkingLevels, modelThinkingLevelMaps, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId, watchdogInfo,
     isCompacting, compactionProgress, clearCompactionProgress, compactError, lastModelError, terminalNotice, clearTerminalNotice, displayModel: displayModelValue, sessionStats,
@@ -680,7 +501,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     handleAgentModeChange, handleBuildPlan, handleThinkingLevelChange,
     systemPrompt, setSystemPrompt, setLastModelError,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
+    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey,
     activeTabId,
     streamRenderPriority,
@@ -703,6 +524,17 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
 
   // 实时轮询服务端 agent 状态（用于状态 ticker）
   const { server: serverStatus } = useAgentStatus(session?.id, isRunning, watchdogInfo, !isFocused);
+
+  // 阶段文案由 SSE 事件（毫秒级）驱动，与 2s 轮询的 ticker 胶囊节奏不一致，
+  // 会在“正在思考...”/“正在等待模型输出...”等语义相近的文案间高频互跳。
+  // 这里只给文案本身加最小显示时长，稳定语义、不改动真实状态。
+  const rawPhaseLabel = isRunning
+    ? phaseLabel(agentPhase, {
+        serverStatus, retryInfo, isCompacting, stallLevel,
+        compactionMessage: compactionProgress?.message,
+      })
+    : "";
+  const phaseLabelText = useMinDisplayValue(rawPhaseLabel, PHASE_LABEL_MIN_DISPLAY_MS);
 
   const commitLiveCollaborationRuns = useCallback((
     updater: (current: Map<string, CollaborationRunSnapshot>) => Map<string, CollaborationRunSnapshot>,
@@ -895,19 +727,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     return [...byCwd.entries()].map(([cwd, displayName]) => ({ cwd, displayName }));
   }, [currentCwd, projectOptions]);
 
-  useEffect(() => {
-    if (!projectPickerOpen) return;
-    const close = () => setProjectPickerOpen(false);
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [projectPickerOpen]);
+
 
   const applyRoleToSession = useCallback(async (roleId: string) => {
     if (!session?.id) return;
@@ -1121,9 +941,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     if (!sessionId) return;
 
     return agentEventBus.subscribe(sessionId, ({ event }) => {
-      if (event.type === "agent_start") {
-        setChangedFilesBySession((prev) => ({ ...prev, [sessionId]: [] }));
-      }
       if (event.type === "agent_end" && soundEnabledRef.current) {
         playDoneSoundRef.current();
       }
@@ -1190,19 +1007,25 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   // 当前悬浮面板钉住的 user 消息在 messages 中的索引
   const [pinnedUserMsgIdx, setPinnedUserMsgIdx] = useState<number>(-1);
   const prevUserMsgCountRef = useRef(0);
+  const previousPromptEntriesRef = useRef<{ latest?: string; pinned?: string }>({});
 
-  // 仅在 user 消息数量变化时重置为最后一条（避免 streaming 等场景频繁重置）
+  // Prepending history shifts indices but must preserve the prompt being traversed.
   useEffect(() => {
     const count = userMsgIndices.length;
+    const latestIndex = count ? userMsgIndices[count - 1] : -1;
+    const latestEntryId = entryIds[latestIndex];
+    let nextIndex = pinnedUserMsgIdx;
     if (count !== prevUserMsgCountRef.current) {
       prevUserMsgCountRef.current = count;
-      if (count > 0) {
-        setPinnedUserMsgIdx(userMsgIndices[count - 1]);
-      } else {
-        setPinnedUserMsgIdx(-1);
-      }
+      const previous = previousPromptEntriesRef.current;
+      const preservedIndex = latestEntryId && latestEntryId === previous.latest && previous.pinned
+        ? entryIds.indexOf(previous.pinned) : -1;
+      nextIndex = preservedIndex >= 0 && userMsgIndices.includes(preservedIndex)
+        ? preservedIndex : latestIndex;
+      setPinnedUserMsgIdx(nextIndex);
     }
-  }, [userMsgIndices.length, userMsgIndices]);
+    previousPromptEntriesRef.current = { latest: latestEntryId, pinned: entryIds[nextIndex] };
+  }, [userMsgIndices, entryIds, pinnedUserMsgIdx]);
 
   // 钉住的 user 消息文本
   const pinnedUserMsgText = useMemo(() => {
@@ -1214,12 +1037,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     return content.filter((b): b is import("@/lib/types").TextContent => b.type === "text").map((b) => b.text).join("\n");
   }, [messages, pinnedUserMsgIdx]);
 
-  const scrollToPinnedUserMsg = useCallback(() => {
-    const refIdx = userMsgIdxToRefIdx.get(pinnedUserMsgIdx);
-    if (refIdx === undefined) return;
-    const el = messageRefs.current[refIdx];
-    if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
-  }, [pinnedUserMsgIdx, userMsgIdxToRefIdx, messageRefs]);
   const liveStreamEndRef = useRef<HTMLDivElement | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const shouldAutoScrollRef = useRef(true);
@@ -1228,14 +1045,20 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const prevScrollTopRef = useRef(0);
   const scrollDirectionRef = useRef<"content-up" | "content-down" | null>(null);
   const wasRunningRef = useRef(false);
+  const cancelPromptScrollRef = useRef<(() => void) | null>(null);
+  const cancelPromptScroll = useCallback(() => {
+    cancelPromptScrollRef.current?.();
+    cancelPromptScrollRef.current = null;
+  }, []);
 
   const markUserScrollIntent = useCallback(() => {
+    cancelPromptScroll();
     userScrollIntentRef.current = true;
     if (userScrollIntentTimerRef.current) clearTimeout(userScrollIntentTimerRef.current);
     userScrollIntentTimerRef.current = setTimeout(() => {
       userScrollIntentRef.current = false;
     }, 200);
-  }, []);
+  }, [cancelPromptScroll]);
 
   useEffect(() => {
     return () => {
@@ -1247,6 +1070,23 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     shouldAutoScrollRef.current = enabled;
     setShouldAutoScroll(enabled);
   }, []);
+
+  const scrollToPinnedUserMsg = useCallback(() => {
+    cancelPromptScroll();
+    const container = scrollContainerRef.current;
+    const refIdx = userMsgIdxToRefIdx.get(pinnedUserMsgIdx);
+    const message = refIdx === undefined ? null : messageRefs.current[refIdx];
+    if (!container || !message) return;
+    const top = getChatMessageScrollTop(container, message);
+    if (top === null) return;
+
+    // Explicit navigation must neither scroll ancestors nor race streaming follow-up.
+    setAutoScroll(false);
+    userScrollIntentRef.current = false;
+    prevScrollTopRef.current = container.scrollTop;
+    cancelPromptScrollRef.current = animatePromptScroll(container, top,
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }, [pinnedUserMsgIdx, userMsgIdxToRefIdx, messageRefs, scrollContainerRef, setAutoScroll, cancelPromptScroll]);
 
   const isNearBottom = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -1275,9 +1115,12 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     requestAnimationFrame(() => {
       const current = scrollContainerRef.current;
       if (!current || current !== container) return;
-      current.scrollTop = previousTop + Math.max(0, current.scrollHeight - previousHeight);
+      cancelPromptScroll();
+      const restoredTop = previousTop + Math.max(0, current.scrollHeight - previousHeight);
+      prevScrollTopRef.current = restoredTop;
+      current.scrollTop = restoredTop;
     });
-  }, [hasOlderMessages, loadFullHistory, loadingFullHistory, scrollContainerRef, session?.id]);
+  }, [hasOlderMessages, loadFullHistory, loadingFullHistory, scrollContainerRef, session?.id, cancelPromptScroll]);
 
   const scrollToLiveBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const container = scrollContainerRef.current;
@@ -1308,7 +1151,9 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     prevScrollTopRef.current = currentScrollTop;
 
     const nearBottom = isNearBottom();
-    if (nearBottom) {
+    // A backward jump from the end must reach the same prompt-position logic as other jumps.
+    const isPausedBackwardScroll = isContentMovingDown && !shouldAutoScrollRef.current;
+    if (nearBottom && !isPausedBackwardScroll) {
       // 自动折叠造成的高度变化不能擅自恢复用户暂停的追底。
       if (!shouldAutoScrollRef.current && !userScrollIntentRef.current) return;
       setAutoScroll(true);
@@ -1325,7 +1170,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       setAutoScroll(false);
     }
 
-    const containerTop = container.getBoundingClientRect().top;
+    const containerTop = container.getBoundingClientRect().top + container.clientTop;
 
     if (isContentMovingDown) {
       // 内容往下回滚时，视野内第一条 user 消息出现后，显示它前面的 user 消息。
@@ -1362,9 +1207,12 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   }, [hasOlderMessages, isNearBottom, loadOlderHistory, loadingFullHistory, setAutoScroll, userMsgIndices, userMsgIdxToRefIdx, messageRefs, scrollContainerRef]);
 
   const handleResumeAutoScroll = useCallback(() => {
+    cancelPromptScroll();
     setAutoScroll(true);
     scrollToLiveBottom("smooth");
-  }, [scrollToLiveBottom, setAutoScroll]);
+  }, [scrollToLiveBottom, setAutoScroll, cancelPromptScroll]);
+
+  useEffect(() => cancelPromptScroll, [session?.id, cancelPromptScroll]);
 
   useEffect(() => {
     setAutoScroll(true);
@@ -1553,7 +1401,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     <>
       {pendingRoleSetting && (
         <div style={{ maxWidth: contentMaxWidth, margin: "0 auto 8px", padding: "0 16px", paddingRight: contentSidePadding }}>
-          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--bg-panel)", padding: 12, boxShadow: "0 4px 14px rgba(0,0,0,0.08)" }}>
+          <div style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-panel)", background: "var(--bg-panel)", padding: 12, boxShadow: "0 4px 14px rgba(0,0,0,0.08)" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>识别到角色设定</div>
             <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
               当前目标角色：<b style={{ color: "var(--text)" }}>{pendingRoleSetting.roleName}</b><br />
@@ -1561,9 +1409,9 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               建议存入的设定：<span style={{ color: "var(--text)" }}>「{pendingRoleSetting.setting}」</span>
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-              <button onClick={() => confirmRoleSetting("save")} style={{ padding: "7px 11px", border: "none", borderRadius: 8, background: "var(--accent)", color: "#fff", cursor: "pointer", fontSize: 12 }}>确认存入</button>
-              <button onClick={() => confirmRoleSetting("temporary")} style={{ padding: "7px 11px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>仅本次对话使用</button>
-              <button onClick={() => confirmRoleSetting("cancel")} style={{ padding: "7px 11px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>取消</button>
+              <button onClick={() => confirmRoleSetting("save")} style={{ padding: "7px 11px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "#fff", cursor: "pointer", fontSize: 12 }}>确认存入</button>
+              <button onClick={() => confirmRoleSetting("temporary")} style={{ padding: "7px 11px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>仅本次对话使用</button>
+              <button onClick={() => confirmRoleSetting("cancel")} style={{ padding: "7px 11px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>取消</button>
             </div>
           </div>
         </div>
@@ -1640,7 +1488,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   return (
     <AiFileLinkMenu cwd={session?.cwd ?? newSessionCwd}>
     <div
-      className="chat-window-wrap relative flex h-full flex-col overflow-hidden"
+      className="chat-window-wrap chat-window-surface relative flex h-full flex-col overflow-hidden"
       style={{ overflowY: "auto" }}
     >
       <WindowWeChatButton
@@ -1681,168 +1529,46 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         onAbort={() => { void handleAbortCompaction(); }}
         onSkipSend={compactionDialog?.reason === "threshold" ? skipCompactionAndSend : undefined}
       />
+      {currentCwd && currentProjectLabel && (projectHeaderTargetId || isEmptyConversation) && (
+        <ProjectHeaderSlot targetId={projectHeaderTargetId}>
+          <div
+            style={{
+              position: projectHeaderTargetId ? "relative" : "absolute",
+              top: projectHeaderTargetId ? undefined : compact ? 8 : 12,
+              left: projectHeaderTargetId ? undefined : compact ? 10 : 16,
+              zIndex: 4,
+              maxWidth: projectHeaderTargetId ? "100%" : compact ? "calc(100% - 20px)" : "calc(100% - 32px)",
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ProjectPicker
+              currentCwd={currentCwd}
+              projectOptions={selectableProjectOptions}
+              compact={compact}
+              onSelect={canSwitchEmptyProject ? onNewSessionCwdChange : undefined}
+            />
+          </div>
+        </ProjectHeaderSlot>
+      )}
       {isEmptyConversation ? (
-        <div className={`flex flex-1 flex-col items-center justify-center overflow-y-auto ${compact ? "px-3 py-5" : "px-4 py-8"}`} style={{ justifyContent: "safe center" }}>
-          {currentCwd && currentProjectLabel && (
-            <div
-              style={{
-                position: "absolute",
-                top: compact ? 8 : 12,
-                left: compact ? 10 : 16,
-                zIndex: 4,
-                maxWidth: compact ? "calc(100% - 20px)" : "calc(100% - 32px)",
-              }}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  if (!canSwitchEmptyProject) return;
-                  setProjectPickerOpen((open) => !open);
-                }}
-                title={canSwitchEmptyProject ? "切换项目" : currentCwd}
-                aria-label="当前项目"
-                aria-haspopup={canSwitchEmptyProject ? "menu" : undefined}
-                aria-expanded={canSwitchEmptyProject ? projectPickerOpen : undefined}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  maxWidth: "100%",
-                  padding: compact ? "4px 7px" : "4px 8px",
-                  border: "none",
-                  borderRadius: 8,
-                  background: projectPickerOpen ? "var(--bg-hover)" : "transparent",
-                  color: "var(--text)",
-                  cursor: canSwitchEmptyProject ? "pointer" : "default",
-                  fontSize: compact ? 13 : 16,
-                  fontWeight: 700,
-                  fontFamily: "inherit",
-                  lineHeight: 1.25,
-                  transition: "background 0.12s, color 0.12s",
-                }}
-                onMouseEnter={(event) => {
-                  if (canSwitchEmptyProject) event.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(event) => {
-                  event.currentTarget.style.background = projectPickerOpen ? "var(--bg-hover)" : "transparent";
-                }}
-              >
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {currentProjectLabel}
-                </span>
-                {canSwitchEmptyProject && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--text-muted)", transform: projectPickerOpen ? "rotate(180deg)" : "none", transition: "transform 0.12s" }}>
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                )}
-              </button>
-              {canSwitchEmptyProject && projectPickerOpen && (
-                <div
-                  role="menu"
-                  style={{
-                    position: "absolute",
-                    top: compact ? 30 : 34,
-                    left: 0,
-                    width: compact ? 230 : 260,
-                    maxWidth: "calc(100vw - 48px)",
-                    maxHeight: compact ? 260 : 320,
-                    overflowY: "auto",
-                    padding: 6,
-                    background: "var(--bg-panel)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 10,
-                    boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
-                  }}
-                >
-                  {selectableProjectOptions.map((project) => {
-                    const active = project.cwd === currentCwd;
-                    return (
-                      <button
-                        key={project.cwd}
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          if (!active) onNewSessionCwdChange?.(project.cwd);
-                          setProjectPickerOpen(false);
-                        }}
-                        title={project.cwd}
-                        style={{
-                          width: "100%",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          padding: "8px 9px",
-                          border: "none",
-                          borderRadius: 8,
-                          background: active ? "var(--bg-selected)" : "transparent",
-                          color: active ? "var(--text)" : "var(--text-muted)",
-                          cursor: active ? "default" : "pointer",
-                          textAlign: "left",
-                          fontSize: 12,
-                        }}
-                        onMouseEnter={(event) => {
-                          if (!active) event.currentTarget.style.background = "var(--bg-hover)";
-                        }}
-                        onMouseLeave={(event) => {
-                          if (!active) event.currentTarget.style.background = "transparent";
-                        }}
-                      >
-                        <span style={{ width: 7, height: 7, borderRadius: 999, background: active ? "var(--accent)" : "var(--border)", flexShrink: 0 }} />
-                        <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {project.displayName}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-          <div className="w-full" style={{ maxWidth: contentMaxWidth }}>
-            <div
-              style={{
-                display: "flex",
-                flexDirection: compact ? "column" : "row",
-                alignItems: compact ? "center" : "center",
-                justifyContent: compact ? "center" : "space-between",
-                gap: compact ? 6 : 12,
-                margin: compact ? "0 10px 14px" : `0 ${contentSidePadding}px 12px 16px`,
-                fontFamily: "var(--font-mono)",
-                textAlign: compact ? "center" : "left",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "flex-start", gap: compact ? 8 : 10, minWidth: 0, flex: compact ? "0 0 auto" : 1, lineHeight: 1.4 }}>
-                <span
-                  style={{
-                    width: compact ? 30 : "auto",
-                    height: compact ? 30 : "auto",
-                    borderRadius: compact ? 12 : 0,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    background: compact ? "color-mix(in srgb, var(--accent) 9%, var(--bg-panel))" : "transparent",
-                    color: compact ? "var(--accent)" : "var(--text)",
-                    fontSize: compact ? 18 : 28,
-                    fontWeight: 760,
-                    letterSpacing: "-0.02em",
-                  }}
-                >
-                  π
-                </span>
-                <span style={{ fontSize: compact ? 18 : 22, color: "var(--text)", fontWeight: 760, letterSpacing: "-0.02em" }}>DeerHux</span>
-                {!compact && (
-                  <span style={{ fontSize: 14, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
-                    <Typewriter phrases={TYPEWRITER_PHRASES} paused={!isFocused} />
-                  </span>
-                )}
-              </div>
-              {compact && (
-                <div style={{ maxWidth: 280, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
-                  <Typewriter phrases={TYPEWRITER_PHRASES} paused={!isFocused} />
-                </div>
-              )}
-            </div>
+        <div className={`chat-empty-layout flex-1 ${compact ? "px-3" : "px-4"}`}>
+          <FallingText
+            text="DeerHux deerhux DEERHUX Deerhux DEERhux deerHUX dEERhUX DEERHux"
+            ariaLabel="DeerHux"
+            className="workbench-falling-stage workbench-falling-words"
+            trigger="hover"
+            backgroundColor="transparent"
+            wireframes={false}
+            gravity={0.56}
+            fontSize="16px"
+            mouseConstraintStiffness={0.9}
+            wordSpacing="4px"
+            floorSelector="[data-chat-skill-row], [data-chat-composer]"
+            floorGap={12}
+            bounceOnClick
+            bounceRadius={130}
+          />
+          <div className="chat-empty-composer w-full" style={{ maxWidth: contentMaxWidth }}>
             {chatInputElement}
           </div>
         </div>
@@ -1860,30 +1586,37 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
             paddingRight: contentSidePadding,
           }}
         >
-          <div style={{
+          <div className="latest-prompt" style={{
             maxWidth: contentMaxWidth,
-            margin: "11px auto 0",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            background: "var(--bg-panel)",
+            margin: "8px auto 0",
+            border: "none",
+            background: "var(--bg)",
             overflow: "hidden",
           }}>
             <div
               style={{
                 display: "flex",
                 alignItems: "center",
+                minHeight: 32,
+                gap: 4,
               }}
             >
               <button
+                type="button"
+                aria-label="定位最新提示词"
+                data-prompt-message-index={pinnedUserMsgIdx}
+                data-prompt-entry-id={entryIds[pinnedUserMsgIdx]}
                 onClick={() => scrollToPinnedUserMsg()}
-                title="点击定位到消息位置"
+                title={`定位到消息：${pinnedUserMsgText}`}
                 style={{
                   flex: 1,
                   display: "flex",
                   alignItems: "center",
                   gap: 6,
-                  padding: "5px 10px",
+                  minHeight: 32,
+                  padding: "5px 6px",
                   border: "none",
+                  borderRadius: "var(--radius-control)",
                   background: "transparent",
                   cursor: "pointer",
                   fontSize: 11,
@@ -1894,31 +1627,35 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                 onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent)", flexShrink: 0 }}>
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-                <span style={{ fontWeight: 500, flexShrink: 0 }}>最新提示词</span>
+                <AppIcon name="prompt" size="inline" />
+                <span style={{ fontWeight: 400, flexShrink: 0 }}>最新提示词</span>
                 <span style={{
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
-                  opacity: 0.6,
-                  fontSize: 10,
+                  minWidth: 0,
+                  color: "var(--text-dim)",
+                  fontSize: 11,
                 }}>
-                  {pinnedUserMsgText.slice(0, 60).replace(/\n/g, " ")}{pinnedUserMsgText.length > 60 ? "…" : ""}
+                  {pinnedUserMsgText.replace(/\n/g, " ")}
                 </span>
               </button>
               <button
+                type="button"
+                aria-label={lastUserMsgExpanded ? "收起最新提示词" : "展开最新提示词"}
+                aria-expanded={lastUserMsgExpanded}
+                aria-controls={latestPromptContentId}
                 onClick={(e) => { e.stopPropagation(); setLastUserMsgExpanded(!lastUserMsgExpanded); }}
                 title={lastUserMsgExpanded ? "收起" : "展开查看完整内容"}
                 style={{
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  alignSelf: "stretch",
-                  padding: "0 10px",
+                  width: 28,
+                  height: 28,
+                  padding: 0,
                   border: "none",
-                  borderLeft: "1px solid var(--border)",
+                  borderRadius: "var(--radius-control)",
                   background: "transparent",
                   cursor: "pointer",
                   color: "var(--text-muted)",
@@ -1927,26 +1664,24 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                 onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
               >
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: lastUserMsgExpanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
+                <AppIcon name="chevron-down" size="inline" style={{ transform: lastUserMsgExpanded ? "rotate(180deg)" : "none" }} />
               </button>
             </div>
-            {lastUserMsgExpanded && (
-              <div className="scrollbar-none" style={{
-                padding: "8px 10px 10px",
-                borderTop: "1px solid var(--border)",
-                fontSize: 11,
+              <div id={latestPromptContentId} hidden={!lastUserMsgExpanded} className="scrollbar-none" style={{
+                padding: "6px 6px 10px 24px",
+                border: "none",
+                fontSize: 12,
                 lineHeight: 1.65,
                 color: "var(--text-muted)",
                 whiteSpace: "pre-wrap",
-                fontFamily: "var(--font-mono)",
-                maxHeight: 240,
+                fontFamily: "inherit",
+                overflowWrap: "anywhere",
+                maxHeight: "min(240px, 30dvh)",
                 overflowY: "auto",
+                overscrollBehaviorY: "contain",
               }}>
                 {pinnedUserMsgText}
               </div>
-            )}
           </div>
         </div>
       )}
@@ -1954,6 +1689,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         <div
           ref={scrollContainerRef}
           data-chat-messages
+          onPointerDown={cancelPromptScroll}
+          onKeyDown={(event) => {
+            if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) cancelPromptScroll();
+          }}
           onScroll={handleScroll}
           onWheel={markUserScrollIntent}
           onTouchStart={markUserScrollIntent}
@@ -1974,7 +1713,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                     color: "var(--text-muted)",
                     background: "transparent",
                     border: "1px solid var(--border-color, rgba(128,128,128,0.2))",
-                    borderRadius: 6,
+                    borderRadius: "var(--radius-control)",
                     padding: "4px 10px",
                     cursor: loadingFullHistory ? "wait" : "pointer",
                     opacity: loadingFullHistory ? 0.6 : 1,
@@ -2123,6 +1862,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                 if (!isVisible) return view;
                 return (
                   <div key={messageRenderKey}
+                    data-message-index={idx}
                     data-running-assistant={isRunning && idx > lastUserIdx && msg.role === "assistant" || undefined}
                     style={{ paddingTop: needsUserTimeGap ? 12 : 0 }} ref={(el) => {
                     messageRefs.current[currentRefIdx] = el;
@@ -2135,19 +1875,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
             })()}
 
             {streamState.isStreaming && streamState.streamingMessage && !streamingToolLayout.hiddenMessageIndexes.has(messages.length) && hasRenderableStreamOutput(streamState.streamingMessage) && (
-              simpleWaitingIndicator ? (
-                <SmoothStreamingMessage
-                  message={streamState.streamingMessage}
-                  toolResults={toolResultsMap}
-                  {...streamingToolProps}
-                  isBackground={!isFocused}
-                  modelNames={modelNames}
-                  watchdogInfo={watchdogInfo}
-                  onOpenSession={onOpenSession}
-                />
-              ) : (
-                <MessageView message={streamState.streamingMessage as AgentMessage} toolResults={toolResultsMap} {...streamingToolProps} isStreaming isBackground={!isFocused} modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
-              )
+              <MessageView message={streamState.streamingMessage as AgentMessage} toolResults={toolResultsMap} {...streamingToolProps} isStreaming isBackground={!isFocused} modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
             )}
 
             {/* 活跃 subagent run 钉在聊天流最底部（所有消息/流式 bubble 之后），
@@ -2173,11 +1901,9 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                       toolResults={toolResultsMap}
                       expanded={expandedToolGroups.has(streamingToolLayout.bottomGroup.id)}
                       onToggle={() => toggleToolGroup(streamingToolLayout.bottomGroup!.id)}
-                      statusLabel={agentPhase?.kind === "running_tools" ? undefined : phaseLabel(agentPhase, {
-                        serverStatus, retryInfo, isCompacting, stallLevel, compactionMessage: compactionProgress?.message,
-                      })}
+                      statusLabel={agentPhase?.kind === "running_tools" ? rawPhaseLabel : (phaseLabelText || rawPhaseLabel)}
                     />
-                    {!simpleWaitingIndicator && <AgentStatusTicker
+                    <AgentStatusTicker
                       serverStatus={serverStatus}
                       watchdog={watchdogInfo}
                       agentPhase={agentPhase}
@@ -2187,14 +1913,12 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                       isCompacting={isCompacting}
                       stallLevel={stallLevel}
                       autoRecoveryMode={autoRecoveryMode}
-                    />}
+                    />
                   </>
-                ) : simpleWaitingIndicator ? (
-                  <SimpleWaitingIndicator />
                 ) : (
                   <div className="flex items-center gap-0 flex-wrap">
                     {(!transientPhaseNoticeKey || showTransientPhaseNotice) && (
-                      <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabel(agentPhase, { serverStatus, retryInfo, isCompacting, stallLevel, compactionMessage: compactionProgress?.message })}</span>
+                      <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabelText || rawPhaseLabel}</span>
                     )}
                     <AgentStatusTicker
                       serverStatus={serverStatus}
@@ -2214,9 +1938,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
 
             {isRunning && <div ref={liveStreamEndRef} />}
 
-            {!isRunning && changedFiles.length > 0 && (
+            {!isRunning && fileChangeSnapshot && fileChangeSnapshot.changedFiles.length > 0 && (
               <ChangedFilesList
-                files={changedFiles}
+                files={fileChangeSnapshot.changedFiles}
+                fileChanges={fileChangeSnapshot.fileChanges}
                 cwd={session?.cwd ?? newSessionCwd ?? null}
                 onOpenFile={onRevealFile ?? (onOpenFile ? (filePath) => {
                   const fileName = filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
@@ -2231,7 +1956,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
           <button
             type="button"
             onClick={handleResumeAutoScroll}
-            className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-border bg-bg-panel px-3 py-1.5 text-xs text-text shadow-lg transition hover:bg-bg-hover"
+            className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 radius-control border border-border bg-bg-panel px-3 py-1.5 text-xs text-text shadow-lg transition hover:bg-bg-hover"
           >
             回到底部
           </button>

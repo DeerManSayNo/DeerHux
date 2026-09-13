@@ -397,11 +397,12 @@ export function createStandardCodingTools(
     defineTool({
       name: "bash",
       label: "Run Shell Command",
-      description: `Run shell commands in cwd. Returns stdout, stderr and exit_code; check the exit code. For truncated output, read the reported Full output path instead of rerunning.${contextHint}`,
-      promptSnippet: "bash: Run shell commands; use rg for current text, regex, or all matches.",
+      description: `Run shell commands in cwd. Returns stdout, stderr and exit_code; check the exit code. When creating, modifying, deleting or moving files outside cwd, supply affectedFiles with every concrete file path (both source and destination for moves). These paths are verified before and after execution for the current turn's changed-file list. Use absolute paths, no globs or directories; enumerate files first for bulk operations. For truncated output, read the reported Full output path instead of rerunning.${contextHint}`,
+      promptSnippet: "bash: Run shell commands; use rg for current text, regex, or all matches. Declare affectedFiles for changes outside cwd, including deletions and both paths of moves.",
       parameters: Type.Object({
         command: Type.String({ description: "Shell command to run" }),
         timeoutMs: Type.Optional(Type.Number({ description: "Timeout in milliseconds" })),
+        affectedFiles: Type.Optional(Type.Array(Type.String(), { description: "Concrete files this command may create, modify or delete, required for changes outside cwd. Absolute paths recommended; relative paths resolve from cwd, not shell cd. No directories, globs, ~ or variable expansion. Unchanged files are excluded automatically." })),
       }),
       executionMode: "sequential" as const,
       execute: async (toolCallId, raw, signal) => {

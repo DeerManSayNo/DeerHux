@@ -13,12 +13,14 @@
 import { readSessionFileCached } from "../session-reader";
 import { normalizeAgentMode, type AgentMode } from "../agent-modes";
 import type { AgentMessage } from "../types";
+import type { FileChangeSnapshot } from "../file-change-snapshot";
 import { getRecentMessageIndexes, isSessionPagingEnabled } from "./paging-policy";
 
 /**
  * Response shape for GET /api/sessions/:id/messages.
  */
 export interface SessionMessagesResult {
+  fileChangeSnapshot: FileChangeSnapshot | null;
   sessionId: string;
   messages: AgentMessage[];
   entryIds: string[];
@@ -109,6 +111,7 @@ export function readRecentMessages(
     messages,
     entryIds,
     totalCount: total,
+    fileChangeSnapshot: context.fileChangeSnapshot ?? null,
     thinkingLevel: context.thinkingLevel,
     model: context.model,
     roleId: context.roleId ?? null,

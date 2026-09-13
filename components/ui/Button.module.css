@@ -1,0 +1,124 @@
+/*
+ * 通用按钮。规范见 docs/design-system.md「按钮系统」。
+ * 尺寸与形态只由本文件决定，调用方不覆盖圆角、内边距、字号与字重。
+ */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  letter-spacing: 0;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+}
+
+.button:disabled,
+.button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 尺寸：md 32px（默认，主操作与表单操作），sm 26px（面板标题行、密集操作） */
+.md {
+  height: 32px;
+  padding: 0 12px;
+}
+
+.sm {
+  height: 26px;
+  padding: 0 9px;
+  font-size: var(--text-xs);
+}
+
+/* 纯图标：正方形，点击区不随内容变化 */
+.icon {
+  width: 32px;
+  padding: 0;
+}
+
+.icon.sm {
+  width: 26px;
+}
+
+/* primary：唯一主操作。实心 accent，不用 border 强化。 */
+.primary {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.primary:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--accent-hover);
+}
+
+/* secondary：常规操作。中性面板底，保留 1px 结构线。 */
+.secondary {
+  background: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.secondary:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--bg-hover);
+}
+
+/* ghost：撤销、取消等弱操作。无底色无边框，仅前景色变化。 */
+.ghost {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.ghost:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* danger：删除、停止等破坏性操作。常态弱呈现，避免整屏红色。 */
+.danger {
+  background: var(--danger-bg);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+  color: var(--danger);
+}
+
+.danger:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+/* 图标按钮沿用工具按钮的前景色状态机，不引入背景块。 */
+.iconButton {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.iconButton:hover:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--text);
+}
+
+.iconButton[aria-pressed="true"],
+.iconButton[aria-expanded="true"],
+.iconButton[data-active="true"] {
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button {
+    transition: none;
+  }
+}

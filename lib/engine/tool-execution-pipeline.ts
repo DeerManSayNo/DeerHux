@@ -1,3 +1,4 @@
+import type { FileChange } from "../file-changes.ts";
 import type { ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "./extension-context.ts";
 import type { AgentToolResult } from "./loop-event.ts";
@@ -18,6 +19,7 @@ export interface ToolPipelineOutput {
   result: AgentToolResult;
   isError: boolean;
   changedFiles?: string[];
+  fileChanges?: FileChange[];
 }
 
 /** 前置策略和 Guard 的单调决策：后续策略不能推翻已有拒绝。 */
@@ -149,6 +151,7 @@ export class ToolExecutionPipeline {
           content: [...output.result.content],
         },
         changedFiles: output.changedFiles ? [...output.changedFiles] : undefined,
+        fileChanges: output.fileChanges?.map((change) => ({ ...change })),
       };
     }
   }

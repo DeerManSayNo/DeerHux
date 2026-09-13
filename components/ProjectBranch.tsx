@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { AppIcon } from "./AppIcon";
 
 export function ProjectBranch({ cwd, refreshKey }: { cwd: string; refreshKey: string }) {
   const [branch, setBranch] = useState<string | null>(null);
@@ -107,6 +108,7 @@ export function ProjectBranch({ cwd, refreshKey }: { cwd: string; refreshKey: st
   return (
     <>
     <button
+      className="project-branch-trigger"
       ref={triggerRef}
       type="button"
       aria-label={`切换项目分支，当前${branch ?? "无分支"}`}
@@ -131,12 +133,8 @@ export function ProjectBranch({ cwd, refreshKey }: { cwd: string; refreshKey: st
       title={branch ? `当前分支：${branch}` : "无分支（非 Git 仓库、分离 HEAD 或路径不可用）"}
       style={{ display: "inline-flex", alignItems: "center", gap: 3, maxWidth: "40%", minWidth: 0, flexShrink: 0, color: branch ? "var(--text-muted)" : "var(--text-dim)", opacity: branch ? 1 : 0.6, fontSize: 10, background: "transparent", border: "none", padding: "4px 0", cursor: "pointer" }}
     >
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
-        <circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="5" r="2" />
-        <path d="M6 7v10M18 7a12 12 0 0 1-12 12" />
-      </svg>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{branch ?? "无分支"}</span>
-      <span aria-hidden="true">⌄</span>
+      <AppIcon name="chevron-down" size="inline" />
     </button>
     {position && createPortal(
       <div
@@ -154,14 +152,14 @@ export function ProjectBranch({ cwd, refreshKey }: { cwd: string; refreshKey: st
             triggerRef.current?.focus();
           }
         }}
-        style={{ position: "fixed", ...position, zIndex: 10000, width: 180, boxSizing: "border-box", maxWidth: "calc(100vw - 16px)", maxHeight: "min(220px, calc(100vh - 16px))", overflowY: "auto", padding: 3, borderRadius: 6, background: "var(--bg)", border: "1px solid var(--border)", boxShadow: "0 4px 14px #0002", color: "var(--text)" }}
+        style={{ position: "fixed", ...position, zIndex: 10000, width: 180, boxSizing: "border-box", maxWidth: "calc(100vw - 16px)", maxHeight: "min(220px, calc(100vh - 16px))", overflowY: "auto", padding: 3, borderRadius: "var(--radius-panel)", background: "var(--bg)", border: "1px solid var(--border)", boxShadow: "0 4px 14px #0002", color: "var(--text)" }}
       >
         {switching && <div role="status" style={{ padding: "4px 6px", fontSize: 11, color: "var(--text-muted)" }}>切换中…</div>}
         {loading && <div role="status" style={{ padding: "4px 6px", fontSize: 11 }}>正在读取分支…</div>}
         {!loading && !error && branches.length === 0 && <div style={{ padding: "4px 6px", fontSize: 11 }}>暂无可切换的本地分支</div>}
         {branches.map((name) => (
           <button key={name} type="button" disabled={switching || name === branch} onClick={() => void switchBranch(name)} title={name}
-            style={{ display: "block", width: "100%", textAlign: "left", padding: "4px 6px", lineHeight: "18px", border: "none", borderRadius: 3, background: name === branch ? "var(--bg-selected)" : "transparent", color: name === branch ? "var(--accent)" : "var(--text)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: switching || name === branch ? "default" : "pointer", opacity: switching ? 0.6 : 1 }}>
+            style={{ display: "block", width: "100%", textAlign: "left", padding: "4px 6px", lineHeight: "18px", border: "none", borderRadius: "var(--radius-control)", background: name === branch ? "var(--bg-selected)" : "transparent", color: name === branch ? "var(--accent)" : "var(--text)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: switching || name === branch ? "default" : "pointer", opacity: switching ? 0.6 : 1 }}>
             {name === branch ? "✓ " : ""}{name}
           </button>
         ))}

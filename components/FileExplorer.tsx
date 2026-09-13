@@ -27,6 +27,8 @@ interface Props {
   revealRequest?: { id: number; path: string } | null;
   activePath?: string | null;
   onExplorerStateChange?: (state: { expandedPaths: string[]; activePath: string | null }) => void;
+  showRoot?: boolean;
+  filterQuery?: string;
 }
 
 const DIRECTORY_CACHE_TTL_MS = 30_000;
@@ -76,6 +78,8 @@ function TreeNode({
   refreshKey,
   onContextMenu,
   activePath,
+  filterQuery,
+  workspaceStyle,
 }: {
   node: FileNode;
   depth: number;
@@ -87,6 +91,8 @@ function TreeNode({
   refreshKey?: number;
   onContextMenu?: (event: React.MouseEvent, filePath: string, fileName: string, isDir: boolean) => void;
   activePath?: string | null;
+  filterQuery?: string;
+  workspaceStyle?: boolean;
 }) {
   const open = expandedPaths.has(node.fullPath);
   const active = !node.isDir && activePath === node.fullPath;
@@ -94,6 +100,7 @@ function TreeNode({
   const [loaded, setLoaded] = useState(node.loaded ?? false);
   const [loading, setLoading] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const normalizedFilter = filterQuery?.trim().toLocaleLowerCase() ?? "";
 
   const loadChildren = useCallback(async (force = false) => {
     if (loaded && !force) return;
@@ -163,10 +170,10 @@ function TreeNode({
           position: "relative",
           display: "flex",
           alignItems: "center",
-          gap: 4,
-          paddingLeft: 6 + depth * 12,
+          gap: workspaceStyle ? 6 : 4,
+          paddingLeft: 6 + depth * (workspaceStyle ? 16 : 12),
           paddingRight: 8,
-          height: 24,
+          height: workspaceStyle ? 26 : 24,
           cursor: "pointer",
           background: active
             ? "color-mix(in srgb, var(--accent) 22%, var(--bg-hover))"
@@ -189,12 +196,14 @@ function TreeNode({
           </svg>
         )}
         {!node.isDir && <span style={{ width: 10, flexShrink: 0 }} />}
-        <span style={{ flexShrink: 0, display: "flex", alignItems: "center" }}>
-          {node.isDir ? <FolderIcon size={14} open={open} /> : getFileIcon(node.name, 14)}
-        </span>
+        {(!node.isDir || !workspaceStyle) && (
+          <span style={{ flexShrink: 0, display: "flex", alignItems: "center" }}>
+            {node.isDir ? <FolderIcon size={14} open={open} /> : getFileIcon(node.name, 14)}
+          </span>
+        )}
         <span
           style={{
-            fontSize: 11,
+            fontSize: workspaceStyle ? 12 : 11,
             color: active || hovered ? "var(--text)" : "var(--text-muted)",
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -248,11 +257,11 @@ function TreeNode({
       </div>
       {node.isDir && open && (
         <div>
-          {children.map((child) => (
-            <TreeNode key={child.fullPath} node={child} depth={depth + 1} cwd={cwd} onOpenFile={onOpenFile} onAtMention={onAtMention} expandedPaths={expandedPaths} onToggleExpanded={onToggleExpanded} refreshKey={refreshKey} onContextMenu={onContextMenu} activePath={activePath} />
+          {children.filter((child) => child.isDir || !normalizedFilter || child.name.toLocaleLowerCase().includes(normalizedFilter)).map((child) => (
+            <TreeNode key={child.fullPath} node={child} depth={depth + 1} cwd={cwd} onOpenFile={onOpenFile} onAtMention={onAtMention} expandedPaths={expandedPaths} onToggleExpanded={onToggleExpanded} refreshKey={refreshKey} onContextMenu={onContextMenu} activePath={activePath} filterQuery={filterQuery} workspaceStyle={workspaceStyle} />
           ))}
           {children.length === 0 && loaded && (
-            <div style={{ paddingLeft: 6 + (depth + 1) * 12 + 14, fontSize: 10, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center", fontStyle: "italic" }}>
+            <div style={{ paddingLeft: 6 + (depth + 1) * (workspaceStyle ? 16 : 12) + 14, fontSize: 10, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center", fontStyle: "italic" }}>
               空文件夹
             </div>
           )}
@@ -262,7 +271,7 @@ function TreeNode({
   );
 }
 
-export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, revealRequest, initialExpandedPaths = [], activePath = null, onExplorerStateChange }: Props) {
+export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, revealRequest, initialExpandedPaths = [], activePath = null, onExplorerStateChange, showRoot = false, filterQuery = "" }: Props) {
   const [revealedId, setRevealedId] = useState<number | null>(null);
   const [revealError, setRevealError] = useState<string | null>(null);
   const [roots, setRoots] = useState<FileNode[]>([]);
@@ -270,6 +279,7 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, revealR
   const [error, setError] = useState<string | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set(initialExpandedPaths));
   const [activeFilePath, setActiveFilePath] = useState<string | null>(activePath);
+  const [rootOpen, setRootOpen] = useState(true);
   const prevCwdRef = useRef<string | null>(null);
   const initialExpandedPathsRef = useRef(initialExpandedPaths);
   const initialActivePathRef = useRef(activePath);
@@ -372,6 +382,7 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, revealR
       explorerStateRef.current = { expandedPaths: restoredPaths, activePath: initialActivePathRef.current };
       setExpandedPaths(restoredPaths);
       setActiveFilePath(initialActivePathRef.current);
+      setRootOpen(true);
     }
 
     setLoading(cwdChanged);
@@ -458,15 +469,32 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, revealR
   };
 
   const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+  const normalizedFilter = filterQuery.trim().toLocaleLowerCase();
+  const visibleRoots = roots.filter((node) => node.isDir || !normalizedFilter || node.name.toLocaleLowerCase().includes(normalizedFilter));
+  const rootLabel = cwd.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? cwd;
 
   return (
     <div style={{ padding: "2px 4px" }} data-explorer-reveal-id={revealedId}>
       {revealError && <div role="alert" style={{ padding: 8, color: "var(--danger, #ef4444)", fontSize: 12 }}>{revealError}</div>}
-      {roots.map((node) => (
+      {showRoot && (
+        <button
+          type="button"
+          aria-expanded={rootOpen}
+          onClick={() => setRootOpen((open) => !open)}
+          title={cwd}
+          style={{ width: "100%", height: 26, display: "flex", alignItems: "center", gap: 6, padding: "0 8px 0 6px", border: 0, borderRadius: 3, background: "transparent", color: "var(--text)", cursor: "pointer", font: "inherit", textAlign: "left" }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: rootOpen ? "rotate(90deg)" : "none", transition: "transform 0.1s" }} aria-hidden="true">
+            <polyline points="3 2 7 5 3 8" />
+          </svg>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>{rootLabel}</span>
+        </button>
+      )}
+      {(!showRoot || rootOpen) && visibleRoots.map((node) => (
         <TreeNode
           key={`${node.fullPath}:${revealedId ?? "initial"}`}
           node={node}
-          depth={0}
+          depth={showRoot ? 1 : 0}
           cwd={cwd}
           onOpenFile={handleOpenFile}
           onAtMention={onAtMention}
@@ -475,6 +503,8 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, revealR
           refreshKey={refreshKey}
           onContextMenu={handleContextMenu}
           activePath={activeFilePath}
+          filterQuery={filterQuery}
+          workspaceStyle={showRoot}
         />
       ))}
       {roots.length === 0 && (

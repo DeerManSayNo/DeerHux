@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>DeerHux deer profile</title>
+  <g stroke="#292a2b" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M251 232C239 204 225 179 212 155L190 91"/>
+    <path d="M218 168L190 151L170 119M204 131L215 103"/>
+    <path d="M278 230C283 204 294 178 306 152L325 89"/>
+    <path d="M301 164L328 144L348 114M314 126L301 101"/>
+  </g>
+  <path fill="#292a2b" d="M245 221C223 217 205 219 190 226L156 217C155 232 161 244 174 250L132 263C122 266 119 274 124 282L134 295C141 303 153 305 166 301L205 288C223 283 242 285 256 296C279 313 290 340 286 369C282 400 265 423 235 439C279 435 312 413 327 378C343 341 336 300 313 268C296 244 273 228 245 221Z"/>
+  <path d="M177 263L185 261" stroke="#fafaf8" stroke-width="5" stroke-linecap="round"/>
+</svg>

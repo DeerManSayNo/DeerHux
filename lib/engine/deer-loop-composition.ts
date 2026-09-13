@@ -253,7 +253,9 @@ export async function composeDeerLoopEngine(
   const modelCatalog = new PiModelCatalogAdapter(modelRegistry);
   const projectResources = dependencies.createProjectResources();
   // 新会话在首个 prompt 前就写入模型事实，确保刷新、Fork 和分支恢复一致。
-  if (!options.sessionFile) sessionPort.appendModelChange(model.provider, model.id);
+  if (!restoredModel || restoredModel.provider !== model.provider || restoredModel.modelId !== model.id) {
+    sessionPort.appendModelChange(model.provider, model.id);
+  }
 
   const engine = factory.create({
     model,

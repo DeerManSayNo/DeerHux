@@ -1,0 +1,135 @@
+/*
+ * 二级窗口外壳。规范见 docs/design-system.md「二级窗口与弹层」。
+ */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-window);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--shadow-overlay);
+  padding: 20px;
+}
+
+.panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-window);
+  box-shadow: var(--shadow-modal);
+}
+
+/* 两栏配置面板：外侧 16px 圆角，左栏与主区各自滚动。 */
+.split {
+  width: min(1040px, calc(100vw - 40px));
+  height: min(780px, calc(100vh - 40px));
+  flex-direction: row;
+}
+
+/* 居中窄弹窗：12px 圆角与更轻的阴影。 */
+.confirm {
+  width: min(480px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-radius: var(--radius-composer);
+  box-shadow: var(--shadow-popover);
+}
+
+/* ---- split 左栏 ---- */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  flex-shrink: 0;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+}
+
+.sidebarHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebarBody {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.sidebarFooter {
+  flex-shrink: 0;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* ---- split 主区 ---- */
+.main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 标题行：左侧标题组 + 右侧操作区。 */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.headerMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.title {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+}
+
+.subtitle {
+  margin-top: 3px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+}
+
+/* confirm 布局的操作行，右对齐。 */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  padding: 12px 18px 18px;
+}
+
+@media (max-width: 640px) {
+  .overlay {
+    padding: 8px;
+  }
+}

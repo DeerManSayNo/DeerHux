@@ -126,6 +126,35 @@ export function currentToolActivity(tool: ToolCallContent): string {
   return TOOL_ACTIVITIES[tool.toolName]?.current ?? `调用 ${tool.toolName}`;
 }
 
+function bashCommandPreview(args: unknown): string {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+  const command = (args as Record<string, unknown>).command;
+  if (typeof command !== "string") return "";
+  const normalized = command.trim().replace(/\s+/g, " ");
+  const characters = Array.from(normalized);
+  return characters.length > 10 ? `${characters.slice(0, 10).join("")}…` : normalized;
+}
+
+/** Deduplicate categories while keeping each bash command individually identifiable. */
+export function formatToolActivityList(tools: readonly { name: string; args?: unknown }[], limit = 2): string {
+  const labels: string[] = [];
+  const seenCategories = new Set<string>();
+  for (const tool of tools) {
+    if (tool.name === "bash") {
+      const preview = bashCommandPreview(tool.args);
+      labels.push(preview ? `运行命令 ${preview}` : "运行命令");
+      continue;
+    }
+    const label = TOOL_ACTIVITIES[tool.name]?.current ?? `调用 ${tool.name}`;
+    if (seenCategories.has(label)) continue;
+    seenCategories.add(label);
+    labels.push(label);
+  }
+  if (labels.length === 0) return "";
+  const visible = labels.slice(0, limit).join("、");
+  return labels.length > limit ? `${visible}等 ${labels.length} 项` : visible;
+}
+
 /** Move the open segment into the bottom status area, retaining message usage rows. */
 export function moveCurrentToolGroupToBottom(layout: ReturnType<typeof buildStreamingToolLayout>) {
   const byMessage = new Map(layout.byMessage);

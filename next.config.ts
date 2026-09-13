@@ -10,6 +10,16 @@ try {
 } catch { /* package not found, use default */ }
 
 const nextConfig: NextConfig = {
+  // Concurrent design previews must not share the desktop dev server's CSS cache.
+  distDir: process.env.NODE_ENV === "development" && process.env.DEERHUX_DESIGN_PREVIEW === "1"
+    ? ".next-design-preview"
+    : ".next",
+  webpack(config, { dev }) {
+    // Release CSS must be compiled from the current source, not a persisted
+    // webpack/PostCSS snapshot left by an earlier build.
+    if (!dev) config.cache = false;
+    return config;
+  },
   output: "standalone",
   outputFileTracingRoot: __dirname,
   // Image prompts are sent as base64 in JSON. Next's default request clone

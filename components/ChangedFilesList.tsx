@@ -3,9 +3,11 @@
 import { useState } from "react";
 import { getRelativeFilePath } from "@/lib/file-paths";
 import { getFileIcon } from "./FileIcons";
+import { fileChangeKind, type FileChange } from "@/lib/file-changes";
 
 interface Props {
   files: string[];
+  fileChanges?: FileChange[];
   cwd: string | null;
   onOpenFile?: (filePath: string) => void;
 }
@@ -14,8 +16,9 @@ function fileNameFromPath(filePath: string): string {
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
 }
 
-export function ChangedFilesList({ files, cwd, onOpenFile }: Props) {
+export function ChangedFilesList({ files, fileChanges = [], cwd, onOpenFile }: Props) {
   const [expanded, setExpanded] = useState(true);
+  const changesByPath = new Map(fileChanges.map((change) => [change.filePath, fileChangeKind(change)]));
   async function openWithDefaultApp(filePath: string) {
     try {
       const response = await fetch("/api/files/open", {
@@ -41,7 +44,7 @@ export function ChangedFilesList({ files, cwd, onOpenFile }: Props) {
     <div
       style={{
         border: "1px solid var(--border)",
-        borderRadius: 8,
+        borderRadius: "var(--radius-panel)",
         marginBottom: 16,
         overflow: "hidden",
         background: "var(--bg-panel)",
@@ -113,6 +116,8 @@ export function ChangedFilesList({ files, cwd, onOpenFile }: Props) {
           {files.map((absPath, i) => {
             const rel = getRelativeFilePath(absPath, cwd ?? undefined);
             const name = fileNameFromPath(rel);
+            const kind = changesByPath.get(absPath);
+            const statusLabel = kind === "added" ? "新增" : kind === "modified" ? "编辑" : kind === "deleted" ? "已删除" : null;
             const parent = rel.includes("/") || rel.includes("\\")
               ? rel.slice(0, rel.lastIndexOf(rel.includes("/") ? "/" : "\\"))
               : null;
@@ -128,7 +133,9 @@ export function ChangedFilesList({ files, cwd, onOpenFile }: Props) {
                   onOpenFile?.(absPath);
                 }}
                 data-file-menu-path={absPath}
-                title={`${absPath}\n⌘/Ctrl + 点击：使用系统默认应用打开`}
+                data-file-change-kind={kind}
+                aria-label={statusLabel ? `${name}，${statusLabel}` : name}
+                title={`${absPath}${statusLabel ? `\n${statusLabel}` : ""}\n⌘/Ctrl + 点击：使用系统默认应用打开`}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -157,13 +164,37 @@ export function ChangedFilesList({ files, cwd, onOpenFile }: Props) {
                   style={{
                     flex: 1,
                     minWidth: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                  }}
+                >
+                  <span style={{
+                    minWidth: 0,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
                     fontWeight: 500,
-                  }}
-                >
-                  {name}
+                    textDecoration: kind === "deleted" ? "line-through" : undefined,
+                    color: kind === "deleted" ? "var(--text-dim)" : undefined,
+                  }}>
+                    {name}
+                  </span>
+                  {(kind === "added" || kind === "modified") && (
+                    <svg
+                      width="13" height="13" viewBox="0 0 24 24" fill="none"
+                      stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+                      role="img" aria-label={statusLabel ?? undefined}
+                      style={{ flexShrink: 0, color: kind === "added" ? "var(--accent)" : "var(--text-muted)" }}
+                    >
+                      <title>{statusLabel}</title>
+                      {kind === "added" ? (
+                        <><circle cx="12" cy="12" r="8" /><path d="M12 8v8M8 12h8" /></>
+                      ) : (
+                        <><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15z" /></>
+                      )}
+                    </svg>
+                  )}
                 </span>
                 {parent && (
                   <span

@@ -1,5 +1,7 @@
 "use client";
 
+import { mergeFileChanges, readFileChanges, type FileChange } from "@/lib/file-changes";
+import { createFileChangeSnapshot, readFileChangeSnapshot, type FileChangeSnapshot } from "@/lib/file-change-snapshot";
 import { skillNames } from "@/lib/skill-selection";
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import { useChatAutoScroll } from "@/hooks/agent-session/useChatAutoScroll";
@@ -26,7 +28,7 @@ type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
 
 function createClientMessageId(): string {
-  return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `v2_client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 async function verifyPromptAdmission(sessionId: string, clientMessageId: string): Promise<boolean> {
@@ -170,6 +172,7 @@ export interface SessionData {
   filePath: string;
   leafId: string | null;
   context: {
+    fileChangeSnapshot?: FileChangeSnapshot | null;
     messages: AgentMessage[];
     entryIds: string[];
     thinkingLevel: string;
@@ -325,9 +328,13 @@ function describeModelsLoadError(error: unknown): string {
   return "模型列表加载失败，请检查本地后台服务或重启应用";
 }
 
+type AgentPhaseTool = { id: string; name: string; args: unknown };
+
 export type AgentPhase =
-  | { kind: "waiting_model"; reason: "initial" | "after_message" | "after_tool" | "restored" | "recovery" }
-  | { kind: "running_tools"; tools: { id: string; name: string }[] }
+  | { kind: "waiting_model"; reason: "initial" | "after_message" | "restored" | "recovery" }
+  | { kind: "waiting_model"; reason: "after_tool"; tools: AgentPhaseTool[] }
+  | { kind: "thinking_after_tool"; tools: AgentPhaseTool[] }
+  | { kind: "running_tools"; tools: AgentPhaseTool[]; batchTools: AgentPhaseTool[] }
   | { kind: "stopping" }
   | null;
 
@@ -345,7 +352,7 @@ export interface UseAgentSessionOptions {
   streamRenderPriority?: StreamRenderPriority;
   session: SessionInfo | null;
   newSessionCwd: string | null;
-  onAgentEnd?: (sessionId: string, changedFiles?: string[]) => void;
+  onAgentEnd?: (sessionId: string, changedFiles?: string[], fileChanges?: FileChange[]) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionStarted?: (session: SessionInfo | null) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -638,6 +645,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     session?.id ? getSessionHistorySnapshot(session.id) : null
   ));
 
+  const fileSnapshotEpochRef = useRef(0);
+  const fileSnapshotRef = useRef<{ sessionId: string | null; snapshot: FileChangeSnapshot | null }>({
+    sessionId: session?.id ?? null,
+    snapshot: readFileChangeSnapshot(initialHistorySnapshot?.fileChangeSnapshot),
+  });
+  const [fileSnapshotState, setFileSnapshotState] = useState(fileSnapshotRef.current);
+  const updateFileSnapshot = useCallback((sessionId: string | null, snapshot: FileChangeSnapshot | null) => {
+    fileSnapshotEpochRef.current += 1;
+    const state = { sessionId, snapshot: readFileChangeSnapshot(snapshot) };
+    fileSnapshotRef.current = state;
+    setFileSnapshotState(state);
+  }, []);
+
   const [data, setData] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(() => !isNew && !initialHistorySnapshot);
   const [error, setError] = useState<string | null>(null);
@@ -751,6 +771,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     resetAutoScroll, syncAfterMessageChange,
   } = useChatAutoScroll();
   const changedFilesRef = useRef<Set<string>>(new Set());
+  const fileChangesRef = useRef<FileChange[]>([]);
   const messagesRef = useRef<AgentMessage[]>([]);
   const entryIdsRef = useRef<string[]>([]);
   const historySnapshotInvalidRef = useRef(false);
@@ -812,6 +833,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // gate, causing two concurrent streams (SDK retry + our follow_up).
   // handleSend / handleFollowUp explicitly reset these refs for user-initiated turns.
   const resetTurnTracking = () => {
+    updateFileSnapshot(sessionIdRef.current, null);
     watchdogStaleRecoveriesRef.current = 0;
     stallDismissedRef.current = false;
     stallRecoveriesRef.current = 0;
@@ -868,7 +890,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const applySessionSnapshot = useCallback((
     d: SessionDataWithAgentState,
     applyMessages = true,
+    fileSnapshotEpoch?: number,
   ) => {
+    // 历史请求可能晚于新回合或终态抵达；不能用旧快照覆盖实时完成结果。
+    if (fileSnapshotEpoch === fileSnapshotEpochRef.current && sessionIdRef.current === d.sessionId
+      && !agentRunningRef.current && !awaitingAgentStartRef.current
+      && d.context.fileChangeSnapshot !== undefined) {
+      updateFileSnapshot(d.sessionId, readFileChangeSnapshot(d.context.fileChangeSnapshot));
+    }
     setData(d);
     const { messages: loadedMessages, entryIds: loadedEntryIds } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
     const prevKey = entryIdsRef.current.join("\0");
@@ -904,13 +933,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
 
     return { changed, loadedMessages, loadedEntryIds };
-  }, [clearAwaitingAgentStartGuard]);
+  }, [clearAwaitingAgentStartGuard, updateFileSnapshot]);
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     // Background refreshes piggyback on an existing inflight request for the
     // same sid. showLoading callers always start a fresh request so loading
     // spinner transitions stay tied to user-visible actions.
     const messageEpochAtStart = messageMutationEpochRef.current;
+    const fileSnapshotEpochAtStart = fileSnapshotEpochRef.current;
     const inflight = loadSessionInflightRef.current;
     if (
       !showLoading
@@ -966,7 +996,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           && !agentRunningRef.current
         );
         // 最新快照若跨过了消息变化，只更新模型/模式等元数据，绝不能覆盖消息。
-        applySessionSnapshot(d, messagesAreCurrent);
+        applySessionSnapshot(d, messagesAreCurrent, fileSnapshotEpochAtStart);
+        setLoading(false);
         // If no live agent state, fall back to thinking level from session file
         if (!d.agentState?.state?.thinkingLevel && d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
           setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
@@ -1015,6 +1046,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!showLoading && loadingFullHistoryRef.current) return;
     const snapshotRequestSeq = ++messageSnapshotRequestSeqRef.current;
     const messageEpochAtStart = messageMutationEpochRef.current;
+    const fileSnapshotEpochAtStart = fileSnapshotEpochRef.current;
     const controller = new AbortController();
     const sessionSignal = sessionAbortRef.current?.signal;
     let timedOut = false;
@@ -1032,7 +1064,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       else sessionSignal.addEventListener("abort", onSessionAbort, { once: true });
     }
     try {
-      if (showLoading) setLoading(true);
+      // 关闭重开已有缓存的会话时，保留消息和文件快照，不用骨架屏覆盖它们。
+      if (showLoading && !getSessionHistorySnapshot(sid)) setLoading(true);
       const res = await fetch(
         `/api/sessions/${encodeURIComponent(sid)}/messages?limit=100`,
         { signal: controller.signal, cache: "no-store" },
@@ -1050,6 +1083,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as {
         sessionId: string;
+        fileChangeSnapshot?: FileChangeSnapshot | null;
         messages: AgentMessage[];
         entryIds: string[];
         totalCount: number;
@@ -1112,6 +1146,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         filePath: "",
         leafId: null,
         context: {
+          fileChangeSnapshot: d.fileChangeSnapshot,
           messages: restored.messages,
           entryIds: restored.entryIds,
           thinkingLevel: d.thinkingLevel,
@@ -1119,7 +1154,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           roleId: d.roleId ?? null,
           agentMode: d.agentMode,
         },
-      }, applyRecentMessages);
+      }, applyRecentMessages, fileSnapshotEpochAtStart);
+      // 最新后台刷新可能接替了首次加载；成功后也必须解除首次加载状态。
+      setLoading(false);
       if (applyRecentMessages && (!fullHistoryLoadedRef.current || historyWasRebased)) {
         setHasOlderMessages(Boolean(d.page?.hasMoreBefore));
       }
@@ -1152,6 +1189,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     loadingFullHistoryRef.current = true;
     setLoadingFullHistory(true);
     const snapshotRequestSeq = ++messageSnapshotRequestSeqRef.current;
+    const fileSnapshotEpochAtStart = fileSnapshotEpochRef.current;
     const controller = new AbortController();
     const sessionSignal = sessionAbortRef.current?.signal;
     const timeout = setTimeout(() => controller.abort(), 30_000);
@@ -1196,7 +1234,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           messages: merged.messages,
           entryIds: merged.entryIds,
         },
-      }, true);
+      }, true, fileSnapshotEpochAtStart);
       fullHistoryLoadedRef.current = true;
       setHasOlderMessages(false);
       return true;
@@ -1415,6 +1453,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (sessionIdRef.current !== sid) throw new Error("Session changed during snapshot recovery");
         const controller = new AbortController();
         const messageEpochAtStart = messageMutationEpochRef.current;
+        const fileSnapshotEpochAtStart = fileSnapshotEpochRef.current;
         const timeout = setTimeout(() => controller.abort(), 15_000);
         try {
           const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}?includeState`, {
@@ -1428,7 +1467,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             messageEpochAtStart === messageMutationEpochRef.current
             && !agentRunningRef.current
           );
-          applySessionSnapshot(snapshot, messagesAreCurrent);
+          applySessionSnapshot(snapshot, messagesAreCurrent, fileSnapshotEpochAtStart);
           // Runtime transient state is rebuilt by the mux baseline. The HTTP
           // snapshot is history/metadata only and must never overwrite it.
         } finally {
@@ -1466,9 +1505,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     dispatch({ type: "end" });
     setLastModelError(message);
     const changedFiles = [...changedFilesRef.current];
+    const fileChanges = fileChangesRef.current;
     changedFilesRef.current.clear();
-    onAgentEnd?.(sid, changedFiles);
-  }, [clearAwaitingAgentStartGuard, loadSession, onAgentEnd]);
+    fileChangesRef.current = [];
+    updateFileSnapshot(sid, createFileChangeSnapshot(`${sid}:${turnIdRef.current}`, changedFiles, fileChanges));
+    onAgentEnd?.(sid, changedFiles, fileChanges);
+  }, [clearAwaitingAgentStartGuard, loadSession, onAgentEnd, updateFileSnapshot]);
 
   const scheduleAwaitingAgentStartGuard = useCallback((sid: string, turnId: number) => {
     clearAwaitingAgentStartGuard(false);
@@ -1539,6 +1581,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const filePath = event.filePath;
         if (typeof filePath === "string" && filePath.trim()) {
           changedFilesRef.current.add(filePath);
+          fileChangesRef.current = mergeFileChanges(fileChangesRef.current, readFileChanges([event.fileChange]));
         }
         break;
       }
@@ -1705,8 +1748,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (typeof filePath === "string" && filePath.trim()) changedFilesRef.current.add(filePath);
         }
         const changedFiles = [...changedFilesRef.current];
+        const fileChanges = [...new Map([...fileChangesRef.current, ...readFileChanges(event.fileChanges)]
+          .map((change) => [change.filePath, change])).values()];
         changedFilesRef.current.clear();
-        if (sessionIdRef.current) onAgentEnd?.(sessionIdRef.current, changedFiles);
+        fileChangesRef.current = [];
+        if (sessionIdRef.current) {
+          updateFileSnapshot(sessionIdRef.current, readFileChangeSnapshot(event.fileChangeSnapshot)
+            ?? createFileChangeSnapshot(typeof event.turnId === "string" ? event.turnId : `${sessionIdRef.current}:${turnIdRef.current}`, changedFiles, fileChanges));
+          onAgentEnd?.(sessionIdRef.current, changedFiles, fileChanges);
+        }
 
         // === TTFT Recovery: 中转站排队导致首包超时 → 主动切备用模型 ===
         // 服务端 TTFT 超时重试 1 次仍失败后，agent_end 会带 errorCode。
@@ -1743,7 +1793,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           dispatch({ type: "update", message: normalizedMsg });
         }
-        setAgentPhase(null);
+        setAgentPhase((prev) => {
+          if (prev?.kind === "waiting_model" && prev.reason === "after_tool") {
+            return { kind: "thinking_after_tool", tools: prev.tools };
+          }
+          if (prev?.kind === "thinking_after_tool") return prev;
+          return null;
+        });
         break;
       }
       case "message_end": {
@@ -1854,6 +1910,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_start": {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
+        const args = event.args;
         if (name === "subagent") {
           activeSubagentToolIdsRef.current.add(id);
           const sid = sessionIdRef.current;
@@ -1861,8 +1918,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
-          if (!tools.some((t) => t.id === id)) tools.push({ id, name });
-          return { kind: "running_tools", tools };
+          const batchTools = prev?.kind === "running_tools" ? [...prev.batchTools] : [];
+          if (!tools.some((t) => t.id === id)) tools.push({ id, name, args });
+          if (!batchTools.some((t) => t.id === id)) batchTools.push({ id, name, args });
+          return { kind: "running_tools", tools, batchTools };
         });
         break;
       }
@@ -1879,9 +1938,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // 工具刚结束、正在等下一轮模型：重置内容空闲计时，避免把正常 TTFT 当成停滞。
             lastContentChangedAtRef.current = Date.now();
             lastAgentEventAtRef.current = Date.now();
-            return { kind: "waiting_model", reason: "after_tool" };
+            return { kind: "waiting_model", reason: "after_tool", tools: prev.batchTools };
           }
-          return { kind: "running_tools", tools };
+          return { kind: "running_tools", tools, batchTools: prev.batchTools };
         });
         break;
       }
@@ -2023,7 +2082,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
     }
-  }, [loadSession, loadRecentMessages, onAgentEnd, autoRecoveryMode, startSubagentLiveRefresh, finishSubagentLiveRefresh, stopSubagentLiveRefresh, loadSessionState, setTerminalNoticeState]);
+  }, [loadSession, loadRecentMessages, onAgentEnd, autoRecoveryMode, startSubagentLiveRefresh, finishSubagentLiveRefresh, stopSubagentLiveRefresh, loadSessionState, setTerminalNoticeState, updateFileSnapshot]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[], skill?: SkillReference) => {
@@ -2040,6 +2099,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoContinueInProgressRef.current = false;
     retryExhaustedRecoveryUsedRef.current = false;
     changedFilesRef.current.clear();
+    fileChangesRef.current = [];
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
     awaitingAgentStartRef.current = true;
@@ -3129,6 +3189,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setStallLevel(null);
     resetAutoScroll();
     changedFilesRef.current.clear();
+    fileChangesRef.current = [];
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
     lastContentLengthRef.current = 0;
@@ -3139,6 +3200,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setRetryInfo(null);
     setContextUsage(null);
     const cachedHistory = sessionId ? getSessionHistorySnapshot(sessionId) : null;
+    updateFileSnapshot(sessionId ?? null, readFileChangeSnapshot(cachedHistory?.fileChangeSnapshot));
     fullHistoryLoadedRef.current = cachedHistory?.fullHistoryLoaded ?? false;
     setHasOlderMessages(cachedHistory?.hasOlderMessages ?? false);
     setSystemPrompt(null);
@@ -3214,7 +3276,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       activeSubagentToolIds.clear();
       stopSubagentLiveRefresh();
     };
-  }, [cancelPendingMessageUpdate, connectEvents, loadRecentMessages, loadSession, loadSessionState, loadTools, activeTabId, newSessionCwd, activeSessionId, resetAutoScroll, stopSubagentLiveRefresh]);
+  }, [cancelPendingMessageUpdate, connectEvents, loadRecentMessages, loadSession, loadSessionState, loadTools, activeTabId, newSessionCwd, activeSessionId, resetAutoScroll, stopSubagentLiveRefresh, updateFileSnapshot]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -3236,6 +3298,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (historySnapshotInvalidRef.current) return;
       saveSessionHistorySnapshot(sessionId, {
         messages: messagesRef.current,
+        fileChangeSnapshot: fileSnapshotRef.current.sessionId === sessionId ? fileSnapshotRef.current.snapshot : null,
         entryIds: entryIdsRef.current,
         fullHistoryLoaded: fullHistoryLoadedRef.current,
         hasOlderMessages: hasOlderMessagesRef.current,
@@ -3303,6 +3366,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, messages, entryIds, streamState,
+    fileChangeSnapshot: fileSnapshotState.sessionId === (session?.id ?? sessionIdRef.current) ? fileSnapshotState.snapshot : null,
     agentRunning, modelNames, modelList, modelsLoadError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, systemPrompt: systemPrompt ?? lastSystemPromptRef.current, forkingEntryId,
     isCompacting, compactionProgress, clearCompactionProgress: () => setCompactionProgress(null), compactError, lastModelError, terminalNotice, clearTerminalNotice, currentModel, displayModel, sessionStats,

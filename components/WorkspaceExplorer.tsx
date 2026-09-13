@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FileExplorer } from "./FileExplorer";
+import { AppIcon } from "./AppIcon";
 import { type ExplorerProjectState, readFileExplorerState, writeFileExplorerState } from "@/lib/file-explorer-state";
-import { getProjectDisplayName } from "@/lib/project-name";
 
 interface Props {
   cwd: string;
@@ -16,7 +16,7 @@ interface Props {
 // The parent keys this component by cwd, so each project's state is restored independently.
 export function WorkspaceExplorer({ cwd, refreshKey, revealRequest, onOpenFile, onAtMention }: Props) {
   const [initialState, setInitialState] = useState<ExplorerProjectState | null>(null);
-  const [localRefreshKey, setLocalRefreshKey] = useState(0);
+  const [filterQuery, setFilterQuery] = useState("");
   const currentState = useRef<ExplorerProjectState>({ expandedPaths: [], activePath: null });
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -84,12 +84,18 @@ export function WorkspaceExplorer({ cwd, refreshKey, revealRequest, onOpenFile, 
 
   return (
     <div className="workspace-explorer">
-      <div className="workspace-explorer-heading">
-        <span title={cwd}>{getProjectDisplayName(cwd)}</span>
-        <button type="button" title="刷新资源管理器" aria-label="刷新资源管理器" onClick={() => setLocalRefreshKey((key) => key + 1)}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7" /></svg>
-        </button>
-      </div>
+      <label className="workspace-explorer-filter">
+        <AppIcon name="search" size="compact" />
+        <input
+          type="search"
+          value={filterQuery}
+          onChange={(event) => setFilterQuery(event.target.value)}
+          placeholder="筛选文件..."
+          aria-label="筛选文件"
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </label>
       <div
         ref={scrollRef}
         className="workspace-explorer-scroll"
@@ -104,8 +110,10 @@ export function WorkspaceExplorer({ cwd, refreshKey, revealRequest, onOpenFile, 
         <div ref={contentRef}>
           {initialState && <FileExplorer
             cwd={cwd}
+            showRoot
+            filterQuery={filterQuery}
             revealRequest={revealRequest}
-            refreshKey={refreshKey + localRefreshKey}
+            refreshKey={refreshKey}
             onOpenFile={onOpenFile}
             onAtMention={onAtMention}
             initialExpandedPaths={initialState.expandedPaths}

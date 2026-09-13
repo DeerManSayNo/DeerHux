@@ -7,8 +7,9 @@ import { normalizeExternalHref, resolveLocalFileHref } from "@/lib/external-link
 export const AiLinkWorkspace = createContext<string | null>(null);
 
 // Preserve file links that react-markdown's web-only default would erase.
-// This only applies to anchors; image URL handling retains the default policy.
+// Images also need file:// and Windows paths preserved for AiOutputImage.
 export function aiOutputUrlTransform(url: string, key: string): string {
+  if (key === "src" && !/[\u0000-\u001f\u007f]/.test(url) && resolveLocalFileHref(url)) return url;
   if (key !== "href") return defaultUrlTransform(url);
   if (/[\u0000-\u001f\u007f]/.test(url) || /%(?![a-f\d]{2})/i.test(url)) return "";
   if (normalizeExternalHref(url) || resolveLocalFileHref(url, "/workspace")) return url;

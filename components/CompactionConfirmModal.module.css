@@ -1,0 +1,149 @@
+/* 上下文压缩确认。弹窗外壳见 components/ui/Modal.module.css。 */
+
+.body {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+/* 用量摘要：与正文区分的内嵌块，用卡片底色而非强调色。 */
+.usageBox {
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border-radius: var(--radius-panel);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+}
+
+.label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-base);
+}
+
+.select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.hint {
+  margin: 8px 0 16px;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+/* ---- 进度 ---- */
+
+.progressBox {
+  margin-bottom: 14px;
+  padding: 12px 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg);
+}
+
+.progressHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.progressMessage {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-normal);
+}
+
+.progressElapsed {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.progressTrack {
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--radius-small);
+  background: var(--bg-hover);
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: var(--radius-small);
+  background: var(--accent);
+  transition: width 300ms ease;
+}
+
+.stepRow {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+/* 步骤标签：常态无底色，进行中与完成使用语义色。 */
+.step {
+  padding: 3px 8px;
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+
+.stepActive {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+}
+
+.stepDone {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.progressMeta {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.progressMetaStrong {
+  color: var(--text);
+}
+
+.progressNote {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.errorBox {
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: var(--radius-panel);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}

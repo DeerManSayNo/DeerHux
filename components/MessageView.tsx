@@ -3,6 +3,7 @@ import { TurnSkillEvidence } from "./TurnSkillEvidence";
 import { collectTurnSkillEvidence } from "@/lib/turn-skill-evidence";
 import { SendIconButton } from "./SendIconButton";
 import "./tool-activity.css";
+import "./inline-code.css";
 import { skillNames } from "@/lib/skill-selection";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 
@@ -10,6 +11,7 @@ import { memo, useState, useRef, useEffect, useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AiOutputLink, aiOutputUrlTransform } from "./AiOutputLink";
+import { AiOutputImage } from "./AiOutputImage";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -309,6 +311,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
   const displayContent = skillPrefix ? skillPrefix.rest : contentWithoutReferences;
 
   const [expanded, setExpanded] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const [editValue, setEditValue] = useState(content);
   const [sendLocked, setSendLocked] = useState(false);
   const sendUnlockAtRef = useRef(0);
@@ -407,7 +410,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
               alt=""
               style={{
                 maxWidth: 300, maxHeight: 280,
-                borderRadius: 8,
+                borderRadius: "var(--radius-panel)",
                 objectFit: "contain",
                 display: "block",
                 border: "1px solid var(--border)",
@@ -425,7 +428,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
               key={i}
               style={{
                 width: 200, height: 140,
-                borderRadius: 8,
+                borderRadius: "var(--radius-panel)",
                 border: "1px solid var(--border)",
                 background: "color-mix(in srgb, var(--bg-panel) 60%, transparent)",
                 display: "flex",
@@ -457,7 +460,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
               key={i}
               style={{
                 width: 200, height: 140,
-                borderRadius: 8,
+                borderRadius: "var(--radius-panel)",
                 border: "1px solid var(--border)",
                 background: "color-mix(in srgb, var(--bg-panel) 60%, transparent)",
                 display: "flex",
@@ -477,7 +480,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
             key={i}
             src={src}
             alt=""
-            style={{ maxWidth: 260, maxHeight: 220, borderRadius: 8, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+            style={{ maxWidth: 260, maxHeight: 220, borderRadius: "var(--radius-panel)", objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
           />
         );
       })}
@@ -501,7 +504,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
         style={{
           display: "inline-flex", alignItems: "center", justifyContent: "center",
           flexShrink: 0, width: 28, height: 28, marginTop: 7, padding: 0,
-          border: "none", borderRadius: 6, background: "transparent",
+          border: "none", borderRadius: "var(--radius-control)", background: "transparent",
           color: "var(--text-muted)", cursor: isClickable ? "pointer" : "default",
         }}
       >
@@ -529,7 +532,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
               maxWidth: 220,
               height: 24,
               padding: "0 8px",
-              borderRadius: 999,
+              borderRadius: "var(--radius-small)",
               background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
               border: "1px solid color-mix(in srgb, var(--accent) 16%, var(--border))",
               color: "color-mix(in srgb, var(--accent) 62%, var(--text-muted))",
@@ -554,7 +557,14 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
   const hasSideMeta = displayReferences.length > 0;
 
   return (
-    <div data-metadata-visible={alwaysShowMetadata || undefined} className="user-message" style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end", width: "100%" }}>
+    <div
+      data-hovered={hovered || undefined}
+      data-metadata-visible={alwaysShowMetadata || undefined}
+      className="user-message"
+      style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end", width: "100%" }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       <div
         style={{
           width: "min(100%, 72rem)",
@@ -609,20 +619,20 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
             textAlign: "left",
             padding: "10px 14px",
             background: isDark ? "rgb(42, 42, 42)" : "var(--bg)",
-            border: "none",
-            borderRadius: 14,
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-panel)",
             color: "var(--text)",
             cursor: canResend ? "pointer" : "default",
             font: "inherit",
-            boxShadow: "0 2px 4px rgba(15,23,42,0.07), 0 8px 24px -12px rgba(15,23,42,0.16)",
+            boxShadow: "var(--shadow-control)",
             transition: "background 0.15s, box-shadow 0.15s",
           }}
           onMouseEnter={(e) => {
             if (!canResend) return;
-            e.currentTarget.style.boxShadow = "0 2px 6px rgba(15,23,42,0.10), 0 8px 24px -12px rgba(15,23,42,0.20)";
+            e.currentTarget.style.boxShadow = "0 2px 6px color-mix(in srgb, var(--text) 10%, transparent)";
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.boxShadow = "0 2px 4px rgba(15,23,42,0.07), 0 8px 24px -12px rgba(15,23,42,0.16)";
+            e.currentTarget.style.boxShadow = "var(--shadow-control)";
           }}
         >
           {renderImages()}
@@ -633,6 +643,10 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
               fontWeight: 400,
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
+              maxHeight: "min(200px, 40dvh)",
+              overflowX: "hidden",
+              overflowY: "auto",
+              overscrollBehaviorY: "contain",
             }}
           >
             {displaySkillNames.map((displaySkillName) => (
@@ -647,7 +661,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
                   verticalAlign: "middle",
                   height: 22,
                   padding: "0 7px 0 7px",
-                  borderRadius: 999,
+                  borderRadius: "var(--radius-small)",
                   background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
                   border: "1px solid color-mix(in srgb, var(--accent) 13%, transparent)",
                   color: "color-mix(in srgb, var(--accent) 55%, var(--text-muted))",
@@ -661,7 +675,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
                   style={{
                     width: 4,
                     height: 4,
-                    borderRadius: "50%",
+                    borderRadius: "var(--radius-circle)",
                     background: "currentColor",
                     opacity: 0.45,
                     flexShrink: 0,
@@ -685,10 +699,10 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
             gap: 8,
             alignItems: "center",
             background: isDark ? "rgb(42, 42, 42)" : "var(--bg)",
-            border: "none",
-            borderRadius: 14,
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-panel)",
             padding: "10px 10px 10px 14px",
-            boxShadow: "0 2px 4px rgba(15,23,42,0.07), 0 8px 24px -12px rgba(15,23,42,0.16)",
+            boxShadow: "var(--shadow-control)",
             transition: "background 0.15s, box-shadow 0.15s",
           }}
         >
@@ -708,12 +722,15 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
                 boxSizing: "border-box",
                 width: "100%",
                 minHeight: 30,
+                maxHeight: "min(200px, 40dvh)",
                 padding: "3px 0",
                 background: "transparent",
                 border: "none",
                 outline: "none",
                 resize: "none",
-                overflow: "hidden",
+                overflowX: "hidden",
+                overflowY: "auto",
+                overscrollBehaviorY: "contain",
                 color: "var(--text)",
                 fontFamily: "inherit",
                 fontSize: 14,
@@ -743,7 +760,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
             gap: 10,
             marginTop: 7,
             padding: "7px 10px",
-            borderRadius: 9,
+            borderRadius: "var(--radius-control)",
             border: `1px solid ${message.deliveryState === "failed" ? "color-mix(in srgb, #ef4444 35%, var(--border))" : "var(--border)"}`,
             background: message.deliveryState === "failed"
               ? "color-mix(in srgb, #ef4444 7%, var(--bg))"
@@ -764,7 +781,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
               </button>
             )}
             {onRetryDelivery && (
-              <button type="button" onClick={() => onRetryDelivery(message)} style={{ border: "1px solid currentColor", borderRadius: 6, background: "transparent", color: "inherit", cursor: "pointer", padding: "3px 7px", fontWeight: 600 }}>
+              <button type="button" onClick={() => onRetryDelivery(message)} style={{ border: "1px solid currentColor", borderRadius: "var(--radius-control)", background: "transparent", color: "inherit", cursor: "pointer", padding: "3px 7px", fontWeight: 600 }}>
                 安全重试
               </button>
             )}
@@ -786,7 +803,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
               width: "min(800px, calc(100vw - 40px))",
               maxHeight: "min(700px, calc(100vh - 40px))",
               border: "1px solid var(--border)",
-              borderRadius: 16,
+              borderRadius: "var(--radius-panel)",
               background: "var(--bg)",
               boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
               overflow: "hidden",
@@ -818,7 +835,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
                     padding: "6px 12px",
                     background: "var(--bg-panel)",
                     border: "1px solid var(--border)",
-                    borderRadius: 8,
+                    borderRadius: "var(--radius-control)",
                     color: "var(--text-muted)",
                     cursor: "pointer",
                     fontSize: 13,
@@ -841,7 +858,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
                     width: 32, height: 32,
                     background: "var(--bg-panel)",
                     border: "1px solid var(--border)",
-                    borderRadius: 8,
+                    borderRadius: "var(--radius-control)",
                     color: "var(--text-muted)",
                     cursor: "pointer",
                   }}
@@ -1039,6 +1056,7 @@ function AssistantMessageView({
     <div
       className="assistant-message"
       data-streaming={isStreaming || undefined}
+      data-hovered={hovered || undefined}
       data-metadata-visible={alwaysShowMetadata || isStreaming || undefined}
       style={{ marginBottom: 8 }}
       onMouseEnter={() => setHovered(true)}
@@ -1103,7 +1121,7 @@ function AssistantMessageView({
           <div
             style={{
               padding: "8px 10px",
-              borderRadius: 8,
+              borderRadius: "var(--radius-panel)",
               background: "rgba(239,68,68,0.08)",
               border: "1px solid rgba(239,68,68,0.25)",
               color: "rgba(200,60,60,0.95)",
@@ -1149,7 +1167,7 @@ function AssistantMessageView({
                   {tps !== null && (() => {
                     const bg = tps >= 50 ? "#53b3cb" : tps >= 30 ? "#9bc53d" : tps >= 15 ? "#f9c22e" : "#e01a4f";
                     return (
-                      <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: bg, color: "#fff", fontSize: 11, fontWeight: 400 }}>
+                      <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: "var(--radius-small)", background: bg, color: "#fff", fontSize: 11, fontWeight: 400 }}>
                         {tps.toFixed(1)} t/s
                       </span>
                     );
@@ -1192,7 +1210,7 @@ function AssistantMessageView({
               display: "flex", alignItems: "center", gap: 4,
               padding: "3px 8px", height: 22,
               background: "none", border: "none",
-              borderRadius: 5,
+              borderRadius: "var(--radius-control)",
               color: copied ? "var(--accent)" : "var(--text-dim)",
               cursor: "pointer",
               fontSize: 11, fontWeight: 400,
@@ -1250,7 +1268,7 @@ export function StreamingToolHistory({ group, expanded, onToggle, toolResults, a
     <div className="tool-history-group" style={{ minWidth: 0 }}>
       <button type="button" className="tool-activity-row" aria-expanded={expanded} onClick={onToggle}
         title={`${label}\n${summary} · ${group.tools.length} 次调用${errors ? ` · ${errors} 次失败` : ""}`}>
-        {current && <span aria-hidden="true" className="tool-activity-spinner">◌</span>}
+        {running > 0 && <span aria-hidden="true" className="tool-activity-spinner">◌</span>}
         <span className="tool-activity-viewport">
           <span className="tool-activity-label" key={visibleTool?.toolCallId ?? "summary"}>{label}</span>
         </span>
@@ -1408,6 +1426,9 @@ function BlockView({ block, toolResults, streamingDuration, toolCallDurations, i
 
 function createMarkdownComponents(isStreaming: boolean): Components {
   return {
+    img({ src, alt, title }) {
+      return <AiOutputImage key={typeof src === "string" ? src : ""} src={typeof src === "string" ? src : undefined} alt={alt} title={title} />;
+    },
     a({ href, children, title }) {
       return <AiOutputLink href={href} title={title}>{children}</AiOutputLink>;
     },
@@ -1431,13 +1452,7 @@ function createMarkdownComponents(isStreaming: boolean): Components {
       if (isBlock) return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
       return (
         <code
-          style={{
-            background: "var(--bg-selected)",
-            padding: "1px 4px",
-            borderRadius: 3,
-            fontFamily: "var(--font-mono)",
-            fontSize: "0.9em",
-          }}
+          className="inline-code"
           {...props}
         >
           {children}
@@ -1495,7 +1510,7 @@ function ThinkingBlock({ block, duration, isStreaming }: { block: ThinkingConten
     <div
       style={{
         border: "1px solid var(--border)",
-        borderRadius: 6,
+        borderRadius: "var(--radius-panel)",
         overflow: "hidden",
         fontSize: 13,
       }}
@@ -1553,7 +1568,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
   return (
     <div
       style={{
-        borderRadius: 7,
+        borderRadius: "var(--radius-panel)",
         overflow: "hidden",
         fontSize: 12,
         border: isError ? "1px solid rgba(248,113,113,0.45)" : "1px solid rgba(34,197,94,0.25)",
@@ -1665,15 +1680,11 @@ function getToolPreview(block: ToolCallContent): string {
   const keys = Object.keys(input);
   if (keys.length === 0) return "";
 
-  // Common tool input patterns
-  if ("command" in input) return String(input.command).slice(0, 120);
-  if ("path" in input) return String(input.path).slice(0, 120);
-  if ("file_path" in input) return String(input.file_path).slice(0, 120);
-  if ("pattern" in input) return String(input.pattern).slice(0, 120);
-  if ("query" in input) return String(input.query).slice(0, 120);
-
-  const first = input[keys[0]];
-  return String(first).slice(0, 120);
+  // 保留完整预览文本，活动行和调用块头部均由 CSS 负责单行省略。
+  for (const key of ["command", "path", "file_path", "pattern", "query"]) {
+    if (key in input) return String(input[key]);
+  }
+  return String(input[keys[0]]);
 }
 
 function formatCompactDuration(seconds: number): string {
@@ -1712,7 +1723,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
         position: "relative",
         marginTop: 4,
         marginBottom: 4,
-        borderRadius: 6,
+        borderRadius: "var(--radius-panel)",
         overflow: "hidden",
         border: "1px solid var(--border)",
       }}

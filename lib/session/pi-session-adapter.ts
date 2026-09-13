@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "../engine/loop-event";
 import type {
@@ -12,9 +12,31 @@ import { SessionPersistenceError } from "./errors.ts";
 /** 将 pi SessionManager 限制在 DeerHux 所需的公开能力集合内。 */
 export class PiSessionAdapter implements AgentSessionPort {
   private readonly manager: SessionManager;
+  private persistenceFailure?: SessionPersistenceError;
 
   constructor(manager: SessionManager) {
     this.manager = manager;
+    // Pi normally defers all writes until the first assistant response. DeerHux
+    // must persist prompt admission BEFORE the model can execute any tools.
+    // Use the public persistence hook for both adapter entries and engine messages
+    // so the first assistant response cannot duplicate an already-written header.
+    if (manager.isPersisted()) {
+      manager._persist = (entry) => {
+        if (this.persistenceFailure) throw this.persistenceFailure;
+        const file = manager.getSessionFile();
+        if (!file) throw new SessionPersistenceError("append_entry", manager.getSessionId(), "Missing session file");
+        try {
+          if (!existsSync(file)) {
+            writeFileSync(file, [manager.getHeader(), ...manager.getEntries()].map((item) => JSON.stringify(item)).join("\n") + "\n", { flag: "wx", mode: 0o600, flush: true });
+          } else {
+            appendFileSync(file, JSON.stringify(entry) + "\n", { flush: true });
+          }
+        } catch (error) {
+          this.persistenceFailure = new SessionPersistenceError("append_entry", manager.getSessionId(), error);
+          throw this.persistenceFailure;
+        }
+      };
+    }
   }
 
   get id(): string {
@@ -38,6 +60,7 @@ export class PiSessionAdapter implements AgentSessionPort {
   }
 
   getCustomEntries(customType: string): SessionCustomEntrySnapshot[] {
+    if (this.persistenceFailure) throw this.persistenceFailure;
     const result: SessionCustomEntrySnapshot[] = [];
     for (const entry of this.manager.getEntries()) {
       if (entry.type === "custom" && entry.customType === customType) {

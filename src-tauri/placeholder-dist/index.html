@@ -5,29 +5,132 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>DeerHux</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+      --base: #fcfcfc;
+      --fold-a: #bac1c66b;
+      --fold-b: #dce1e44d;
+      --fold-c: #ffffffdd;
+      --text: #202022;
+      --muted: #626268;
+      --border: #e3e3e5;
+      --brand: #ff6b1a;
+      --danger: #c52c50;
+      --danger-bg: #fdebf0;
+      --danger-border: #edc7d0;
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111214; color: #f5f5f4; }
-    main { width: min(440px, calc(100vw - 48px)); text-align: center; }
-    .mark { width: 44px; height: 44px; margin: 0 auto 24px; border: 1px solid #484a4f; border-radius: 12px; display: grid; place-items: center; font-weight: 750; letter-spacing: -.06em; background: #1a1b1e; }
-    h1 { margin: 0; font-size: 22px; letter-spacing: -.02em; }
-    p { margin: 10px 0 0; color: #9b9da3; line-height: 1.6; font-size: 14px; }
-    .progress { width: 180px; height: 2px; margin: 28px auto 0; overflow: hidden; background: #292b2f; border-radius: 2px; }
-    .progress::after { content: ""; display: block; width: 45%; height: 100%; background: #e7e7e5; animation: loading 1.15s ease-in-out infinite; }
-    .error .progress { display: none; }
-    .error .mark { color: #ffb4ab; border-color: #713b37; }
-    #detail { display: none; padding: 12px 14px; margin-top: 20px; text-align: left; overflow-wrap: anywhere; border: 1px solid #4f3535; border-radius: 8px; color: #ffc7c2; background: #241a1a; }
+    html, body { width: 100%; min-width: 320px; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      position: relative;
+      display: grid;
+      place-items: center;
+      background: var(--base);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    body::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: min(360px, 100vw);
+      pointer-events: none;
+      background:
+        linear-gradient(180deg, #ffffff 0%, #ffffffcc 12%, #ffffff00 30%, #ffffff00 78%, #ffffffdf 100%),
+        linear-gradient(126deg, #ffffff00 20%, var(--fold-a) 30%, var(--fold-b) 35%, var(--fold-c) 42%, #ffffff00 55%),
+        linear-gradient(151deg, #ffffff00 47%, #bfc7cc4d 59%, #ffffffd9 66%, #ffffff00 77%),
+        linear-gradient(102deg, #e6eaed 0%, #f6f8f9 35%, #ffffff 68%, var(--base) 100%);
+      background-size: 360px 900px;
+      background-repeat: no-repeat;
+    }
+    main {
+      position: relative;
+      z-index: 1;
+      width: min(420px, calc(100vw - 48px));
+      text-align: center;
+    }
+    .brand {
+      display: block;
+      width: min(196px, 100%);
+      height: auto;
+      margin: 0 auto 28px;
+      opacity: 0;
+      transform: translateY(5px);
+      animation: brand-in 360ms cubic-bezier(.2, .8, .2, 1) 60ms forwards;
+    }
+    .activity { display: flex; align-items: center; justify-content: center; gap: 9px; }
+    .activity-dot {
+      width: 6px;
+      height: 6px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--brand);
+      animation: activity-pulse 1.5s ease-in-out infinite;
+    }
+    h1 { margin: 0; color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.55; letter-spacing: 0; }
+    #message { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    #detail {
+      display: none;
+      max-height: min(180px, 30vh);
+      padding: 12px 14px;
+      margin: 20px 0 0;
+      overflow: auto;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--danger-border);
+      border-radius: 8px;
+      color: var(--danger);
+      background: var(--danger-bg);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.55;
+      text-align: left;
+      white-space: pre-wrap;
+    }
+    .error .activity-dot { display: none; }
+    .error h1 { color: var(--danger); }
     .error #detail { display: block; }
-    @keyframes loading { from { transform: translateX(-110%); } to { transform: translateX(330%); } }
-    @media (prefers-reduced-motion: reduce) { .progress::after { animation-duration: 2.5s; } }
+    @keyframes brand-in { to { opacity: 1; transform: translateY(0); } }
+    @keyframes activity-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --base: #282a2b;
+        --fold-a: #777c8026;
+        --fold-b: #555a5d20;
+        --fold-c: #ffffff0d;
+        --text: #ededee;
+        --muted: #b0b0b6;
+        --border: #3c3c40;
+        --brand: #ff8a45;
+        --danger: #ff8ba6;
+        --danger-bg: #3c222c;
+        --danger-border: #63404a;
+      }
+      body::before {
+        background:
+          linear-gradient(180deg, #242526 0%, #242526e8 12%, #24252600 34%, #24252600 80%, #242526e0 100%),
+          linear-gradient(126deg, #ffffff00 18%, var(--fold-a) 31%, var(--fold-b) 37%, var(--fold-c) 43%, #ffffff00 58%),
+          linear-gradient(151deg, #ffffff00 45%, #7b808426 59%, #ffffff0a 66%, #ffffff00 77%),
+          linear-gradient(102deg, #303234 0%, #27292b 32%, #242526 65%, var(--base) 100%);
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .brand { opacity: 1; transform: none; animation: none; }
+      .activity-dot { animation: none; opacity: 1; }
+    }
   </style>
 </head>
 <body>
   <main id="status" role="status" aria-live="polite">
-    <div class="mark">D</div>
-    <h1 id="title">正在启动 DeerHux</h1>
-    <p id="message">正在准备本地服务，通常只需几秒钟。</p>
-    <div class="progress" aria-hidden="true"></div>
+    <picture>
+      <source srcset="deerhux-v2-lockup-dark.svg" media="(prefers-color-scheme: dark)">
+      <img class="brand" src="deerhux-v2-lockup.svg" alt="DeerHux" width="620" height="180">
+    </picture>
+    <div class="activity">
+      <span class="activity-dot" aria-hidden="true"></span>
+      <h1 id="title">正在启动 DeerHux</h1>
+    </div>
+    <p id="message">正在准备本地工作区</p>
     <p id="detail"></p>
   </main>
   <script>

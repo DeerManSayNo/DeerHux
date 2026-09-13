@@ -1,0 +1,31 @@
+.chat-window-surface,
+.chat-session-frame {
+  --bg: #ffffff;
+  --session-bg: #ffffff;
+  --composer-bg: #ffffff;
+  --shadow-composer: 0 2px 5px #20202212, 0 6px 16px #2020220f;
+}
+
+.chat-window-surface,
+.chat-session-frame {
+  background: var(--session-bg);
+}
+
+html.dark :is(.chat-window-surface, .chat-session-frame) {
+  --bg: rgb(23, 23, 23);
+  --session-bg: rgb(23, 23, 23);
+  --composer-bg: rgb(37, 38, 40);
+  --shadow-composer: 0 2px 5px #00000047, 0 6px 16px #0000002e;
+}
+
+.chat-window-surface .user-message-bubble:has(textarea:focus) {
+  border-color: var(--text-dim) !important;
+  box-shadow: none !important;
+}
+
+.chat-window-surface [data-composer-toolbar] {
+  border-top: 0;
+  padding-top: 6px;
+}
+
+.chat-window-surface [data-composer-toolbar] button { border-radius: var(--radius-control); }

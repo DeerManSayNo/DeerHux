@@ -6,6 +6,7 @@ import type { AgentSessionPort } from "../lib/session/port.ts";
 import type { ModelCatalogPort } from "../lib/model/port.ts";
 import type { ProjectResourcePort } from "../lib/project-resource/port.ts";
 import type { McpRuntime, McpRuntimeLease } from "../lib/mcp-runtime.ts";
+import { FILE_CHANGE_SNAPSHOT_ENTRY, readFileChangeSnapshot } from "../lib/file-change-snapshot.ts";
 
 const gate = () => {
   let resolve!: () => void;
@@ -302,6 +303,54 @@ for (const invalidate of ["abort", "destroy"] as const) {
   runListener?.({ type: "agent_end", willRetry: false, stopReason: "aborted" });
   assert.equal(runWrapper.getLastRun()?.status, "cancelled");
   runWrapper.destroy();
+}
+
+// 外部路径必须进入本轮账本；参数、失败和其他轮次不能冒充修改证据。
+{
+  const saved: unknown[] = [];
+  const changesSession = { ...session, persisted: true, appendCustomEntry(type: string, data: unknown) {
+    if (type === FILE_CHANGE_SNAPSHOT_ENTRY) saved.push(structuredClone(data));
+    return "snapshot-entry";
+  } } as AgentSessionPort;
+  const changesWrapper = new AgentSessionWrapper(engine, changesSession, models, resources, null, null, "agent");
+  const internals = changesWrapper as unknown as {
+    handleEngineEvent(event: { type: string; [key: string]: unknown }, island: unknown, turnKey: string): Promise<void>;
+    consumeChangedFiles(turnKey: string): string[];
+  };
+  const events: { type: string; [key: string]: unknown }[] = [];
+  changesWrapper.onEvent((event) => {
+    if (event.type === "agent_end" && event.willRetry !== true) assert.ok(saved.length > 0, "snapshot must be saved before terminal broadcast");
+    events.push(event);
+  });
+  const emit = (event: { type: string; [key: string]: unknown }, turn = "external-turn") =>
+    internals.handleEngineEvent(event, { handleEvent() {} }, turn);
+  const outside = "/tmp/deerhux-outside-deleted.txt";
+  await emit({ type: "tool_execution_start", toolName: "write", toolCallId: "failed", args: { filePath: outside } });
+  assert.equal(events.filter((event) => event.type === "agent_file_changed").length, 0);
+  await emit({ type: "tool_execution_end", toolName: "write", toolCallId: "failed", isError: true });
+  assert.deepEqual(internals.consumeChangedFiles("external-turn"), []);
+  await emit({ type: "tool_execution_end", toolName: "write", isError: false, args: { filePath: outside }, changedFiles: [] });
+  assert.deepEqual(internals.consumeChangedFiles("external-turn"), [], "explicit empty evidence overrides fallback arguments");
+  await emit({ type: "tool_execution_end", toolName: "bash", changedFiles: [outside, outside], fileChanges: [{ filePath: outside, beforeExists: false, afterExists: true }] });
+  await emit({ type: "tool_execution_end", toolName: "edit", changedFiles: [outside], fileChanges: [{ filePath: outside, beforeExists: true, afterExists: true }] });
+  await emit({ type: "tool_execution_end", toolName: "write", changedFiles: ["/tmp/other-turn.txt"] }, "other-turn");
+  await emit({ type: "agent_end", willRetry: true });
+  assert.equal(saved.length, 0, "retry is not a completed snapshot");
+  await emit({ type: "agent_end", willRetry: false });
+  const end = events.findLast((event) => event.type === "agent_end");
+  assert.deepEqual(end?.changedFiles, [outside]);
+  assert.deepEqual(end?.fileChanges, [{ filePath: outside, beforeExists: false, afterExists: true }], "new then edited must remain new in the terminal list");
+  assert.deepEqual(readFileChangeSnapshot(end?.fileChangeSnapshot), saved[0]);
+  await emit({ type: "agent_end", willRetry: false });
+  assert.equal(saved.length, 1, "duplicate terminal event must not overwrite a completed snapshot with empty data");
+  assert.deepEqual(events.findLast((event) => event.type === "agent_end")?.changedFiles, [outside]);
+  assert.deepEqual(events.find((event) => event.type === "agent_file_changed")?.fileChange, { filePath: outside, beforeExists: false, afterExists: true });
+  assert.deepEqual(internals.consumeChangedFiles("other-turn"), ["/tmp/other-turn.txt"]);
+  await emit({ type: "agent_end", changedFiles: [outside], willRetry: false }, "engine-end-turn");
+  assert.deepEqual(events.findLast((event) => event.type === "agent_end")?.changedFiles, [outside]);
+  await emit({ type: "agent_end", willRetry: false, stopReason: "aborted" }, "empty-turn");
+  assert.deepEqual(readFileChangeSnapshot(saved.at(-1))?.changedFiles, [], "empty and aborted turns replace the previous visible result");
+  changesWrapper.destroy();
 }
 
 console.log("wrapper turn admission behavior tests passed");

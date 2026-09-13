@@ -1,5 +1,7 @@
+import { mergeFileChanges, readFileChanges, type FileChange } from "./file-changes";
+import { createFileChangeSnapshot, FILE_CHANGE_SNAPSHOT_ENTRY, type FileChangeSnapshot } from "./file-change-snapshot";
 import { skillReference, normalizeSkillNames } from "@/lib/skill-selection";
-import path from "path";
+import { resolveChangedFilePath } from "./changed-file-path";
 import { cacheSessionPath, forceRefreshSessionList } from "./session-reader";
 import type { AgentEnginePort, ToolInfo } from "./engine/port";
 import { buildLiveToolsSection, orderToolNames } from "./engine/tool-prompt";
@@ -185,11 +187,14 @@ function extractToolName(event: AgentEvent): string {
 }
 
 function extractChangedFilePaths(event: AgentEvent): string[] {
-  if (event.type === "tool_execution_end" && Array.isArray(event.changedFiles)) {
+  if (event.type !== "tool_execution_end") return [];
+  if (Array.isArray(event.changedFiles)) {
     const changedFiles = event.changedFiles.filter((filePath): filePath is string => typeof filePath === "string" && filePath.trim().length > 0);
-    if (changedFiles.length > 0) return changedFiles;
+    return changedFiles;
   }
 
+  // 失败的工具参数不是修改证据；失败前落盘的变化由执行器的快照提供。
+  if (event.isError === true) return [];
   const fallbackPath = extractChangedFilePath(event);
   return fallbackPath ? [fallbackPath] : [];
 }
@@ -208,15 +213,6 @@ function extractChangedFilePath(event: AgentEvent): string | null {
     ?? getNestedString(event, ["result", "filePath"])
     ?? getNestedString(event, ["result", "path"])
     ?? getNestedString(event, ["result", "file_path"]);
-}
-
-function resolveChangedFilePath(filePath: string, cwd: string): string | null {
-  if (!filePath || !filePath.trim() || filePath.includes("\0")) return null;
-  const resolvedCwd = path.resolve(cwd);
-  const resolved = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(resolvedCwd, filePath);
-  const relative = path.relative(resolvedCwd, resolved);
-  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
-  return resolved;
 }
 
 const TURN_CONTEXT_BLOCK_RE = /\n*<turn_context>[\s\S]*?<\/turn_context>\s*/g;
@@ -324,6 +320,8 @@ export class AgentSessionWrapper {
   private agentEventQueue: Promise<void> = Promise.resolve();
   /** 工具事件已明确归属的路径；以 turnId 分桶，避免延迟事件污染下一回合。 */
   private changedFilesByTurn = new Map<string, Set<string>>();
+  private fileChangesByTurn = new Map<string, FileChange[]>();
+  private completedFileSnapshots = new Map<string, FileChangeSnapshot>();
   private unsubscribe: (() => void) | null = null;
   private idlePulseInterval: ReturnType<typeof setInterval> | null = null;
   private lastActiveAt = Date.now();
@@ -750,9 +748,37 @@ export class AgentSessionWrapper {
     return changedFiles;
   }
 
+  private consumeFileChanges(turnKey = this.currentTurnKey): FileChange[] {
+    if (!turnKey) return [];
+    const changes = this.fileChangesByTurn.get(turnKey) ?? [];
+    this.fileChangesByTurn.delete(turnKey);
+    return changes;
+  }
+
   private enrichFallbackTerminalEvent(event: AgentEvent): AgentEvent {
     const changedFiles = this.consumeChangedFiles();
-    return changedFiles.length > 0 ? { ...event, changedFiles } : event;
+    const fileChanges = this.consumeFileChanges();
+    return this.saveFileChangeSnapshot({ ...event, changedFiles, fileChanges }, this.currentTurnKey);
+  }
+
+  private saveFileChangeSnapshot(event: AgentEvent, turnKey: string | null): AgentEvent {
+    if (!turnKey) return event;
+    let snapshot = this.completedFileSnapshots.get(turnKey);
+    if (!snapshot) {
+      snapshot = createFileChangeSnapshot(turnKey, event.changedFiles ?? [], readFileChanges(event.fileChanges));
+      try {
+        // 在终态广播之前落盘；空结果也保存，防止下一次打开恢复上一轮的列表。
+        this.session.appendCustomEntry(FILE_CHANGE_SNAPSHOT_ENTRY, snapshot);
+      } catch (error) {
+        console.warn("Failed to persist file change snapshot:", error);
+      }
+      this.completedFileSnapshots.set(turnKey, snapshot);
+      if (this.completedFileSnapshots.size > 32) {
+        this.completedFileSnapshots.delete(this.completedFileSnapshots.keys().next().value!);
+      }
+    }
+    const eventSnapshot = createFileChangeSnapshot(snapshot.turnId, snapshot.changedFiles, snapshot.fileChanges, snapshot.capturedAt);
+    return { ...event, changedFiles: [...snapshot.changedFiles], fileChanges: snapshot.fileChanges.map((change) => ({ ...change })), fileChangeSnapshot: eventSnapshot };
   }
 
   private appendRuntimeAudit(customType: "auto_retry" | "abort" | "recover", data: Record<string, unknown>): void {
@@ -826,7 +852,12 @@ export class AgentSessionWrapper {
               .filter((filePath): filePath is string => filePath !== null)
           : [];
         const changedFiles = [...new Set([...this.consumeChangedFiles(turnKey), ...engineChangedFiles])];
-        if (changedFiles.length > 0) emittedEvent = { ...event, changedFiles };
+        const incomingChanges = currentCwd ? readFileChanges(event.fileChanges).flatMap((change) => {
+          const filePath = resolveChangedFilePath(change.filePath, currentCwd);
+          return filePath && changedFiles.includes(filePath) ? [{ ...change, filePath }] : [];
+        }) : [];
+        const fileChanges = mergeFileChanges(this.consumeFileChanges(turnKey), incomingChanges);
+        emittedEvent = this.saveFileChangeSnapshot({ ...event, changedFiles, fileChanges }, turnKey);
       }
 
       if (event.type === "auto_retry_start") {
@@ -873,6 +904,10 @@ export class AgentSessionWrapper {
       if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
         this.pendingToolEvents.delete(event.toolCallId);
       }
+      const changes = currentCwd ? readFileChanges(sourceEvent.fileChanges).flatMap((change) => {
+        const filePath = resolveChangedFilePath(change.filePath, currentCwd);
+        return filePath ? [{ ...change, filePath }] : [];
+      }) : [];
       const changedFilePaths = extractChangedFilePaths(sourceEvent);
       if (changedFilePaths.length > 0 && currentCwd) {
         const seenChangedFiles = new Set<string>();
@@ -884,9 +919,14 @@ export class AgentSessionWrapper {
             this.beginChangedFilesTurn(turnKey);
             this.changedFilesByTurn.get(turnKey)!.add(resolved);
           }
+          const fileChange = changes.find((change) => change.filePath === resolved);
+          if (turnKey && fileChange) {
+            this.fileChangesByTurn.set(turnKey, mergeFileChanges(this.fileChangesByTurn.get(turnKey) ?? [], [fileChange]));
+          }
           const fileChangedEvent: AgentEvent = {
             type: "agent_file_changed",
             filePath: resolved,
+            ...(fileChange ? { fileChange } : {}),
             toolName: extractToolName(sourceEvent),
             ...(typeof sourceEvent.toolCallId === "string" ? { toolCallId: sourceEvent.toolCallId } : {}),
           };
@@ -1520,6 +1560,7 @@ export class AgentSessionWrapper {
       return { turnId: turnKey };
     } catch (error) {
       this.changedFilesByTurn.delete(turnKey);
+      this.fileChangesByTurn.delete(turnKey);
       const aborted = error instanceof DOMException && error.name === "AbortError";
       this.transitionCurrentRun({
         status: aborted ? "cancelled" : "failed",
@@ -1558,6 +1599,7 @@ export class AgentSessionWrapper {
       return { turnId: turnKey };
     } catch (error) {
       this.changedFilesByTurn.delete(turnKey);
+      this.fileChangesByTurn.delete(turnKey);
       this._turnActive = false;
       const aborted = error instanceof DOMException && error.name === "AbortError";
       this.transitionCurrentRun({
@@ -2124,6 +2166,8 @@ export class AgentSessionWrapper {
       }
     }
     this.changedFilesByTurn.clear();
+    this.fileChangesByTurn.clear();
+    this.completedFileSnapshots.clear();
     // Abort any ongoing agent turn (streaming, tools, retries) so underlying
     // WebSocket connections and child processes are released promptly.
     // Fire-and-forget: destroy() is called synchronously from idle timeout,

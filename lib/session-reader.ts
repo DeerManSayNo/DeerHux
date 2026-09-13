@@ -1,4 +1,5 @@
 import { normalizeTurnSkillContext } from "./turn-skill-evidence";
+import { FILE_CHANGE_SNAPSHOT_ENTRY, readFileChangeSnapshot, type FileChangeSnapshot } from "./file-change-snapshot";
 import type { TurnSkillContext } from "./types";
 import { skillNames, skillReference } from "@/lib/skill-selection";
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -478,12 +479,12 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   // Needed for fork and navigate_tree calls from the UI.
   let targetLeaf: SessionEntry | undefined;
   if (leafId === null) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent", collaborationRuns: [] };
+    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent", collaborationRuns: [], fileChangeSnapshot: null };
   }
   if (leafId) targetLeaf = byId.get(leafId);
   if (!targetLeaf) targetLeaf = entries[entries.length - 1];
   if (!targetLeaf) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent", collaborationRuns: [] };
+    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent", collaborationRuns: [], fileChangeSnapshot: null };
   }
 
   const normalizeReferences = (value: unknown): FileReference[] => {
@@ -511,12 +512,19 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
 
   let roleId: string | null = null;
   let agentMode: AgentMode = "agent";
+  let fileChangeSnapshot: FileChangeSnapshot | null = null;
   // 协作 run 快照：同一个 runId 可能因状态更新被 upsert 多次，这里按出现顺序
   // 覆盖，最终保留每个 runId 在 path 上的最后一条（即最新快照）。
   const collabRunsByRunId = new Map<string, CollaborationRunSnapshot>();
   const turnContextByMessageId = new Map<string, { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference; skillContext?: TurnSkillContext }>();
   let pendingTurnContext: { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference; skillContext?: TurnSkillContext } | null = null;
   for (const e of path) {
+    // 只读取当前分支；新用户回合开始后不回退显示上一轮的快照。
+    if ((e.type === "message" && e.message.role === "user")
+      || (e.type === "custom" && e.customType === "turn_context")) fileChangeSnapshot = null;
+    if (e.type === "custom" && e.customType === FILE_CHANGE_SNAPSHOT_ENTRY) {
+      fileChangeSnapshot = readFileChangeSnapshot(e.data);
+    }
     if (e.type === "custom" && (e as { customType?: string }).customType === "role_profile") {
       const data = (e as { data?: { roleId?: unknown } }).data;
       roleId = typeof data?.roleId === "string" && data.roleId.trim() ? data.roleId.trim() : null;
@@ -690,6 +698,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     roleId,
     agentMode,
     collaborationRuns: [...collabRunsByRunId.values()],
+    fileChangeSnapshot,
   };
 }
 

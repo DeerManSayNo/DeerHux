@@ -1,5 +1,7 @@
 "use client";
 
+import { AppIcon } from "./AppIcon";
+
 import { open } from "@tauri-apps/plugin-dialog";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties } from "react";
@@ -887,10 +889,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   return (
-    <div ref={sidebarRef} className="sidebar-navigation" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+    <div ref={sidebarRef} className="sidebar-navigation" data-compact={Boolean(compact)} style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* Header */}
       <div
         ref={headerRef}
+        className="workbench-navigation-header"
         style={{
           padding: compact ? "8px 6px" : "33px 8px 0",
           flexShrink: 0,
@@ -899,6 +902,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         <div style={{ display: "flex", flexDirection: searchOpen ? "row" : compact ? "row" : "column", alignItems: searchOpen || compact ? "center" : "stretch", justifyContent: compact ? "center" : "space-between", gap: compact ? 6 : 2 }}>
           {!searchOpen ? (
             <button
+              className="workbench-new-session"
               onClick={handleNewSession}
               disabled={false}
               style={{
@@ -914,10 +918,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 width: compact ? 34 : "100%",
                 minWidth: 0,
                 padding: compact ? 0 : "0 10px",
-                borderRadius: compact ? 999 : 9,
+                borderRadius: compact ? "var(--radius-circle)" : "var(--radius-control)",
                 fontSize: compact ? 12 : 13,
                 fontWeight: 500,
-                letterSpacing: "-0.01em",
+                letterSpacing: 0,
                 flex: compact ? "0 0 auto" : "1 1 auto",
                 order: compact ? 0 : 1,
                 transition: "background 0.12s, color 0.12s",
@@ -933,20 +937,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 e.currentTarget.style.color = "var(--text-muted)";
               }}
             >
-              <svg
-                width={compact ? 14 : 13}
-                height={compact ? 14 : 13}
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{ flexShrink: 0 }}
-              >
-                <path d="M3.7 4.3 21 12 3.7 19.7l3.2-7.7-3.2-7.7Z" />
-                <path d="M6.9 12H21" />
-              </svg>
+              <AppIcon name="add" size="toolbar" style={{...({ flexShrink: 0 })}} />
               {!compact && <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>新建会话</span>}
             </button>
           ) : (
@@ -961,20 +952,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 alignItems: "center",
               }}
             >
-              <svg
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{ position: "absolute", left: 10, color: "var(--text-dim)", pointerEvents: "none" }}
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
+              <AppIcon name="search" size="compact" style={{...({ position: "absolute", left: 10, color: "var(--text-dim)", pointerEvents: "none" })}} />
               <input
                 ref={searchInputRef}
                 value={searchQuery}
@@ -991,7 +969,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   width: "100%",
                   height: "100%",
                   border: "1px solid var(--border)",
-                  borderRadius: compact ? 999 : 8,
+                  borderRadius: "var(--radius-panel)",
                   background: "var(--bg)",
                   color: "var(--text)",
                   outline: "none",
@@ -1019,7 +997,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               gap: compact || searchOpen ? 0 : 10,
               width: compact || searchOpen ? 34 : "100%",
               height: compact ? 34 : searchOpen ? 36 : 38,
-              borderRadius: compact ? 999 : searchOpen ? 8 : 9,
+              borderRadius: compact ? "var(--radius-circle)" : "var(--radius-control)",
               border: compact ? "1px solid var(--border)" : "none",
               background: compact ? "var(--bg-hover)" : "transparent",
               color: "var(--text-muted)",
@@ -1029,7 +1007,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               padding: compact || searchOpen ? 0 : "0 10px",
               fontSize: compact ? 12 : 13,
               fontWeight: 500,
-              letterSpacing: "-0.01em",
+              letterSpacing: 0,
               transition: "background 0.12s, color 0.12s",
             }}
             title={searchOpen ? "关闭搜索" : "搜索"}
@@ -1044,26 +1022,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             }}
           >
             {searchOpen ? (
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
+              <AppIcon name="close" size="compact" />
             ) : (
               <>
-                <svg
-                  width={compact ? 14 : 13}
-                  height={compact ? 14 : 13}
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  style={{ flexShrink: 0 }}
-                >
-                  <circle cx="11" cy="11" r="8" />
-                  <path d="m21 21-4.35-4.35" />
-                </svg>
+                <AppIcon name="search" size="toolbar" style={{...({ flexShrink: 0 })}} />
                 {!compact && <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>搜索</span>}
               </>
             )}
@@ -1156,22 +1118,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   aria-expanded={allProjectsState === "expanded"}
                 >
                   项目
-                  <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ transform: allProjectsState === "expanded" ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
-                    <polyline points="3 2 7 5 3 8" />
-                  </svg>
+                  <AppIcon name="chevron-right" size="inline" style={{...({ transform: allProjectsState === "expanded" ? "rotate(90deg)" : "none", transition: "transform 0.15s" })}} />
                 </button>
                 <div style={{ display: "flex", alignItems: "center", gap: 2, flex: "0 0 auto", flexWrap: "nowrap" }}>
                   <button type="button" className="sidebar-heading-action" onClick={handleCustomPath} title="添加项目" aria-label="添加项目">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3 7.5V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v2" />
-                      <path d="M12 14v7M8.5 17.5h7" />
-                    </svg>
+                    <AppIcon name="add-folder" size="compact" />
                   </button>
                   <button type="button" className="sidebar-heading-action" onClick={() => void handleRefreshProjects()} disabled={refreshing} title="刷新项目和会话" aria-label="刷新项目和会话">
                     {projectsRefreshDone ? (
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                      <AppIcon name="check" size="compact" style={{ color: "var(--success)" }} />
                     ) : (
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></svg>
+                      <AppIcon name="refresh" size="compact" />
                     )}
                   </button>
                 </div>
@@ -1239,7 +1196,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         {compact && (
           <div style={{ padding: "6px 0", display: "flex", justifyContent: "center" }}>
             <button type="button" className="sidebar-heading-action" onClick={handleCustomPath} title="添加项目" aria-label="添加项目">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
+              <AppIcon name="add" size="compact" />
             </button>
           </div>
         )}
@@ -1258,7 +1215,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           padding: "7px 9px",
           background: "transparent",
           border: "none",
-          borderRadius: 7,
+          borderRadius: "var(--radius-control)",
           color: "var(--text-muted)",
           cursor: "pointer",
           textAlign: "left",
@@ -1275,7 +1232,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               padding: 6,
               background: "var(--bg-panel)",
               border: "1px solid var(--border)",
-              borderRadius: 10,
+              borderRadius: "var(--radius-panel)",
               boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
             }}
             onClick={(e) => e.stopPropagation()}
@@ -1336,7 +1293,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               width: "min(440px, calc(100vw - 40px))",
               background: "var(--bg-panel)",
               border: "1px solid var(--border)",
-              borderRadius: 12,
+              borderRadius: "var(--radius-panel)",
               boxShadow: "0 16px 40px rgba(0,0,0,0.3)",
               padding: 18,
             }}
@@ -1352,20 +1309,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             >
               {confirmPurge.cwd}
             </div>
-            <div style={{ fontSize: 12, color: "#ef4444", lineHeight: 1.6, marginBottom: 16, padding: "8px 10px", background: "rgba(239,68,68,0.08)", borderRadius: 8, border: "1px solid rgba(239,68,68,0.2)" }}>
+            <div style={{ fontSize: 12, color: "#ef4444", lineHeight: 1.6, marginBottom: 16, padding: "8px 10px", background: "rgba(239,68,68,0.08)", borderRadius: "var(--radius-panel)", border: "1px solid rgba(239,68,68,0.2)" }}>
               此操作不可恢复，将永久删除该项目目录下的全部会话文件（.jsonl）。如仅需从侧边栏隐藏，请使用“删除项目引入”。
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <button
                 onClick={() => setConfirmPurge(null)}
-                style={{ padding: "7px 16px", background: "transparent", border: "1px solid var(--border)", borderRadius: 7, color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
+                style={{ padding: "7px 16px", background: "transparent", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
               >
                 取消
               </button>
               <button
                 disabled={purging}
                 onClick={() => { void executePurge(); }}
-                style={{ padding: "7px 16px", background: purging ? "#b91c1c99" : "#dc2626", border: "none", borderRadius: 7, color: "#fff", cursor: purging ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}
+                style={{ padding: "7px 16px", background: purging ? "#b91c1c99" : "#dc2626", border: "none", borderRadius: "var(--radius-control)", color: "#fff", cursor: purging ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}
               >
                 {purging ? "删除中…" : "确认删除"}
               </button>
@@ -1394,7 +1351,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               width: "min(400px, calc(100vw - 40px))",
               background: "var(--bg-panel)",
               border: "1px solid var(--border)",
-              borderRadius: 12,
+              borderRadius: "var(--radius-panel)",
               boxShadow: "0 16px 40px rgba(0,0,0,0.3)",
               padding: 18,
             }}
@@ -1405,7 +1362,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
               <button
                 onClick={() => setPurgeResult(null)}
-                style={{ padding: "7px 16px", background: "var(--accent)", border: "none", borderRadius: 7, color: "#fff", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+                style={{ padding: "7px 16px", background: "var(--accent)", border: "none", borderRadius: "var(--radius-control)", color: "#fff", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
               >
                 确定
               </button>
@@ -1480,6 +1437,8 @@ function ProjectSection({
       }}
     >
       <div
+        className={compact ? undefined : "sidebar-project-row"}
+        data-active={isActiveProject && !selectedInProject}
         role="button"
         tabIndex={0}
         onKeyDown={(event) => {
@@ -1497,11 +1456,11 @@ function ProjectSection({
         }}
         style={{
           margin: compact ? "3px 6px" : "0 8px",
-          borderRadius: compact ? 999 : 9,
+          borderRadius: compact ? "var(--radius-circle)" : "var(--radius-control)",
           width: compact ? "calc(100% - 12px)" : "calc(100% - 16px)",
           display: "flex",
           alignItems: "center",
-          height: compact ? 30 : 38,
+          height: compact ? 30 : "var(--sidebar-project-height, 38px)",
           justifyContent: compact ? "center" : undefined,
           gap: compact ? 0 : 9,
           padding: compact ? 0 : "0 10px",
@@ -1522,7 +1481,7 @@ function ProjectSection({
             style={{
               width: 30,
               height: 30,
-              borderRadius: "50%",
+              borderRadius: "var(--radius-circle)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -1541,20 +1500,16 @@ function ProjectSection({
           </span>
         ) : (
           <>
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: selectedInProject || isActiveProject ? "var(--text)" : "var(--text-muted)" }}>
-              <path d="M3 7.5V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
-            </svg>
-            <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: selectedInProject || isActiveProject ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: "-0.01em" }}>
+            <AppIcon name="files" size="toolbar" style={{...({ flexShrink: 0, color: selectedInProject || isActiveProject ? "var(--text)" : "var(--text-muted)" })}} />
+            <span style={{ flex: 1, minWidth: 0, fontSize: "var(--sidebar-project-font, 13px)", fontWeight: selectedInProject || isActiveProject ? 500 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", letterSpacing: 0 }}>
               {projectTitle}
               {project.note && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · {project.note}</span>}
             </span>
             {project.pinned && (
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-label="已置顶"><path d="m14 4 6 6-3 1-4 4-1 5-2-2-2-2 5-1 4-4Z" /></svg>
+              <AppIcon name="pin" size="inline" label="已置顶" style={{color: "var(--text-dim)", }} />
             )}
             <ProjectBranch cwd={project.cwd} refreshKey={branchRefreshKey} />
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: "var(--text-dim)" }}>
-              <polyline points="3 2 7 5 3 8" />
-            </svg>
+            <AppIcon name="chevron-right" size="inline" style={{...({ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: "var(--text-dim)" })}} />
           </>
         )}
       </div>
@@ -1801,7 +1756,7 @@ function SessionItem({
   }, [session.id]);
 
   // Fixed-height outer wrapper — content swaps in place so the list never reflows
-  const ITEM_HEIGHT = compact ? 28 : showProject ? 44 : 36;
+  const ITEM_HEIGHT = compact ? 28 : showProject ? "var(--sidebar-recent-height, 44px)" : "var(--sidebar-session-height, 36px)";
 
   return (
     <div
@@ -1845,7 +1800,7 @@ function SessionItem({
           ? "rgba(239,68,68,0.06)"
           : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
         border: "none",
-        borderRadius: compact ? 8 : 9,
+        borderRadius: "var(--radius-control)",
         margin: compact ? "2px 6px" : "0 8px",
         width: compact ? undefined : "calc(100% - 16px)",
         transition: "background 0.1s, color 0.1s",
@@ -1867,17 +1822,12 @@ function SessionItem({
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
                 height: 30, padding: "0 11px",
                 background: "#ef4444", border: "none",
-                borderRadius: 6, color: "#fff",
+                borderRadius: "var(--radius-control)", color: "#fff",
                 cursor: "pointer", fontSize: 12, fontWeight: 600,
                 whiteSpace: "nowrap",
               }}
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                <path d="M10 11v6M14 11v6" />
-                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-              </svg>
+              <AppIcon name="delete" size="inline" />
               删除
             </button>
             <button
@@ -1886,7 +1836,7 @@ function SessionItem({
                 display: "flex", alignItems: "center", justifyContent: "center",
                 height: 30, padding: "0 11px",
                 background: "var(--bg)", border: "1px solid var(--border)",
-                borderRadius: 6, color: "var(--text-muted)",
+                borderRadius: "var(--radius-control)", color: "var(--text-muted)",
                 cursor: "pointer", fontSize: 12, fontWeight: 500,
                 whiteSpace: "nowrap",
               }}
@@ -1912,7 +1862,7 @@ function SessionItem({
             fontSize: 12,
             padding: "5px 8px",
             border: "1px solid var(--accent)",
-            borderRadius: 5,
+            borderRadius: "var(--radius-panel)",
             outline: "none",
             background: "var(--bg)",
             color: "var(--text)",
@@ -1928,7 +1878,7 @@ function SessionItem({
               style={{
                 width: 28,
                 height: 28,
-                borderRadius: "50%",
+                borderRadius: "var(--radius-circle)",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -1951,24 +1901,19 @@ function SessionItem({
             <>
           {/* Fork indicator for child sessions */}
           {depth > 0 && !compact && (
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <line x1="6" y1="3" x2="6" y2="15" />
-              <circle cx="18" cy="6" r="3" />
-              <circle cx="6" cy="18" r="3" />
-              <path d="M18 9a9 9 0 0 1-9 9" />
-            </svg>
+            <AppIcon name="subagent" size="inline" style={{color: "var(--text-dim)", ...({ flexShrink: 0 })}} />
           )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
               style={{
-                fontSize: 12.5,
-                fontWeight: isSelected ? 550 : 400,
-                lineHeight: 1.35,
+                fontSize: "var(--sidebar-session-font, 12.5px)",
+                fontWeight: isSelected ? 500 : 400,
+                lineHeight: 1.5,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
                 color: "var(--text)",
-                letterSpacing: "-0.01em",
+                letterSpacing: 0,
               }}
               title={title}
             >
@@ -2003,9 +1948,7 @@ function SessionItem({
                 transition: "transform 0.15s",
               }}
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="2 3.5 5 6.5 8 3.5" />
-              </svg>
+              <AppIcon name="chevron-down" size="inline" />
             </button>
           )}
 
@@ -2029,7 +1972,7 @@ function SessionItem({
                   display: "flex", alignItems: "center", justifyContent: "center",
                   width: 24, height: 24, padding: 0,
                   background: "transparent", border: "none",
-                  borderRadius: 6, color: "var(--text-muted)",
+                  borderRadius: "var(--radius-control)", color: "var(--text-muted)",
                   cursor: "pointer", flexShrink: 0,
                   transition: "background 0.12s, color 0.12s, border-color 0.12s",
                 }}
@@ -2043,9 +1986,7 @@ function SessionItem({
                   e.currentTarget.style.color = "var(--text-muted)";
                 }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                </svg>
+                <AppIcon name="edit" size="compact" />
               </button>
               <button
                 onClick={handleDeleteClick}
@@ -2054,7 +1995,7 @@ function SessionItem({
                   display: "flex", alignItems: "center", justifyContent: "center",
                   width: 24, height: 24, padding: 0,
                   background: "transparent", border: "none",
-                  borderRadius: 6, color: "var(--text-muted)",
+                  borderRadius: "var(--radius-control)", color: "var(--text-muted)",
                   cursor: "pointer", flexShrink: 0,
                   transition: "background 0.12s, color 0.12s, border-color 0.12s",
                 }}
@@ -2068,12 +2009,7 @@ function SessionItem({
                   e.currentTarget.style.color = "var(--text-muted)";
                 }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6" />
-                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                  <path d="M10 11v6M14 11v6" />
-                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                </svg>
+                <AppIcon name="delete" size="compact" />
               </button>
             </div>
           )}
@@ -2096,7 +2032,7 @@ function SessionItem({
             padding: 6,
             background: "var(--bg-panel)",
             border: "1px solid var(--border)",
-            borderRadius: 10,
+            borderRadius: "var(--radius-panel)",
             boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
           }}
         >
@@ -2125,7 +2061,7 @@ function SessionItem({
               padding: "7px 9px",
               background: "transparent",
               border: "none",
-              borderRadius: 7,
+              borderRadius: "var(--radius-control)",
               color: contextMenu.copied ? "var(--accent)" : "var(--text-muted)",
               cursor: "pointer",
               textAlign: "left",
