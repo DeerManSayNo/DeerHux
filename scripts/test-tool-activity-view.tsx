@@ -13,7 +13,9 @@ let html = render(["b"]);
 assert.equal((html.match(/class="tool-activity-row"/g) ?? []).length, 1);
 assert.match(html, /正在运行命令 · npm run lint/);
 assert.doesNotMatch(html, /较早的工具调用/);
-assert.match(render([]), /等待执行：运行命令/);
+const pendingHtml = render([]);
+assert.match(pendingHtml, /等待执行：运行命令/);
+assert.match(pendingHtml, /tool-activity-spinner/, "等待工具开始执行时应显示 loading");
 results.set("b", { role: "toolResult", toolCallId: "b", toolName: "bash", content: [], isError: true });
 html = render(["b"]);
 assert.match(html, /已读取文件并运行了命令/);
@@ -39,6 +41,7 @@ assert.doesNotMatch(html, /tool-activity-row/, "消息中不重复显示当前�
 html = renderToStaticMarkup(<StreamingToolHistory group={bottom.bottomGroup!} expanded={false} onToggle={() => {}} statusLabel="工具已完成，等待模型继续..." />);
 assert.match(html, /工具已完成，等待模型继续/);
 assert.doesNotMatch(html, /等待执行：/);
+assert.match(html, /tool-activity-spinner/, "回合仍在等待模型时应继续显示 loading");
 html = renderToStaticMarkup(<StreamingToolHistory group={bottom.bottomGroup!} activeToolIds={new Set(["b"])} toolResults={new Map([["r", results.get("r")!]])} expanded={false} onToggle={() => {}} statusLabel="正在运行工具：运行命令…" />);
 assert.match(html, /正在运行工具：运行命令…/);
 assert.match(html, /tool-activity-spinner/);

@@ -32,6 +32,7 @@ import type {
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import { buildCompletedToolLayout, countRunningGroupTools, summarizeToolActivities, currentToolActivity, type StreamingToolGroup, type StreamingToolMessageLayout } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
+import { AppIcon } from "./AppIcon";
 
 /** 终态集合：只有这些状态的 run 才沉淀到触发它的 user 消息下方作为历史记录；
  * 活跃中的 run 由 ChatWindow 钉在聊天流最底部。 */
@@ -1264,11 +1265,12 @@ export function StreamingToolHistory({ group, expanded, onToggle, toolResults, a
   const label = statusLabel ?? (visibleTool
     ? `${current ? "正在" : "等待执行："}${currentToolActivity(visibleTool)}${getToolPreview(visibleTool) ? ` · ${getToolPreview(visibleTool)}` : ""}`
     : summary);
+  const showLoading = running > 0 || Boolean(pending) || Boolean(statusLabel);
   return (
     <div className="tool-history-group" style={{ minWidth: 0 }}>
       <button type="button" className="tool-activity-row" aria-expanded={expanded} onClick={onToggle}
         title={`${label}\n${summary} · ${group.tools.length} 次调用${errors ? ` · ${errors} 次失败` : ""}`}>
-        {running > 0 && <span aria-hidden="true" className="tool-activity-spinner">◌</span>}
+        {showLoading && <AppIcon name="loading" size="inline" className="tool-activity-spinner" />}
         <span className="tool-activity-viewport">
           <span className="tool-activity-label" key={visibleTool?.toolCallId ?? "summary"}>{label}</span>
         </span>

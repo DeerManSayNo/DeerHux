@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import {
+  DEFAULT_THEME,
   isThemeChannelMessage,
   LEGACY_THEME_STORAGE_KEY,
   parseTheme,
@@ -64,12 +65,12 @@ function notifyListeners() {
 }
 
 function getSnapshot(): Theme {
-  if (typeof document === "undefined") return "light";
+  if (typeof document === "undefined") return DEFAULT_THEME;
   return document.documentElement.classList.contains("dark") ? "dark" : "light";
 }
 
 function getServerSnapshot(): Theme {
-  return "light";
+  return DEFAULT_THEME;
 }
 
 function applyTheme(theme: Theme) {
@@ -78,14 +79,14 @@ function applyTheme(theme: Theme) {
   if (changed) notifyListeners();
 }
 
-function readStoredTheme(): Theme | null {
+function readStoredTheme(): Theme {
   try {
     return resolveStoredTheme(
       localStorage.getItem(THEME_STORAGE_KEY),
       localStorage.getItem(LEGACY_THEME_STORAGE_KEY),
-    );
+    ) ?? DEFAULT_THEME;
   } catch {
-    return null;
+    return DEFAULT_THEME;
   }
 }
 
@@ -106,8 +107,7 @@ function ensureThemeSyncChannels() {
 
   window.addEventListener("storage", (event: StorageEvent) => {
     if (event.key !== THEME_STORAGE_KEY && event.key !== LEGACY_THEME_STORAGE_KEY) return;
-    const nextTheme = readStoredTheme();
-    if (nextTheme) applyExternalTheme(nextTheme);
+    applyExternalTheme(readStoredTheme());
   });
 
   if (typeof BroadcastChannel !== "undefined") {
@@ -140,10 +140,8 @@ function initializeTheme() {
   runtime.initialized = true;
 
   const storedTheme = readStoredTheme();
-  if (storedTheme) {
-    applyTheme(storedTheme);
-    persistTheme(storedTheme);
-  }
+  applyTheme(storedTheme);
+  persistTheme(storedTheme);
 }
 
 function syncNativeTheme(theme: Theme) {

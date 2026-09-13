@@ -1,5 +1,6 @@
 export type Theme = "light" | "dark";
 
+export const DEFAULT_THEME: Theme = "dark";
 export const THEME_STORAGE_KEY = "deerhux-theme";
 export const LEGACY_THEME_STORAGE_KEY = "pi-theme";
 export const THEME_CHANNEL_NAME = "deerhux://theme";

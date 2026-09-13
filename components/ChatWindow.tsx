@@ -412,6 +412,25 @@ const AUTO_SCROLL_THRESHOLD = 80;
 
 /** 阶段文案的最小显示时长，避免 SSE 高频事件导致文案闪烁。 */
 const PHASE_LABEL_MIN_DISPLAY_MS = 800;
+/** 正文短暂停顿时先等待下一批 token；超过该时长则恢复运行反馈。 */
+const STREAM_IDLE_STATUS_DELAY_MS = 600;
+
+function useStreamIdleStatus(isRunning: boolean, streamTextLength: number): boolean {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (!isRunning || streamTextLength === 0) {
+      setVisible(false);
+      return;
+    }
+
+    setVisible(false);
+    const timer = window.setTimeout(() => setVisible(true), STREAM_IDLE_STATUS_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [isRunning, streamTextLength]);
+
+  return visible;
+}
 
 const ActiveTurnElapsed = memo(function ActiveTurnElapsed({
   startedAt,
@@ -535,6 +554,8 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       })
     : "";
   const phaseLabelText = useMinDisplayValue(rawPhaseLabel, PHASE_LABEL_MIN_DISPLAY_MS);
+  const streamTextLength = getStreamTextLength(streamState.streamingMessage);
+  const showStreamIdleStatus = useStreamIdleStatus(isRunning, streamTextLength);
 
   const commitLiveCollaborationRuns = useCallback((
     updater: (current: Map<string, CollaborationRunSnapshot>) => Map<string, CollaborationRunSnapshot>,
@@ -1250,7 +1271,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     // 绘制前同步追底；若放到 useEffect + requestAnimationFrame，浏览器会先画出
     // “新 DOM + 旧 scrollTop”的中间帧（视口落在模型统计行），下一帧才回到底部。
     scrollToLiveBottom("auto");
-  }, [isRunning, messages, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom]);
+  }, [isRunning, messages, streamState.streamingMessage, agentPhase, collaborationRuns, showStreamIdleStatus, scrollToLiveBottom]);
 
   // 微信绑定会预先创建空 Session；欢迎布局取决于消息和运行状态，而非 Session 是否存在。
   const isEmptyConversation = messages.length === 0 && !streamState.isStreaming && !isRunning;
@@ -1891,7 +1912,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               </div>
             )}
 
-            {isRunning && (streamingToolLayout.bottomGroup || !hasRenderableStreamOutput(streamState.streamingMessage)) && (
+            {isRunning && (streamingToolLayout.bottomGroup || !hasRenderableStreamOutput(streamState.streamingMessage) || showStreamIdleStatus) && (
               <div className="py-2 text-[13px] text-text-muted">
                 {streamingToolLayout.bottomGroup ? (
                   <>
@@ -1916,7 +1937,8 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                     />
                   </>
                 ) : (
-                  <div className="flex items-center gap-0 flex-wrap">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <AppIcon name="loading" size="inline" className="tool-activity-spinner" />
                     {(!transientPhaseNoticeKey || showTransientPhaseNotice) && (
                       <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabelText || rawPhaseLabel}</span>
                     )}
