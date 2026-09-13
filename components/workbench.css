@@ -26,7 +26,7 @@ html.dark .workbench-session { --bg: rgb(23, 23, 23); }
   overflow: hidden;
 }
 .workbench-content-layout > .right-panel-closed { border: 0 !important; }
-.workbench-navigation-header { padding-bottom: 4px !important; margin-bottom: 14px; }
+.workbench-navigation-header { padding-bottom: 0 !important; margin-bottom: 0; }
 .workbench-new-session { background: transparent !important; color: var(--text) !important; border-radius: var(--radius-control) !important; }
 .workbench-new-session:hover { background: var(--sidebar-hover, var(--bg-hover)) !important; }
 .deer-workbench .sidebar-navigation { letter-spacing: 0; }
