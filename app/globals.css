@@ -951,6 +951,41 @@ span.linenumber {
 
 /* Reveal the prompt action from the bubble; keep it reachable across the gap. */
 .user-message-prompt-icon { opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+.user-message-image-strip {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+.user-message-image-thumbnail,
+.user-message-image-placeholder {
+  box-sizing: border-box;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.user-message-image-thumbnail {
+  display: block;
+  object-fit: cover;
+}
+.user-message-image-thumbnail-clickable { cursor: pointer; }
+.user-message-image-thumbnail:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.user-message-image-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-panel) 60%, transparent);
+}
 .user-message[data-hovered] .user-message-prompt-icon,
 .user-message:focus-within .user-message-prompt-icon,
 .user-message-prompt-icon:hover,

@@ -36,7 +36,7 @@ for (const name of names) {
   visit(ast);
   assert.ok(!/\brounded(?:-(?:sm|md|lg|xl|2xl|full))?\b/.test(source), `${name}: use radius tokens instead of independent utility scales`);
 }
-for (const file of ['workbench.css', 'workspace-panel.css', 'inline-code.css', 'window-wechat.module.css', 'AiFileLinkMenu.module.css', 'ui/Button.module.css', 'ui/Modal.module.css', 'ui/Form.module.css', 'MemoryConfig.module.css', 'CompactionConfirmModal.module.css']) {
+for (const file of ['workbench.css', 'workspace-panel.css', 'inline-code.css', 'window-wechat.module.css', 'AiFileLinkMenu.module.css', 'MessageImagePreview.module.css', 'ui/Button.module.css', 'ui/Modal.module.css', 'ui/Form.module.css', 'MemoryConfig.module.css', 'CompactionConfirmModal.module.css']) {
   postcss.parse(readFileSync(new URL(`../components/${file}`, import.meta.url), 'utf8')).walkDecls(d => {
     if (!/^border(?:-[a-z]+)*-radius$/.test(d.prop)) return;
     const match = /^var\((--radius-[a-z-]+)\)$/.exec(d.value);

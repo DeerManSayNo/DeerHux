@@ -2,6 +2,7 @@
 
 import { AppIcon } from "./AppIcon";
 import { SendIconButton } from "./SendIconButton";
+import { MessageImagePreview } from "./MessageImagePreview";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
@@ -23,6 +24,12 @@ export interface AttachedImage {
   previewUrl: string; // object URL for temporary preview before upload
   filePath?: string;  // absolute filesystem path (backend reads from here)
   fileUrl?: string;   // frontend access URL via /api/files/...?type=read
+}
+
+function attachedImagePreviewSource(image: AttachedImage): string | null {
+  if (image.previewUrl) return image.previewUrl;
+  if (image.fileUrl) return image.fileUrl;
+  return image.data ? `data:${image.mimeType};base64,${image.data}` : null;
 }
 
 interface ModelOption {
@@ -196,6 +203,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [roles, setRoles] = useState<AgentRole[]>([DEFAULT_ROLE_FALLBACK]);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(initialInputState?.attachedImages ?? []);
+  const [previewImageSrc, setPreviewImageSrc] = useState<string | null>(null);
   const [imageUploadError, setImageUploadError] = useState<string | null>(null);
   const [fileReferences, setFileReferences] = useState<FileReference[]>(initialInputState?.fileReferences ?? []);
   const [pendingPastes, setPendingPastes] = useState(0);
@@ -976,13 +984,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const showRecoveryNotice = useTransientNotice(recoveryNoticeKey);
   const showImageUploadError = useTransientNotice(imageUploadError);
 
+  useEffect(() => {
+    if (previewImageSrc && !attachedImages.some((image) => attachedImagePreviewSource(image) === previewImageSrc)) {
+      setPreviewImageSrc(null);
+    }
+  }, [attachedImages, previewImageSrc]);
+
 
 
   return (
     <div
       ref={dropZoneRef}
+      data-chat-input
       style={{
         position: "relative",
+        containerType: "inline-size",
+        containerName: "chat-input",
         outlineOffset: -2,
         borderRadius: "var(--radius-panel)",
         flexShrink: 0,
@@ -1138,46 +1155,64 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         {/* Image previews */}
         {attachedImages.length > 0 && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
-            {attachedImages.map((img, i) => (
-              <div key={i} style={{ position: "relative", flexShrink: 0 }}>
-                {img.previewUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                  src={img.previewUrl}
-                  alt=""
-                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: "var(--radius-control)", border: "1px solid var(--border)", display: "block", opacity: img.fileUrl || img.data ? 1 : 0.65 }}
-                  />
-                ) : (
-                  <div aria-label="正在准备图片预览" style={{ width: 56, height: 56, borderRadius: "var(--radius-control)", border: "1px solid var(--border)", background: "var(--bg-panel)" }} />
-                )}
-                {!img.fileUrl && !img.data && (
-                  <span
-                    role="status"
-                    aria-label="图片上传中"
-                    title="图片上传中"
+            {attachedImages.map((img, i) => {
+              const previewSrc = attachedImagePreviewSource(img);
+              return (
+                <div key={i} style={{ position: "relative", flexShrink: 0 }}>
+                  {previewSrc ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={previewSrc}
+                      alt=""
+                      role="button"
+                      tabIndex={0}
+                      aria-label="查看待发送图片"
+                      title="查看图片"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setPreviewImageSrc(previewSrc);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setPreviewImageSrc(previewSrc);
+                      }}
+                      style={{ width: 56, height: 56, objectFit: "cover", borderRadius: "var(--radius-control)", border: "1px solid var(--border)", display: "block", opacity: img.fileUrl || img.data ? 1 : 0.65, cursor: "pointer" }}
+                    />
+                  ) : (
+                    <div aria-label="正在准备图片预览" style={{ width: 56, height: 56, borderRadius: "var(--radius-control)", border: "1px solid var(--border)", background: "var(--bg-panel)" }} />
+                  )}
+                  {!img.fileUrl && !img.data && (
+                    <span
+                      role="status"
+                      aria-label="图片上传中"
+                      title="图片上传中"
+                      style={{
+                        position: "absolute", inset: 0,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        color: "#fff", background: "rgba(0,0,0,0.18)", borderRadius: "var(--radius-control)",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      <AppIcon name="loading" size="toolbar" className="animate-spin" />
+                    </span>
+                  )}
+                  <button
+                    onClick={() => removeImage(i)}
                     style={{
-                      position: "absolute", inset: 0,
+                      position: "absolute", top: -4, right: -4,
+                      width: 16, height: 16, borderRadius: "var(--radius-circle)",
+                      background: "var(--bg-panel)", border: "1px solid var(--border)",
                       display: "flex", alignItems: "center", justifyContent: "center",
-                      color: "#fff", background: "rgba(0,0,0,0.18)", borderRadius: "var(--radius-control)",
+                      cursor: "pointer", padding: 0, color: "var(--text-muted)",
                     }}
                   >
-                    <AppIcon name="loading" size="toolbar" className="animate-spin" />
-                  </span>
-                )}
-                <button
-                  onClick={() => removeImage(i)}
-                  style={{
-                    position: "absolute", top: -4, right: -4,
-                    width: 16, height: 16, borderRadius: "var(--radius-circle)",
-                    background: "var(--bg-panel)", border: "1px solid var(--border)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
-                  }}
-                >
-                  <AppIcon name="close" size="inline" />
-                </button>
-              </div>
-            ))}
+                    <AppIcon name="close" size="inline" />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -1293,6 +1328,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             }}
           >
             <div
+              data-chat-project-skills
               style={{
                 flex: "1 1 0",
                 minWidth: 0,
@@ -1369,6 +1405,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </div>
             {hasFileReferences && (
               <div
+                data-chat-file-references
                 style={{
                   flex: "0 1 38%",
                   minWidth: 0,
@@ -1387,6 +1424,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     const chip = (
                       <span
                         title={ref.path}
+                        data-chat-context-chip
                         style={{
                           flexShrink: 0,
                           display: "inline-flex",
@@ -1438,7 +1476,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
                     if (index !== 0) return <React.Fragment key={ref.path}>{chip}</React.Fragment>;
                     return (
-                      <span key={ref.path} style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 6, maxWidth: "100%" }}>
+                      <span key={ref.path} data-chat-file-reference-primary style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 6, maxWidth: "100%" }}>
                         <span style={{ flexShrink: 0, fontSize: 11, color: "var(--text-dim)", marginRight: 2 }}>引用</span>
                         {chip}
                       </span>
@@ -2299,6 +2337,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         </div>
         </div>
       </div>
+      <MessageImagePreview src={previewImageSrc} onClose={() => setPreviewImageSrc(null)} />
     </div>
   );
 });

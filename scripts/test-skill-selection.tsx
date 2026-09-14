@@ -9,10 +9,14 @@ assert.deepEqual(skillNames({ name: "old" }), ["old"]);
 assert.deepEqual(skillReference([" a ", "b", "a", "", 3]), { name: "a", names: ["a", "b"] });
 assert.equal(skillReference([]), undefined);
 assert.deepEqual(skillQueryAtCaret("正文 /des 后文", 7), { start: 3, end: 7, query: "des" });
+assert.deepEqual(skillQueryAtCaret("正文/des 后文", 6), { start: 2, end: 6, query: "des" });
+assert.deepEqual(skillQueryAtCaret("说明：/rev", 7), { start: 3, end: 7, query: "rev" });
 assert.deepEqual(skillQueryAtCaret("/", 1), { start: 0, end: 1, query: "" });
 assert.equal(skillQueryAtCaret("/skill:test", 11), null);
 assert.equal(skillQueryAtCaret("/Users/work", 11), null);
 assert.equal(skillQueryAtCaret("https://example", 15), null);
+assert.equal(skillQueryAtCaret("src/components", 14), null);
+assert.equal(skillQueryAtCaret("C:/Users", 8), null);
 
 const skill = skillReference(["alpha", "beta"])!;
 for (const displayReceipt of [true, false]) {

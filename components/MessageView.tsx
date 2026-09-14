@@ -33,6 +33,7 @@ import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboratio
 import { buildCompletedToolLayout, countRunningGroupTools, summarizeToolActivities, currentToolActivity, type StreamingToolGroup, type StreamingToolMessageLayout } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { AppIcon } from "./AppIcon";
+import { MessageImagePreview } from "./MessageImagePreview";
 
 /** 终态集合：只有这些状态的 run 才沉淀到触发它的 user 消息下方作为历史记录；
  * 活跃中的 run 由 ChatWindow 钉在聊天流最底部。 */
@@ -313,6 +314,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
 
   const [expanded, setExpanded] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [previewImageSrc, setPreviewImageSrc] = useState<string | null>(null);
   const [editValue, setEditValue] = useState(content);
   const [sendLocked, setSendLocked] = useState(false);
   const sendUnlockAtRef = useRef(0);
@@ -398,8 +400,19 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
     }
   };
 
+  const openImagePreview = (event: React.SyntheticEvent, src: string) => {
+    event.stopPropagation();
+    setPreviewImageSrc(src);
+  };
+
+  const handleImagePreviewKeyDown = (event: React.KeyboardEvent<HTMLImageElement>, src: string) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openImagePreview(event, src);
+  };
+
   const renderImages = () => imageBlocks.length > 0 && (
-    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: content ? 10 : 0 }}>
+    <div className="user-message-image-strip" style={{ marginBottom: content ? 10 : 0 }}>
       {imageBlocks.map((img, i) => {
         // URL/file path images: load directly from the API — no data bloat.
         if (img.source?.type === "url" && img.source.url) {
@@ -407,17 +420,15 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
             // eslint-disable-next-line @next/next/no-img-element
             <img
               key={i}
+              className="user-message-image-thumbnail user-message-image-thumbnail-clickable"
               src={img.source.url}
               alt=""
-              style={{
-                maxWidth: 300, maxHeight: 280,
-                borderRadius: "var(--radius-panel)",
-                objectFit: "contain",
-                display: "block",
-                border: "1px solid var(--border)",
-                cursor: "pointer",
-              }}
-              onClick={() => window.open(img.source!.url, "_blank")}
+              role="button"
+              tabIndex={0}
+              aria-label="查看图片"
+              title="查看图片"
+              onClick={(event) => openImagePreview(event, img.source!.url!)}
+              onKeyDown={(event) => handleImagePreviewKeyDown(event, img.source!.url!)}
             />
           );
         }
@@ -427,26 +438,10 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
           return (
             <div
               key={i}
-              style={{
-                width: 200, height: 140,
-                borderRadius: "var(--radius-panel)",
-                border: "1px solid var(--border)",
-                background: "color-mix(in srgb, var(--bg-panel) 60%, transparent)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexDirection: "column",
-                gap: 6,
-                color: "var(--text-dim)",
-                fontSize: 12,
-              }}
+              className="user-message-image-placeholder"
+              title="历史图片（已压缩）"
             >
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <polyline points="21 15 16 10 5 21" />
-              </svg>
-              历史图片（已压缩）
+              <AppIcon name="image" size="section" label="历史图片（已压缩）" />
             </div>
           );
         }
@@ -459,19 +454,10 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
           return (
             <div
               key={i}
-              style={{
-                width: 200, height: 140,
-                borderRadius: "var(--radius-panel)",
-                border: "1px solid var(--border)",
-                background: "color-mix(in srgb, var(--bg-panel) 60%, transparent)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "var(--text-dim)",
-                fontSize: 12,
-              }}
+              className="user-message-image-placeholder"
+              title="图片"
             >
-              图片
+              <AppIcon name="image" size="section" label="图片" />
             </div>
           );
         }
@@ -479,9 +465,15 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
           // eslint-disable-next-line @next/next/no-img-element
           <img
             key={i}
+            className="user-message-image-thumbnail user-message-image-thumbnail-clickable"
             src={src}
             alt=""
-            style={{ maxWidth: 260, maxHeight: 220, borderRadius: "var(--radius-panel)", objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+            role="button"
+            tabIndex={0}
+            aria-label="查看图片"
+            title="查看图片"
+            onClick={(event) => openImagePreview(event, src)}
+            onKeyDown={(event) => handleImagePreviewKeyDown(event, src)}
           />
         );
       })}
@@ -558,6 +550,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
   const hasSideMeta = displayReferences.length > 0;
 
   return (
+    <>
     <div
       data-hovered={hovered || undefined}
       data-metadata-visible={alwaysShowMetadata || undefined}
@@ -578,11 +571,11 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
             alignItems: "center",
             justifyContent: "space-between",
             gap: 10,
-            marginBottom: 6,
+            marginBottom: time ? 20 : 6,
             minWidth: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, minWidth: 0, marginLeft: "auto", paddingRight: time ? 64 : 0 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, minWidth: 0, marginLeft: "auto" }}>
             {renderReferenceChips()}
           </div>
         </div>
@@ -896,6 +889,8 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
       )}
       </div>
     </div>
+    <MessageImagePreview src={previewImageSrc} onClose={() => setPreviewImageSrc(null)} />
+    </>
   );
 }
 function AssistantMessageView({

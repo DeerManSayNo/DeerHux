@@ -4,6 +4,9 @@ import { useState } from "react";
 import { getRelativeFilePath } from "@/lib/file-paths";
 import { getFileIcon } from "./FileIcons";
 import { fileChangeKind, type FileChange } from "@/lib/file-changes";
+import { AppIcon } from "./AppIcon";
+
+const DEFAULT_VISIBLE_FILE_COUNT = 5;
 
 interface Props {
   files: string[];
@@ -18,6 +21,7 @@ function fileNameFromPath(filePath: string): string {
 
 export function ChangedFilesList({ files, fileChanges = [], cwd, onOpenFile }: Props) {
   const [expanded, setExpanded] = useState(true);
+  const [showAllFiles, setShowAllFiles] = useState(false);
   const changesByPath = new Map(fileChanges.map((change) => [change.filePath, fileChangeKind(change)]));
   async function openWithDefaultApp(filePath: string) {
     try {
@@ -35,6 +39,8 @@ export function ChangedFilesList({ files, fileChanges = [], cwd, onOpenFile }: P
   if (!files || files.length === 0) return null;
 
   const count = files.length;
+  const hasHiddenFiles = files.length > DEFAULT_VISIBLE_FILE_COUNT;
+  const visibleFiles = showAllFiles ? files : files.slice(0, DEFAULT_VISIBLE_FILE_COUNT);
   const label =
     count === 1
       ? `1 个文件被修改`
@@ -113,7 +119,7 @@ export function ChangedFilesList({ files, fileChanges = [], cwd, onOpenFile }: P
             borderTop: "1px solid var(--border)",
           }}
         >
-          {files.map((absPath, i) => {
+          {visibleFiles.map((absPath, i) => {
             const rel = getRelativeFilePath(absPath, cwd ?? undefined);
             const name = fileNameFromPath(rel);
             const kind = changesByPath.get(absPath);
@@ -214,6 +220,37 @@ export function ChangedFilesList({ files, fileChanges = [], cwd, onOpenFile }: P
               </button>
             );
           })}
+          {hasHiddenFiles && !showAllFiles && (
+            <button
+              type="button"
+              onClick={() => setShowAllFiles(true)}
+              aria-label={`查看更多，剩余 ${files.length - DEFAULT_VISIBLE_FILE_COUNT} 个文件`}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                width: "100%",
+                minHeight: 32,
+                padding: "7px 12px",
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                color: "var(--text-muted)",
+                fontSize: 12,
+                textAlign: "left",
+                transition: "background 0.1s",
+              }}
+              onMouseEnter={(event) => {
+                event.currentTarget.style.background = "var(--bg-hover)";
+              }}
+              onMouseLeave={(event) => {
+                event.currentTarget.style.background = "none";
+              }}
+            >
+              <AppIcon name="more" size="compact" />
+              <span>查看更多</span>
+            </button>
+          )}
         </div>
       )}
 

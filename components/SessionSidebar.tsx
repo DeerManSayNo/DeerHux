@@ -485,6 +485,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onCwdChange?.(selectedCwd);
   }, [selectedCwd, onCwdChange]);
 
+  useEffect(() => {
+    if (selectedCwdProp) setSelectedCwd(selectedCwdProp);
+  }, [selectedCwdProp]);
+
+  const handleSelectSidebarSession = useCallback((session: SessionInfo, isRestore?: boolean) => {
+    setSelectedCwd(session.cwd);
+    onSelectSession(session, isRestore);
+  }, [onSelectSession]);
+
   const ensureDefaultCwd = useCallback(async () => {
     if (defaultCwd) return defaultCwd;
     try {
@@ -561,8 +570,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       restoredRef.current = true;
       const target = displayedSessions.find((s) => s.id === initialSessionId);
       if (target) {
-        setSelectedCwd(target.cwd);
-        onSelectSession(target, true);
+        handleSelectSidebarSession(target, true);
         return;
       }
       onInitialRestoreDone?.();
@@ -576,7 +584,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         handleDefaultCwd();
       }
     }
-  }, [loading, displayedSessions, selectedCwd, initialSessionId, onSelectSession, onInitialRestoreDone, handleDefaultCwd, defaultCwd]);
+  }, [loading, displayedSessions, selectedCwd, initialSessionId, handleSelectSidebarSession, onInitialRestoreDone, handleDefaultCwd, defaultCwd]);
 
   const handleCustomPath = useCallback(async () => {
     const selected = await open({
@@ -586,7 +594,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     });
 
     if (typeof selected === "string") {
-      setSelectedCwd(selected);
+      // 添加项目只改变侧边栏项目列表，不自动改变当前选中的项目。
       setExpandedCwds((prev) => new Set(prev).add(selected));
       updateProjectMeta((prev) => ({
         ...prev,
@@ -600,7 +608,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const handleNewSession = useCallback(async () => {
     const recentCwd = buildProjectGroups(displayedSessions, defaultCwd)[0]?.cwd;
-    const cwd = selectedCwdProp ?? selectedCwd ?? recentCwd ?? await ensureDefaultCwd();
+    const cwd = selectedCwd ?? selectedCwdProp ?? recentCwd ?? await ensureDefaultCwd();
     if (!cwd) return;
     // Generate a temporary UUID client-side — no backend call needed.
     // DeerHux will be spawned lazily when the user sends the first message.
@@ -1148,7 +1156,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   toggleProject(project.cwd);
                 }}
                 onToggleShowAll={() => toggleShowAll(project.cwd)}
-                onSelectSession={onSelectSession}
+                onSelectSession={handleSelectSidebarSession}
                 onRenamed={loadSessions}
                 onSessionDeleted={(id) => {
                   onSessionDeleted?.(id);
@@ -1181,7 +1189,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   session={session}
                   isSelected={session.id === selectedSessionId}
                   runningStatus={runningSessionStatuses.get(session.id)}
-                  onClick={() => onSelectSession(session)}
+                  onClick={() => handleSelectSidebarSession(session)}
                   onRenamed={loadSessions}
                   onDeleted={(id) => {
                     onSessionDeleted?.(id);

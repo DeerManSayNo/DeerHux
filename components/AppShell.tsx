@@ -2,7 +2,7 @@
 
 import { ProjectPicker } from "./ProjectPicker";
 
-import { AppIcon } from "./AppIcon";
+import { AppIcon, type AppIconName } from "./AppIcon";
 import FallingText from "./FallingText";
 
 import { getExplorerRevealTarget } from "@/lib/file-paths";
@@ -30,7 +30,6 @@ import {
   resolveLocalFileHref,
 } from "@/lib/external-links";
 import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
-import { retainCwdWorkspaceState } from "@/lib/workspace-cwd-state";
 import { getProjectDisplayName } from "@/lib/project-name";
 import {
   FILE_PREVIEW_CHANNEL_NAME,
@@ -293,7 +292,6 @@ export function AppShell() {
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const activeCwdRef = useRef<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
-  const [idleProjectCwd, setIdleProjectCwd] = useState<string | null>(null);
   const [customCwds, setCustomCwds] = useState<string[]>([]);
   const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
@@ -351,8 +349,6 @@ export function AppShell() {
   }, [pendingSession, selectedSession, sessionTabs]);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !searchParams.get("session"));
-  // Suppresses extra cwd handling during the initial URL restore
-  const suppressCwdBumpRef = useRef(false);
 
   useEffect(() => {
     selectedSessionRef.current = selectedSession;
@@ -502,64 +498,14 @@ export function AppShell() {
   const handleCwdChange = useCallback((cwd: string | null) => {
     setActiveCwd(cwd);
     activeCwdRef.current = cwd;
-    // Skip if cwd is null (initial mount) or during the initial URL restore.
-    // URL restore deliberately keeps the restored session workspace intact.
-    if (!cwd || suppressCwdBumpRef.current) return;
-
-    const workspace = retainCwdWorkspaceState({
-      sessionTabs: sessionTabsRef.current,
-      chatSlotIds: chatSlotIdsRef.current,
-      selectedSession: selectedSessionRef.current,
-      pendingSession: pendingSessionRef.current,
-      activeSessionTabId: activeSessionTabIdRef.current,
-      newSessionCwd: newSessionCwdRef.current,
-      focusedChatSlotIndex: focusedChatSlotIndexRef.current,
-      placeholderTabIds: placeholderTabIdsRef.current,
-      pendingSessionIdsBySlot: pendingSessionIdsBySlotRef.current,
-      pendingTempTabIdsBySlot: pendingTempTabIdsBySlotRef.current,
-      runningSessionIds: runningSessionIdsRef.current,
-    }, cwd);
-
-    // Keep refs in sync before React commits. Async ChatWindow callbacks read
-    // these refs, so leaving the old values until an effect runs can resurrect
-    // a tab from the previously selected project.
-    const retainedSessionIds = new Set(workspace.sessionTabs.map((session) => session.id));
-    ignoredWorkspaceSessionIdsRef.current = new Set([
-      ...[...ignoredWorkspaceSessionIdsRef.current].filter((sessionId) => !retainedSessionIds.has(sessionId)),
-      ...workspace.staleSessionIds,
-    ]);
-    sessionTabsRef.current = workspace.sessionTabs;
-    chatSlotIdsRef.current = workspace.chatSlotIds;
-    selectedSessionRef.current = workspace.selectedSession;
-    pendingSessionRef.current = workspace.pendingSession;
-    activeSessionTabIdRef.current = workspace.activeSessionTabId;
-    newSessionCwdRef.current = workspace.newSessionCwd;
-    focusedChatSlotIndexRef.current = workspace.focusedChatSlotIndex;
-    placeholderTabIdsRef.current = workspace.placeholderTabIds;
-    pendingSessionIdsBySlotRef.current = workspace.pendingSessionIdsBySlot;
-    pendingTempTabIdsBySlotRef.current = workspace.pendingTempTabIdsBySlot;
-    runningSessionIdsRef.current = workspace.runningSessionIds;
-
-    setSessionTabs(workspace.sessionTabs);
-    setChatSlotIds(workspace.chatSlotIds);
-    setSelectedSession(workspace.selectedSession);
-    setPendingSession(workspace.pendingSession);
-    setActiveSessionTabId(workspace.activeSessionTabId);
-    setNewSessionCwd(workspace.newSessionCwd);
-    setFocusedChatSlotIndex(workspace.focusedChatSlotIndex);
-    setRunningSessionStatuses((previous) => new Map(
-      [...previous].filter(([sessionId]) => workspace.runningSessionIds.has(sessionId)),
-    ));
-    replaceUrl("/");
-  }, [replaceUrl]);
+  }, []);
 
   const handleNewSessionProjectChange = useCallback((cwd: string, slotIndex: number) => {
     const previousTempId = chatSlotIdsRef.current[slotIndex] ?? null;
     if (!previousTempId || !placeholderTabIdsRef.current.has(previousTempId)) return;
 
-    // 项目选择属于当前空白聊天槽位，而不是整个工作区。为目标项目创建一个
-    // 全新的会话占位项；不能复用 handleCwdChange，因为后者会按 CWD 过滤所有
-    // 已打开的槽位，导致其他项目的会话看起来被关闭。
+    // 项目选择属于当前空白聊天槽位。为目标项目创建一个全新的会话占位项，
+    // 避免旧项目的异步状态进入新项目。
     const nextTempId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -829,12 +775,6 @@ export function AppShell() {
     setSelectedSession(session);
     setActiveSessionTabId(session.id);
     setInitialSessionRestored(true);
-    if (isRestore) {
-      // Suppress redundant cwd handling that would come from the
-      // onCwdChange effect firing after setSelectedCwd in the sidebar
-      suppressCwdBumpRef.current = true;
-      setTimeout(() => { suppressCwdBumpRef.current = false; }, 0);
-    }
     // Skip URL replacement when restoring from URL — the param is already correct
     // and touching App Router during production restore previously caused remount loops
     if (!isRestore) {
@@ -904,9 +844,7 @@ export function AppShell() {
     replaceUrl("/");
   }, [getTargetChatSlotIndex, hasOpenChatWindowCapacity, placeSessionInFocusedSlot, replaceUrl, showChatWindowLimitMessage]);
 
-  const topNewSessionCwd = sessionTabs.length === 0
-    ? idleProjectCwd ?? defaultCwd
-    : effectiveProjectCwd ?? projectOptions[0]?.cwd ?? defaultCwd;
+  const topNewSessionCwd = activeCwd ?? effectiveProjectCwd ?? projectOptions[0]?.cwd ?? defaultCwd;
   const canCreateTopSession = Boolean(topNewSessionCwd);
 
   const handleTopNewSession = useCallback(() => {
@@ -1550,6 +1488,15 @@ export function AppShell() {
       });
   }, []);
 
+  const configurationEntries: { label: string; icon: AppIconName; onClick: () => void }[] = [
+    { label: "模型配置", icon: "model", onClick: () => setModelsConfigOpen(true) },
+    { label: "记忆", icon: "memory", onClick: () => setQuickConfigOpen("memory") },
+    { label: "MCP", icon: "mcp", onClick: () => setQuickConfigOpen("mcp") },
+    { label: "角色", icon: "role", onClick: () => setQuickConfigOpen("role") },
+    { label: "技能配置", icon: "skills", onClick: () => setSkillsConfigOpen(true) },
+    { label: "定时任务", icon: "schedule", onClick: () => setSchedulerPanelOpen(true) },
+  ];
+
   const sidebarContent = (
     <div
       style={{
@@ -1575,68 +1522,18 @@ export function AppShell() {
         }}
         runningSessionStatuses={runningSessionStatuses}
         onSessionDeleted={handleSessionDeleted}
-        selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? null}
+        selectedCwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         explorerRefreshKey={explorerRefreshKey}
         onProjectsChange={handleProjectsChange}
         onRefreshRunningSessions={loadRunningSessions}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
-        {([
-          {
-            label: "模型配置",
-            onClick: () => setModelsConfigOpen(true),
-            disabled: false,
-            icon: (
-              <AppIcon name="model" size="compact" />
-            ),
-          },
-          {
-            label: "记忆",
-            onClick: () => setQuickConfigOpen("memory"),
-            disabled: false,
-            icon: (
-              <AppIcon name="memory" size="compact" />
-            ),
-          },
-          {
-            label: "MCP",
-            onClick: () => setQuickConfigOpen("mcp"),
-            disabled: false,
-            icon: (
-              <AppIcon name="mcp" size="compact" />
-            ),
-          },
-          {
-            label: "角色",
-            onClick: () => setQuickConfigOpen("role"),
-            disabled: false,
-            icon: (
-              <AppIcon name="role" size="compact" />
-            ),
-          },
-          {
-            label: "技能配置",
-            onClick: () => setSkillsConfigOpen(true),
-            disabled: false,
-            icon: (
-              <AppIcon name="skills" size="compact" />
-            ),
-          },
-          {
-            label: "定时任务",
-            onClick: () => setSchedulerPanelOpen(true),
-            disabled: false,
-            icon: (
-              <AppIcon name="schedule" size="compact" />
-            ),
-          },
-        ] as { label: string; onClick: () => void; disabled: boolean; icon: ReactNode }[]).map(({ label, onClick, disabled, icon }, index) => (
+        {configurationEntries.map(({ label, onClick, icon }) => (
           <button
-            key={`${label}-${index}`}
+            key={label}
             className="app-tool-button"
             onClick={onClick}
-            disabled={disabled}
             title={label}
             aria-label={label}
             style={{
@@ -1646,14 +1543,14 @@ export function AppShell() {
               padding: 0,
               background: "none",
               border: "none",
-              borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-              fontSize: 12, opacity: disabled ? 0.35 : 1,
+              borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: "pointer",
+              fontSize: 12,
               transition: "background 0.12s, color 0.12s",
             }}
-            onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
           >
-            {icon}
+            <AppIcon name={icon} size="compact" />
           </button>
         ))}
       </div>
@@ -1819,9 +1716,39 @@ export function AppShell() {
                 borderRadius: "var(--radius-panel)",
                 boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
                 zIndex: 710,
+                maxHeight: "calc(100vh - 51px)",
+                overflowY: "auto",
               }}
               onClick={(e) => e.stopPropagation()}
             >
+              {configurationEntries.map((item) => (
+                <button
+                  key={item.label}
+                  role="menuitem"
+                  onClick={() => { setSettingsMenuOpen(false); item.onClick(); }}
+                  style={{
+                    width: "100%",
+                    minHeight: 32,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 9,
+                    padding: "7px 9px",
+                    border: "none",
+                    borderRadius: "var(--radius-control)",
+                    background: "transparent",
+                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    fontSize: 12,
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
+                >
+                  <AppIcon name={item.icon} size="compact" />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+              <div role="separator" style={{ height: 1, margin: "5px 4px", background: "var(--border)" }} />
               {([
                 { label: "分享窗口", disabled: false, onClick: () => { setSettingsMenuOpen(false); setShareManagerOpen(true); } },
                 { label: "扩展总览", disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd, onClick: () => { setSettingsMenuOpen(false); setExtensionsConfigOpen(true); } },
@@ -1923,7 +1850,7 @@ export function AppShell() {
                   ...(defaultCwd ? [{ cwd: defaultCwd, displayName: "默认" }] : []),
                   ...headerProjectOptions.filter((project) => project.cwd !== defaultCwd),
                 ]}
-                onSelect={setIdleProjectCwd}
+                onSelect={handleCwdChange}
               />
             </div>
           )}

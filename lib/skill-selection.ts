@@ -15,9 +15,9 @@ export function skillReference(value: unknown): SkillReference | undefined {
   return names.length ? { name: names[0], ...(names.length > 1 ? { names } : {}) } : undefined;
 }
 
-/** Only a slash token at the caret opens the picker; paths and /skill: text stay literal. */
+/** A slash token at the caret opens the picker after prose boundaries; paths and /skill: text stay literal. */
 export function skillQueryAtCaret(value: string, caret: number) {
-  const match = /(?:^|\s)\/([^\s/]*)$/.exec(value.slice(0, caret));
+  const match = /(?:^|[^A-Za-z0-9_./:\\~-])\/([^\s/]*)$/.exec(value.slice(0, caret));
   if (!match || match[1].startsWith("skill:")) return null;
   return { start: caret - match[1].length - 1, end: caret, query: match[1] };
 }
