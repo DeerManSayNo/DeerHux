@@ -286,7 +286,6 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
   onRestoreToInput?: (message: UserMessage) => void;
   systemPrompt?: string | null;
 }) {
-  const { isDark } = useTheme();
   const skillEvidence = useMemo(() => collectTurnSkillEvidence(message, turnSkillMessages ?? []), [message, turnSkillMessages]);
   const content =
     typeof message.content === "string"
@@ -612,7 +611,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
             display: "block",
             textAlign: "left",
             padding: "10px 14px",
-            background: isDark ? "rgb(42, 42, 42)" : "var(--bg)",
+            background: "var(--composer-bg, var(--bg))",
             border: "1px solid var(--border)",
             borderRadius: "var(--radius-panel)",
             color: "var(--text)",
@@ -692,7 +691,7 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
             display: "flex",
             gap: 8,
             alignItems: "center",
-            background: isDark ? "rgb(42, 42, 42)" : "var(--bg)",
+            background: "var(--composer-bg, var(--bg))",
             border: "1px solid var(--border)",
             borderRadius: "var(--radius-panel)",
             padding: "10px 10px 10px 14px",
