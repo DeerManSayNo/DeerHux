@@ -59,6 +59,8 @@ assert.match(appShell, /subscribeHostEvents/);
 
 assert.doesNotMatch(chatWindow, /setInterval\(fetchRuns/);
 assert.match(chatWindow, /subscribeSubagentRuns/);
+assert.match(chatWindow, /onAgentRunningChange\?\.\(sessionId, agentRunning\)/);
+assert.doesNotMatch(chatWindow, /onAgentRunningChange\?\.\([^,]+, isRunning\)/);
 assert.match(chatWindow, /fetch\(`\/api\/agent-runs\?parentSessionId=/);
 assert.match(chatWindow, /hydratingRunIdsRef/);
 assert.match(chatWindow, /pendingRunMuxSnapshotsRef/);

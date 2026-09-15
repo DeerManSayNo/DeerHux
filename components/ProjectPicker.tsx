@@ -21,10 +21,11 @@ type ProjectPickerProps = {
   projectOptions?: ProjectOption[];
   onSelect?: (cwd: string) => void;
   compact?: boolean;
+  sessionName?: string;
 };
 
 // Project switcher shared by session headers and the idle start surface.
-export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compact = false }: ProjectPickerProps) {
+export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compact = false, sessionName }: ProjectPickerProps) {
   const [open, setOpen] = useState(false);
   const options = useMemo(() => {
     const byCwd = new Map<string, string>();
@@ -78,6 +79,7 @@ export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compa
           alignItems: "center",
           gap: 6,
           maxWidth: "100%",
+          minWidth: 0,
           padding: compact ? "4px 7px" : "4px 8px",
           border: "none",
           borderRadius: "var(--radius-control)",
@@ -97,7 +99,20 @@ export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compa
           event.currentTarget.style.background = open ? "var(--bg-hover)" : "transparent";
         }}
       >
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+        {sessionName && (
+          <span
+            title={sessionName}
+            style={{
+              flexShrink: 0,
+              color: "var(--text-muted)",
+              fontWeight: 400,
+              whiteSpace: "nowrap",
+            }}
+          >
+            · {sessionName}
+          </span>
+        )}
         {canSwitch && (
           <AppIcon name="chevron-down" size="compact" style={{ color: "var(--text-muted)", transform: open ? "rotate(180deg)" : "none" }} />
         )}

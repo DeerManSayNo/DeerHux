@@ -173,6 +173,7 @@ function layoutModeForSlotCount(count: number): ChatLayoutMode {
   if (count === 2) return "double";
   if (count === 3) return "triple";
   if (count <= 4) return "quad";
+  if (count === 5) return "five";
   return "six";
 }
 

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { appendFileSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { randomUUID } from "node:crypto";
 import { join } from "path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
@@ -11,6 +12,7 @@ import {
   readSessionFileCached,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { updateSessionIndexName } from "@/lib/session/session-index";
 
 export async function GET(
   req: Request,
@@ -102,9 +104,14 @@ export async function PATCH(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
     const sm = SessionManager.open(filePath);
-    sm.appendSessionInfo(name.trim());
+    // Metadata must persist even before the first assistant message; Pi defers it.
+    appendFileSync(filePath, `${JSON.stringify({
+      type: "session_info", id: randomUUID(), parentId: sm.getLeafId(),
+      timestamp: new Date().toISOString(), name: name.trim(),
+    })}\n`);
     invalidateSessionListCache();
     invalidateSessionFileCache(filePath);
+    await updateSessionIndexName(id, name.trim());
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

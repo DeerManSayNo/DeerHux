@@ -7,6 +7,7 @@ import "./chat-surface.css";
 import { useChatSelectAll } from "@/hooks/useChatSelectAll";
 import { getChatMessageScrollTop } from "@/lib/chat-message-scroll";
 import { animatePromptScroll } from "@/lib/chat-scroll-animation";
+import { bindChatScrollFollow } from "@/lib/chat-scroll-follow";
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, AssistantMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
@@ -96,6 +97,13 @@ function parseUserMessageText(message: Extract<AgentMessage, { role: "user" }>):
     .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join("\n");
+}
+
+function formatSessionHeaderName(session: SessionInfo | null): string | undefined {
+  const raw = session?.name?.trim() || session?.firstMessage?.trim();
+  if (!raw) return undefined;
+  const characters = Array.from(raw);
+  return characters.length > 10 ? `${characters.slice(0, 10).join("")}...` : raw;
 }
 
 function parseMessageTimestamp(message: AgentMessage | undefined): number | undefined {
@@ -527,6 +535,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   });
   // 本地 SSE 状态在布局切换时可能短暂重置；会话级状态用于无缝维持运行中 UI。
   const isRunning = agentRunning || isSessionRunning;
+  const reportedLocalRunningRef = useRef({
+    sessionId: session?.id ?? null,
+    running: agentRunning,
+  });
 
   const transientPhaseNoticeKey = retryInfo
     ? [
@@ -946,8 +958,20 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   }, [isRunning, handleSteer, handleSend, currentRoleId, session?.id, contextUsage, openCompactionDialog]);
 
   useEffect(() => {
-    onAgentRunningChange?.(session?.id, isRunning);
-  }, [isRunning, onAgentRunningChange, session?.id]);
+    const sessionId = session?.id ?? null;
+    const previous = reportedLocalRunningRef.current;
+
+    // isSessionRunning is a parent-owned continuity fallback. Feeding the
+    // merged value back to the parent makes a stale true value self-latching.
+    if (previous.sessionId !== sessionId) {
+      reportedLocalRunningRef.current = { sessionId, running: false };
+      return;
+    }
+    if (previous.running === agentRunning) return;
+
+    reportedLocalRunningRef.current = { sessionId, running: agentRunning };
+    onAgentRunningChange?.(sessionId, agentRunning);
+  }, [agentRunning, onAgentRunningChange, session?.id]);
 
   const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
   const playDoneSoundRef = useRef(playDoneSound);
@@ -1061,8 +1085,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const liveStreamEndRef = useRef<HTMLDivElement | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const shouldAutoScrollRef = useRef(true);
-  const userScrollIntentRef = useRef(false);
-  const userScrollIntentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollTopRef = useRef(0);
   const scrollDirectionRef = useRef<"content-up" | "content-down" | null>(null);
   const wasRunningRef = useRef(false);
@@ -1070,21 +1093,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const cancelPromptScroll = useCallback(() => {
     cancelPromptScrollRef.current?.();
     cancelPromptScrollRef.current = null;
-  }, []);
-
-  const markUserScrollIntent = useCallback(() => {
-    cancelPromptScroll();
-    userScrollIntentRef.current = true;
-    if (userScrollIntentTimerRef.current) clearTimeout(userScrollIntentTimerRef.current);
-    userScrollIntentTimerRef.current = setTimeout(() => {
-      userScrollIntentRef.current = false;
-    }, 200);
-  }, [cancelPromptScroll]);
-
-  useEffect(() => {
-    return () => {
-      if (userScrollIntentTimerRef.current) clearTimeout(userScrollIntentTimerRef.current);
-    };
   }, []);
 
   const setAutoScroll = useCallback((enabled: boolean) => {
@@ -1103,7 +1111,6 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
 
     // Explicit navigation must neither scroll ancestors nor race streaming follow-up.
     setAutoScroll(false);
-    userScrollIntentRef.current = false;
     prevScrollTopRef.current = container.scrollTop;
     cancelPromptScrollRef.current = animatePromptScroll(container, top,
       window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -1174,21 +1181,13 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     const nearBottom = isNearBottom();
     // A backward jump from the end must reach the same prompt-position logic as other jumps.
     const isPausedBackwardScroll = isContentMovingDown && !shouldAutoScrollRef.current;
-    if (nearBottom && !isPausedBackwardScroll) {
-      // 自动折叠造成的高度变化不能擅自恢复用户暂停的追底。
-      if (!shouldAutoScrollRef.current && !userScrollIntentRef.current) return;
-      setAutoScroll(true);
+    if (nearBottom && !isPausedBackwardScroll && shouldAutoScrollRef.current) {
       // 在底部时，始终钉住最后一条 user 消息
       if (userMsgIndices.length > 0) {
         const lastIdx = userMsgIndices[userMsgIndices.length - 1];
         setPinnedUserMsgIdx((prev) => prev !== lastIdx ? lastIdx : prev);
       }
       return;
-    }
-
-    // Only user-initiated upward scrolling pauses tracking.
-    if (userScrollIntentRef.current) {
-      setAutoScroll(false);
     }
 
     const containerTop = container.getBoundingClientRect().top + container.clientTop;
@@ -1225,13 +1224,30 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
       }
     }
     // 所有 user 消息都已滚出顶部，保持不变（"如果没有就不变"）
-  }, [hasOlderMessages, isNearBottom, loadOlderHistory, loadingFullHistory, setAutoScroll, userMsgIndices, userMsgIdxToRefIdx, messageRefs, scrollContainerRef]);
+  }, [hasOlderMessages, isNearBottom, loadOlderHistory, loadingFullHistory, userMsgIndices, userMsgIdxToRefIdx, messageRefs, scrollContainerRef]);
 
   const handleResumeAutoScroll = useCallback(() => {
     cancelPromptScroll();
     setAutoScroll(true);
-    scrollToLiveBottom("smooth");
+    scrollToLiveBottom("instant");
   }, [scrollToLiveBottom, setAutoScroll, cancelPromptScroll]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    const content = scrollContentRef.current;
+    if (!container || !content) return;
+    return bindChatScrollFollow(container, content, {
+      interrupt: cancelPromptScroll,
+      pause: () => {
+        setAutoScroll(false);
+        container.scrollTo({ top: container.scrollTop, behavior: "instant" });
+      },
+      resume: () => setAutoScroll(true),
+      followResize: () => {
+        if (shouldAutoScrollRef.current) scrollToLiveBottom("instant");
+      },
+    });
+  }, [session?.id, isNew, loading, error, scrollContainerRef, cancelPromptScroll, setAutoScroll, scrollToLiveBottom]);
 
   useEffect(() => cancelPromptScroll, [session?.id, cancelPromptScroll]);
 
@@ -1282,6 +1298,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const currentProjectLabel = currentCwd
     ? selectableProjectOptions.find((project) => project.cwd === currentCwd)?.displayName ?? getProjectDisplayName(currentCwd)
     : "";
+  const sessionHeaderName = formatSessionHeaderName(session);
 
   const availableThinkingLevels = displayModelValue
     ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
@@ -1565,6 +1582,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
             <ProjectPicker
               currentCwd={currentCwd}
               projectOptions={selectableProjectOptions}
+              sessionName={sessionHeaderName}
               compact={compact}
               onSelect={canSwitchEmptyProject ? onNewSessionCwdChange : undefined}
             />
@@ -1715,12 +1733,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
             if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) cancelPromptScroll();
           }}
           onScroll={handleScroll}
-          onWheel={markUserScrollIntent}
-          onTouchStart={markUserScrollIntent}
           className="flex-1 overflow-y-auto scrollbar-none [scrollbar-width:none]"
           style={{ overflowX: "hidden", overflowAnchor: shouldAutoScroll ? "none" : "auto" }}
         >
-          <div className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingTop: 18, paddingBottom: compact ? 12 : 18 }}>
+          <div ref={scrollContentRef} className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingTop: 18, paddingBottom: compact ? 12 : 18 }}>
 
             {/* TODO 3 — first-paint pagination: older messages were truncated. */}
             {hasOlderMessages && session?.id && (

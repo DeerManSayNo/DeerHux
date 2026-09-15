@@ -7,13 +7,14 @@ import type { ChatInputHandle, ChatInputState } from "./ChatInput";
 import { ChatWindow } from "./ChatWindow";
 import type { SessionInfo } from "@/lib/types";
 
-export type ChatLayoutMode = "single" | "double" | "triple" | "quad" | "six";
+export type ChatLayoutMode = "single" | "double" | "triple" | "quad" | "five" | "six";
 
 export const CHAT_LAYOUT_COUNTS: Record<ChatLayoutMode, number> = {
   single: 1,
   double: 2,
   triple: 3,
   quad: 4,
+  five: 5,
   six: 6,
 };
 
@@ -62,6 +63,8 @@ function gridTemplate(mode: ChatLayoutMode): { columns: string; rows: string; mi
       return { columns: "repeat(3, minmax(300px, 1fr))", rows: "1fr", minWidth: 940 };
     case "quad":
       return { columns: "repeat(4, minmax(300px, 1fr))", rows: "1fr", minWidth: 1_230 };
+    case "five":
+      return { columns: "repeat(5, minmax(300px, 1fr))", rows: "1fr", minWidth: 1_540 };
     case "six":
       return { columns: "repeat(6, minmax(300px, 1fr))", rows: "1fr", minWidth: 1_850 };
     default:
@@ -106,7 +109,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
   const visibleCount = CHAT_LAYOUT_COUNTS[layoutMode];
   const template = gridTemplate(layoutMode);
   const isMultiLayout = layoutMode !== "single";
-  const compact = layoutMode === "triple" || layoutMode === "quad" || layoutMode === "six";
+  const compact = layoutMode === "triple" || layoutMode === "quad" || layoutMode === "five" || layoutMode === "six";
   const workspaceGap = isMultiLayout ? (compact ? 10 : 12) : 0;
 
   useEffect(() => {

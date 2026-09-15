@@ -1655,11 +1655,15 @@ function SessionItem({
   const [hovered, setHovered] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [renameError, setRenameError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; copied: boolean } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const renameCommitPendingRef = useRef(false);
+  const selectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contextMenuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
@@ -1675,33 +1679,60 @@ function SessionItem({
     return () => window.clearInterval(timer);
   }, [hasRunningStatus]);
 
+  const cancelPendingSelect = useCallback(() => {
+    if (selectTimerRef.current !== null) clearTimeout(selectTimerRef.current);
+    selectTimerRef.current = null;
+  }, []);
+
+  useEffect(() => cancelPendingSelect, [cancelPendingSelect]);
+
   const startRename = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    cancelPendingSelect();
     setRenameValue(session.name ?? "");
+    setRenameError("");
     setRenaming(true);
     setTimeout(() => inputRef.current?.select(), 0);
-  }, [session.name]);
+  }, [session.name, cancelPendingSelect]);
 
   const commitRename = useCallback(async () => {
+    if (renameCommitPendingRef.current) return;
     const name = renameValue.trim();
-    setRenaming(false);
-    if (name === (session.name ?? "")) return;
+    if (name === (session.name ?? "")) {
+      setRenaming(false);
+      return;
+    }
+    renameCommitPendingRef.current = true;
+    setRenameSaving(true);
+    setRenameError("");
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
         method: "PATCH",
+        signal: AbortSignal.timeout(15_000),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
+      if (!response.ok) throw new Error("Rename failed");
+      setRenaming(false);
       onRenamed?.();
     } catch {
-      // ignore
+      setRenameError("保存失败，请重试");
+    } finally {
+      renameCommitPendingRef.current = false;
+      setRenameSaving(false);
     }
   }, [renameValue, session.id, session.name, onRenamed]);
 
+  const cancelRename = useCallback(() => {
+    if (renameCommitPendingRef.current) return;
+    setRenaming(false);
+  }, []);
+
   const handleDeleteClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    cancelPendingSelect();
     setConfirmDelete(true);
-  }, []);
+  }, [cancelPendingSelect]);
 
   const handleDeleteConfirm = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1768,13 +1799,32 @@ function SessionItem({
 
   return (
     <div
-      onClick={confirmDelete || renaming ? undefined : onClick}
+      onClick={(event) => {
+        if (confirmDelete || renaming || deleting) return;
+        cancelPendingSelect();
+        if (compact || event.detail === 0) {
+          onClick();
+          return;
+        }
+        if (event.detail > 1) return;
+        selectTimerRef.current = setTimeout(() => {
+          selectTimerRef.current = null;
+          onClick();
+        }, 80);
+      }}
+      onDoubleClick={(event) => {
+        if (compact || confirmDelete || renaming || deleting) return;
+        if ((event.target as Element).closest("button, input, a, [role='menu']")) return;
+        event.preventDefault();
+        startRename(event);
+      }}
       onMouseDown={(event) => {
         if (event.button === 2) event.stopPropagation();
       }}
       onContextMenu={(event) => {
         event.preventDefault();
         event.stopPropagation();
+        cancelPendingSelect();
         const menuWidth = 220;
         const menuHeight = 72;
         setContextMenu({
@@ -1854,29 +1904,90 @@ function SessionItem({
           </div>
         </>
       ) : renaming ? (
-        /* ── Rename: input fills the same row ── */
-        <input
-          ref={inputRef}
-          value={renameValue}
-          onChange={(e) => setRenameValue(e.target.value)}
-          onBlur={commitRename}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commitRename();
-            if (e.key === "Escape") setRenaming(false);
+        /* ── Rename: input and actions stay within the same row ── */
+        <div
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              void commitRename();
+            }
           }}
-          autoFocus
-          style={{
-            flex: 1,
-            fontSize: 12,
-            padding: "5px 8px",
-            border: "1px solid var(--accent)",
-            borderRadius: "var(--radius-panel)",
-            outline: "none",
-            background: "var(--bg)",
-            color: "var(--text)",
-            height: 30,
-          }}
-        />
+          style={{ display: "flex", alignItems: "center", gap: 2, flex: 1, minWidth: 0 }}
+        >
+          <input
+            ref={inputRef}
+            readOnly={renameSaving}
+            aria-invalid={Boolean(renameError)}
+            title={renameError || undefined}
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+              if (e.key === "Enter") {
+                e.preventDefault();
+                e.stopPropagation();
+                void commitRename();
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                cancelRename();
+              }
+            }}
+            aria-label="会话名称"
+            autoFocus
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontSize: 12,
+              padding: "5px 8px",
+              border: "1px solid var(--accent)",
+              borderRadius: "var(--radius-panel)",
+              outline: "none",
+              background: "var(--bg)",
+              color: "var(--text)",
+              height: 30,
+            }}
+          />
+          <button
+            type="button"
+            aria-label="确认重命名"
+            title={renameError || "确认重命名"}
+            disabled={renameSaving}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={(event) => {
+              event.stopPropagation();
+              void commitRename();
+            }}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 26, height: 26, padding: 0, flexShrink: 0,
+              background: "transparent", border: "none",
+              borderRadius: "var(--radius-control)", color: "var(--accent)", cursor: "pointer",
+            }}
+          >
+            <AppIcon name={renameSaving ? "loading" : renameError ? "error" : "check"} size="compact"
+              style={renameSaving ? { animation: "spin 1s linear infinite" } : undefined} />
+          </button>
+          <button
+            type="button"
+            aria-label="取消重命名"
+            title="取消重命名"
+            disabled={renameSaving}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={(event) => {
+              event.stopPropagation();
+              cancelRename();
+            }}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 26, height: 26, padding: 0, flexShrink: 0,
+              background: "transparent", border: "none",
+              borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: "pointer",
+            }}
+          >
+            <AppIcon name="close" size="compact" />
+          </button>
+        </div>
       ) : (
         /* ── Normal view ── */
         <>

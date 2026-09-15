@@ -57,6 +57,7 @@
     "test:code-index": "node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/register-typescript-test-loader.mjs scripts/test-code-index-lifecycle.ts && node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/register-typescript-test-loader.mjs scripts/test-code-index-registration.ts",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public",
     "test:mcp-stdio": "node scripts/test-mcp-stdio-integration.mjs",
+    "test:mcp-runtime": "node --import ./scripts/register-typescript-test-loader.mjs scripts/test-mcp-runtime-contracts.ts && node --import ./scripts/register-typescript-test-loader.mjs scripts/test-mcp-result-integration.ts && node --import ./scripts/register-typescript-test-loader.mjs scripts/test-wrapper-turn-admission.ts",
     "test:client-api": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-client-api.ts",
     "test:session-creation": "node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/register-typescript-test-loader.mjs scripts/test-session-creation.ts",
     "test:session-cold-start": "node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/register-typescript-test-loader.mjs scripts/test-session-path-cold-start.ts && node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/register-typescript-test-loader.mjs scripts/test-remote-connections-cold-start.ts",

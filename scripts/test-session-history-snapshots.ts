@@ -21,6 +21,16 @@ const snapshot = (text: string, fullHistoryLoaded = false) => ({
   assert.doesNotMatch(workspace, /<section\s+key=\{index\}/);
 }
 
+// Five occupied slots need five columns. Mapping them to the six-column mode
+// leaves a transparent sixth column and prevents the real windows from filling the workspace.
+{
+  const workspace = readFileSync(new URL("../components/ChatWorkspace.tsx", import.meta.url), "utf8");
+  const shell = readFileSync(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
+  assert.match(workspace, /five: 5/);
+  assert.match(workspace, /case "five":\s*return \{ columns: "repeat\(5, minmax\(300px, 1fr\)\)", rows: "1fr", minWidth: 1_540 \}/);
+  assert.match(shell, /if \(count === 5\) return "five"/);
+}
+
 // A placeholder adopting its durable session id is still the same ChatWindow.
 // Its render key must survive so optimistic messages and streaming state remain mounted.
 {

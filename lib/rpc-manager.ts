@@ -28,6 +28,7 @@ import type { AgentRuntimeEventBase } from "./agent-runtime/types";
 import { hostEventBus, type HostRunningSession, type SessionTransientSnapshot } from "./host-event-bus";
 import type { FileReference, ImageContent, SkillReference, TurnSkillContext, TextContent, TurnCapabilities } from "./types";
 import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
+import { DeferredMcpReload } from "./mcp/deferred-reload";
 import {
   applyModePrompt,
   getToolNamesForAgentMode,
@@ -1277,8 +1278,14 @@ export class AgentSessionWrapper {
   }
 
   private canReloadMcpNow(): boolean {
-    return !this.isTurnBusy() && !this._turnActive && !this._stopRequested;
+    return this._alive && !this.isTurnBusy() && !this._turnActive && !this._stopRequested;
   }
+
+  private readonly mcpReloadQueue = new DeferredMcpReload(
+    () => this.canReloadMcpNow(),
+    () => this.reloadMcpRuntime(),
+    (error) => console.warn("Deferred MCP reload failed:", error),
+  );
 
   private installMcpRuntime(nextRuntime: McpRuntime, activateMcp: boolean): void {
     const previousRuntime = this.mcpRuntime;
@@ -1457,9 +1464,7 @@ export class AgentSessionWrapper {
       return { ok: false, skipped: true };
     }
 
-    const cwd = this.session.cwd;
-    const { acquireMcpRuntime } = await import("./mcp-runtime");
-    const nextLease = await acquireMcpRuntime(cwd);
+    const nextLease = await this.acquireMcpRuntimeLease();
 
     // acquire 期间可能有新 Prompt/Recover/Steer/Follow-up 进入准入。
     // 此时新 Lease 不能安装，也不能泄漏。
@@ -2040,7 +2045,7 @@ export class AgentSessionWrapper {
       }
 
       case "mcp_reload": {
-        return this.reloadMcpRuntime();
+        return this.mcpReloadQueue.request();
       }
 
       case "get_tools": {
@@ -2129,6 +2134,7 @@ export class AgentSessionWrapper {
     this._turnActive = false;
     this._isRunning = false;
     this._alive = false;
+    this.mcpReloadQueue.dispose();
     this.codeIndexLease?.release();
     this.codeIndexLease = null;
     this.pendingPromptController?.abort(new DOMException("Session destroyed", "AbortError"));

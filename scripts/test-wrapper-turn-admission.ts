@@ -242,6 +242,38 @@ wrapper.destroy();
   transactionWrapper.destroy();
 }
 
+// Busy reload is deferred; a lease arriving after destroy must never be installed.
+{
+  const pending = gate();
+  let acquisitions = 0;
+  let installs = 0;
+  let releases = 0;
+  const reloadWrapper = new AgentSessionWrapper(engine, session, models, resources, null, null, "agent");
+  const internals = reloadWrapper as unknown as {
+    acquireMcpRuntimeLease(): Promise<McpRuntimeLease>;
+    installMcpRuntime(runtime: McpRuntime, activate: boolean): void;
+  };
+  internals.acquireMcpRuntimeLease = async () => {
+    acquisitions++;
+    await pending.promise;
+    return { runtime: { tools: [], toolNames: [] } as unknown as McpRuntime, release: () => { releases++; } };
+  };
+  internals.installMcpRuntime = () => { installs++; };
+  await new Promise(resolve => setTimeout(resolve, 0));
+  streaming = true;
+  assert.deepEqual(await reloadWrapper.send({ type: "mcp_reload" }), { ok: false, skipped: true });
+  await reloadWrapper.send({ type: "mcp_reload" });
+  assert.equal(acquisitions, 0);
+  streaming = false;
+  for (let i = 0; i < 30 && acquisitions === 0; i++) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(acquisitions, 1);
+  reloadWrapper.destroy();
+  pending.resolve();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(installs, 0);
+  assert.equal(releases, 1);
+}
+
 // Abort / Destroy 后晚到的 MCP Lease 只能释放，不能安装或被 Wrapper 持有。
 for (const invalidate of ["abort", "destroy"] as const) {
   const acquireGate = gate();

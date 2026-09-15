@@ -38,7 +38,8 @@ function imageExtFromUpload(file: File): string {
   }
 }
 
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20MB
+// Keep this aligned with /api/files image reads so every accepted upload can be previewed.
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
   try {
@@ -55,7 +56,7 @@ export async function POST(request: NextRequest) {
       if (!mimeType) return NextResponse.json({ error: "Unsupported image type" }, { status: 400 });
       const stat = await fs.promises.stat(sourcePath);
       if (!stat.isFile()) return NextResponse.json({ error: "Not an image file" }, { status: 400 });
-      if (stat.size > MAX_UPLOAD_BYTES) return NextResponse.json({ error: "Image too large (>20MB)" }, { status: 413 });
+      if (stat.size > MAX_UPLOAD_BYTES) return NextResponse.json({ error: "Image too large (>10MB)" }, { status: 413 });
       image = new File([await fs.promises.readFile(sourcePath)], path.basename(sourcePath), { type: mimeType });
     } else {
       const form = await request.formData();
@@ -70,7 +71,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Only image uploads are supported" }, { status: 400 });
     }
     if (image.size > MAX_UPLOAD_BYTES) {
-      return NextResponse.json({ error: "Image too large (>20MB)" }, { status: 413 });
+      return NextResponse.json({ error: "Image too large (>10MB)" }, { status: 413 });
     }
     if (typeof cwd !== "string" || !cwd.trim()) {
       return NextResponse.json({ error: "Missing cwd" }, { status: 400 });
@@ -100,7 +101,7 @@ export async function POST(request: NextRequest) {
       url: apiUrl,      // frontend access URL via /api/files/[...path]
       mimeType: image.type,
     });
-  } catch (error) {
+  } catch (_error) {
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

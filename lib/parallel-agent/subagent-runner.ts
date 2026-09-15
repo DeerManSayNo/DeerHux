@@ -8,7 +8,7 @@ import { registerWorkerSession } from "./subagent-registry";
 import { resolveWorkerOutcome, type AssistantSnapshot } from "./subagent-outcome";
 
 const WORKER_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
-const SUBAGENT_MAX_TOOL_ROUNDS = 100;
+const SUBAGENT_MAX_TOOL_ROUNDS = 300;
 
 export type WorkerSession = {
   sessionId: string;

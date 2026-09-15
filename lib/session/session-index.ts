@@ -475,6 +475,27 @@ export function invalidateSessionIndex(_reason: string): void {
   scheduleSessionIndexRebuild("invalidate");
 }
 
+/** Update one title without scanning session history or waiting for a rebuild. */
+export async function updateSessionIndexName(sessionId: string, name: string): Promise<void> {
+  const index = await readSessionIndex();
+  const record = index?.records.find((entry) => entry.id === sessionId);
+  if (!index || !record) {
+    scheduleSessionIndexRebuild("rename-missing-record");
+    return;
+  }
+  const next = {
+    ...index,
+    records: index.records.map((entry) => entry.id === sessionId
+      ? { ...entry, name: name || undefined }
+      : entry),
+  };
+  await writeIndexFile(next);
+  const mem = getMemoryCache();
+  mem.index = next;
+  mem.mtimeMs = statSync(getIndexFilePath()).mtimeMs;
+  mem.loadedAt = Date.now();
+}
+
 /**
  * Remove a single record (used on session delete) and persist atomically.
  * Best-effort: on any failure we fall back to a full rebuild via invalidation.

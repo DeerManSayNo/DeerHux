@@ -27,9 +27,13 @@ export interface AttachedImage {
 }
 
 function attachedImagePreviewSource(image: AttachedImage): string | null {
-  if (image.previewUrl) return image.previewUrl;
   if (image.fileUrl) return image.fileUrl;
-  return image.data ? `data:${image.mimeType};base64,${image.data}` : null;
+  if (image.data) return `data:${image.mimeType};base64,${image.data}`;
+  return image.previewUrl || null;
+}
+
+function revokeAttachedImagePreview(image: AttachedImage): void {
+  if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
 }
 
 interface ModelOption {
@@ -298,7 +302,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setFileReferences([]);
       pasteGenerationRef.current += 1;
       setAttachedImages((prev) => {
-        prev.forEach((img) => URL.revokeObjectURL(img.previewUrl));
+        prev.forEach(revokeAttachedImagePreview);
         return [];
       });
       saveInputStateRef?.current?.({
@@ -349,12 +353,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
         const result = await res.json() as { path: string; url: string; mimeType: string };
         setAttachedImages((prev) => prev.map((image) => image.previewUrl === pendingImage.previewUrl
-          ? { ...image, mimeType: result.mimeType, filePath: result.path, fileUrl: result.url }
+          ? { ...image, mimeType: result.mimeType, previewUrl: "", filePath: result.path, fileUrl: result.url }
           : image));
+        requestAnimationFrame(() => revokeAttachedImagePreview(pendingImage));
       } catch (error) {
         setAttachedImages((prev) => {
           if (!prev.some((image) => image.previewUrl === pendingImage.previewUrl)) return prev;
-          URL.revokeObjectURL(pendingImage.previewUrl);
+          revokeAttachedImagePreview(pendingImage);
           return prev.filter((image) => image.previewUrl !== pendingImage.previewUrl);
         });
         setImageUploadError(error instanceof Error ? error.message : "图片上传失败");
@@ -370,7 +375,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
       const next = [...prev];
-      URL.revokeObjectURL(next[index].previewUrl);
+      revokeAttachedImagePreview(next[index]);
       next.splice(index, 1);
       return next;
     });
@@ -378,7 +383,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const clearImages = useCallback(() => {
     setAttachedImages((prev) => {
-      prev.forEach((img) => URL.revokeObjectURL(img.previewUrl));
+      prev.forEach(revokeAttachedImagePreview);
       return [];
     });
   }, []);
@@ -1177,6 +1182,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                         event.preventDefault();
                         event.stopPropagation();
                         setPreviewImageSrc(previewSrc);
+                      }}
+                      onError={() => {
+                        setAttachedImages((prev) => prev.filter((image) => {
+                          if (attachedImagePreviewSource(image) !== previewSrc) return true;
+                          revokeAttachedImagePreview(image);
+                          return false;
+                        }));
+                        setImageUploadError("图片无法读取，请重新添加");
                       }}
                       style={{ width: 56, height: 56, objectFit: "cover", borderRadius: "var(--radius-control)", border: "1px solid var(--border)", display: "block", opacity: img.fileUrl || img.data ? 1 : 0.65, cursor: "pointer" }}
                     />

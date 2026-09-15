@@ -21,4 +21,13 @@ assert.match(styles, /\[data-chat-skill-row\][\s\S]*?flex-direction: column !imp
 assert.match(styles, /\[data-chat-file-references\][\s\S]*?overflow-x: auto !important/);
 assert.match(styles, /\[data-chat-file-references\][\s\S]*?flex-direction: row !important/);
 
+const previewSource = input.slice(
+  input.indexOf("function attachedImagePreviewSource"),
+  input.indexOf("interface ModelOption"),
+);
+assert.ok(previewSource.indexOf("image.fileUrl") < previewSource.indexOf("image.data"));
+assert.ok(previewSource.indexOf("image.data") < previewSource.indexOf("image.previewUrl"));
+assert.match(previewSource, /previewUrl\.startsWith\("blob:"\)/);
+assert.match(input, /previewUrl: "", filePath: result\.path, fileUrl: result\.url/);
+
 console.log("chat input context layout tests passed");

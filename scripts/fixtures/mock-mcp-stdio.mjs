@@ -50,6 +50,16 @@ function parseContentLength() {
 
 function handle(message) {
   if (typeof message.id !== "number") return;
+  if (message.method === "tools/call" && process.argv.includes("--result-contract")) {
+    send({ jsonrpc: "2.0", id: message.id, result: {
+      isError: true,
+      content: [
+        { type: "text", text: "fixture business error" },
+        { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=" },
+      ],
+    } });
+    return;
+  }
   const result = message.method === "initialize"
     ? { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: `mock-${mode}`, version: "1" } }
     : message.method === "tools/list"

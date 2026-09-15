@@ -7,6 +7,7 @@ import { Type, type TSchema } from "typebox";
 import type { McpServerConfig, McpStdioFraming, McpTransport } from "./mcp-config";
 import { detectMcpResponseFraming, encodeMcpMessage, selectFramingAttempts, type McpWireFraming } from "./mcp/stdio-framing";
 import { registerShutdownCleanup } from "./process-shutdown";
+import { mapMcpToolResult } from "./mcp/tool-result";
 
 interface JsonRpcRequest { jsonrpc: "2.0"; id?: number; method: string; params?: unknown }
 interface JsonRpcResponse { jsonrpc?: "2.0"; id?: number; result?: unknown; error?: { code?: number; message?: string; data?: unknown } }
@@ -705,15 +706,15 @@ export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpS
           promptSnippet: `${name}: MCP tool ${toolName} from ${server.name}.`,
           parameters: (isRecord(mcpTool.inputSchema) ? mcpTool.inputSchema : Type.Object({})) as TSchema,
           executionMode: "sequential" as const,
-          execute: async (_toolCallId, params, signal) => {
+          execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
             const result = await client.callTool(toolName, params, signal);
-            const isError = isRecord(result) && result.isError === true;
-            const text = mcpContentToText(result);
+            const { content, isError, bytes } = mapMcpToolResult(result, ctx?.model?.input.includes("image") ?? true);
             return {
-              content: [{ type: "text" as const, text }],
+              content,
+              isError,
               // raw 可能包含多 MB Base64/结构化结果；正文已进入 content，事件和 Session
               // 只保留轻量诊断元数据，避免长期双份持有。
-              details: { server: server.name, tool: toolName, isError, bytes: Buffer.byteLength(text, "utf8") },
+              details: { server: server.name, tool: toolName, isError, bytes },
             };
           },
         }) as ToolDefinition);

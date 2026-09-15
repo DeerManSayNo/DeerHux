@@ -206,7 +206,7 @@ export interface DeerLoopOptions {
   activeToolNames?: string[];
   /** ★ 单工具 executionMode 覆盖表（消灭 H6/H7/H8）。 */
   toolExecutionModes?: Record<string, "sequential" | "parallel">;
-  /** ★ 工具调用循环最大轮数（防 LLM 死循环；默认 20）。 */
+  /** ★ 工具调用循环最大轮数（防 LLM 死循环；默认 300）。 */
   maxToolRounds?: number;
   /** ★ M4：注入自定义重试策略（测试用极小 delay/settle；不传则 installRetryHardening 时建 DefaultRetryPolicy）。 */
   retryPolicy?: RetryPolicy;
@@ -226,8 +226,8 @@ export interface DeerLoopOptions {
 }
 
 /** ★ M2：工具调用循环最大轮数（防 LLM 无限调工具死循环）。
- *  与 subagent 默认预算（SUBAGENT_MAX_TOOL_ROUNDS=100）保持一致。 */
-const DEFAULT_MAX_TOOL_ROUNDS = 100;
+ *  与 subagent 默认预算（SUBAGENT_MAX_TOOL_ROUNDS=300）保持一致。 */
+const DEFAULT_MAX_TOOL_ROUNDS = 300;
 
 /** ★ M6 helper：从 AssistantMessage.content 提取所有 text block 拼接成字符串。 */
 function extractText(message: { content?: unknown }): string {
