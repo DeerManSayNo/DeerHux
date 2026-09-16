@@ -58,9 +58,9 @@ function gridTemplate(mode: ChatLayoutMode): { columns: string; rows: string; mi
   // 多窗口始终横向排列：空间不足时由工作区横向滚动，绝不折成宫格。
   switch (mode) {
     case "double":
-      return { columns: "repeat(2, minmax(360px, 1fr))", rows: "1fr", minWidth: 740 };
+      return { columns: "repeat(2, minmax(360px, 1fr))", rows: "1fr", minWidth: 732 };
     case "triple":
-      return { columns: "repeat(3, minmax(300px, 1fr))", rows: "1fr", minWidth: 940 };
+      return { columns: "repeat(3, minmax(300px, 1fr))", rows: "1fr", minWidth: 920 };
     case "quad":
       return { columns: "repeat(4, minmax(300px, 1fr))", rows: "1fr", minWidth: 1_230 };
     case "five":
@@ -76,6 +76,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
   const headerId = useId();
   const workspaceRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const scrollbarHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const {
     layoutMode,
     slotIds,
@@ -131,13 +132,31 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
     };
 
     workspace.addEventListener("wheel", onWheel, { passive: false });
-    return () => workspace.removeEventListener("wheel", onWheel);
+    return () => {
+      workspace.removeEventListener("wheel", onWheel);
+      if (scrollbarHideTimerRef.current) clearTimeout(scrollbarHideTimerRef.current);
+    };
   }, [isMultiLayout]);
 
   return (
     <div
       ref={workspaceRef}
-      className="workbench-workspace"
+      className="workbench-workspace sidebar-navigation-scroll"
+      onScroll={(event) => {
+        const workspace = event.currentTarget;
+        if (!workspace.matches(":hover")) return;
+        workspace.dataset.scrolling = "true";
+        if (scrollbarHideTimerRef.current) clearTimeout(scrollbarHideTimerRef.current);
+        scrollbarHideTimerRef.current = setTimeout(() => {
+          delete workspace.dataset.scrolling;
+          scrollbarHideTimerRef.current = null;
+        }, 700);
+      }}
+      onMouseLeave={(event) => {
+        if (scrollbarHideTimerRef.current) clearTimeout(scrollbarHideTimerRef.current);
+        scrollbarHideTimerRef.current = null;
+        delete event.currentTarget.dataset.scrolling;
+      }}
       style={{
         position: "relative",
         height: "100%",

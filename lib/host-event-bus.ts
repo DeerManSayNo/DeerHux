@@ -34,6 +34,28 @@ export type SubagentRunUpdate = {
   updatedAt: number;
 };
 
+export type LiveIslandTransportEvent = {
+  id: string;
+  type: "update" | "remove" | "done-retract";
+  project?: string;
+  status?: string;
+  detail?: string;
+  prompt?: string;
+  startedAt?: number;
+  lastActiveAt?: number;
+  detailStartedAt?: number;
+  frozenElapsed?: number | null;
+  frozenDetailElapsed?: number | null;
+  delayMs?: number;
+  cwd?: string;
+};
+
+export type LiveIslandEventsFrame = {
+  type: "live_island_events";
+  events: LiveIslandTransportEvent[];
+  updatedAt: number;
+};
+
 export type SessionTransientSnapshot = {
   type: "session_transient_snapshot";
   sessionId: string;
@@ -49,12 +71,14 @@ export type HostControlFrame =
   | HostRunningSnapshot
   | SubagentRunsSnapshot
   | SubagentRunUpdate
-  | SessionTransientSnapshot;
+  | SessionTransientSnapshot
+  | LiveIslandEventsFrame;
 
 type Listener = (frame: HostControlFrame) => void;
 
 class HostEventBus {
   private readonly listeners = new Set<Listener>();
+  private liveIslandFrame: LiveIslandEventsFrame | null = null;
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
@@ -62,9 +86,14 @@ class HostEventBus {
   }
 
   emit(frame: HostControlFrame): void {
+    if (frame.type === "live_island_events") this.liveIslandFrame = frame;
     for (const listener of [...this.listeners]) {
       try { listener(frame); } catch { /* one SSE consumer must not block others */ }
     }
+  }
+
+  getLiveIslandFrame(): LiveIslandEventsFrame | null {
+    return this.liveIslandFrame;
   }
 }
 

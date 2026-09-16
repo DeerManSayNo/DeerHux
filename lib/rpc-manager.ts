@@ -2,6 +2,7 @@ import { mergeFileChanges, readFileChanges, type FileChange } from "./file-chang
 import { createFileChangeSnapshot, FILE_CHANGE_SNAPSHOT_ENTRY, type FileChangeSnapshot } from "./file-change-snapshot";
 import { skillReference, normalizeSkillNames } from "@/lib/skill-selection";
 import { resolveChangedFilePath } from "./changed-file-path";
+import { fileApiReadUrl } from "./file-paths";
 import { cacheSessionPath, forceRefreshSessionList } from "./session-reader";
 import type { AgentEnginePort, ToolInfo } from "./engine/port";
 import { buildLiveToolsSection, orderToolNames } from "./engine/tool-prompt";
@@ -16,7 +17,7 @@ import { normalizeCodeGraphToolNames } from "./codegraph/tools";
 import type { TurnContextSnapshot } from "./engine/turn-context";
 import { classifyLlmError } from "./llm-gateway";
 import type { LlmRequestKind } from "./llm-gateway";
-import { getLiveIslandClient } from "./live-island-client";
+import { getLiveIslandBridge } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
 import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRoleSystemPromptConfig } from "./system-prompt-decomposer";
 import { SUBAGENT_TOOL_NAME } from "./parallel-agent/subagent-tool";
@@ -145,7 +146,7 @@ function buildDisplayUserContent(message: string, images?: RuntimeImage[]): Disp
         // Use file URL reference so session files stay lean (no base64 bloat)
         return {
           type: "image" as const,
-          source: { type: "url" as const, url: `/api/files${image.filePath}?type=read` },
+          source: { type: "url" as const, url: fileApiReadUrl(image.filePath) },
         };
       }
       return {
@@ -794,7 +795,7 @@ export class AgentSessionWrapper {
   start(): void {
     if (this.unsubscribe) return;
 
-    const liveIsland = getLiveIslandClient();
+    const liveIsland = getLiveIslandBridge();
     const cwd = this.session.cwd;
     liveIsland.trackSession(this.session.id, cwd);
 
@@ -830,7 +831,7 @@ export class AgentSessionWrapper {
 
   private async handleEngineEvent(
     event: AgentEvent,
-    liveIsland: ReturnType<typeof getLiveIslandClient>,
+    liveIsland: ReturnType<typeof getLiveIslandBridge>,
     turnKey: string | null,
   ): Promise<void> {
     // ★ R7 审查修复：防止在 destroy() → unsubscribe() 窗口期间，
@@ -892,7 +893,7 @@ export class AgentSessionWrapper {
       this.touch();
       for (const l of this.listeners) l(tagged);
 
-      // Forward to AIControls Live Island
+      // Forward to the DeerHux 灵动岛 overlay.
       liveIsland.handleEvent(this.session.id, currentCwd, emittedEvent);
 
       if (event.type === "tool_execution_start" && typeof event.toolCallId === "string") {
@@ -1518,7 +1519,7 @@ export class AgentSessionWrapper {
       const turnContext = await this.prepareTurnContext(rawMessage, references, skillName, admission.agentMode);
       signal?.throwIfAborted();
       if (turnContext.displayMessage) {
-        getLiveIslandClient().recordPrompt(this.session.id, turnContext.displayMessage);
+        getLiveIslandBridge().recordPrompt(this.session.id, turnContext.displayMessage);
       }
       const prepared = await this.prepareImageFallback(turnContext.message, images, turnContext.displayMessage, signal, canCommit);
       signal?.throwIfAborted();
@@ -2142,6 +2143,8 @@ export class AgentSessionWrapper {
     this.freshTurnAdmissionController?.abort(new DOMException("Session destroyed", "AbortError"));
     this.freshTurnAdmissionController = null;
     this._stopRequested = true;
+    // Drop this session's 灵动岛 row so churning sessions cannot leak rows.
+    getLiveIslandBridge().releaseSession(this.session.id);
     if (this.idlePulseInterval) { clearInterval(this.idlePulseInterval); this.idlePulseInterval = null; }
     this.unsubscribe?.();
     // 活跃回合被销毁时必须向 Journal 写入终态；空闲 wrapper 回收不是业务回合结束。

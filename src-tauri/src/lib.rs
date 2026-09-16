@@ -20,9 +20,9 @@ use std::time::{Duration, Instant};
 use std::{mem::size_of, os::windows::io::AsRawHandle, os::windows::process::CommandExt};
 #[cfg(not(debug_assertions))]
 use tauri::webview::PageLoadEvent;
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 use windows_sys::Win32::System::JobObjects::{
@@ -35,6 +35,10 @@ use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
     System::Threading::CreateMutexW,
 };
+
+mod live_island;
+#[cfg(target_os = "macos")]
+mod live_island_macos;
 
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -50,7 +54,14 @@ fn align_main_window_controls(native: &objc2_app_kit::NSWindow) {
         return;
     }
     let height = native.frame().size.height;
-    for (index, kind) in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton].into_iter().enumerate() {
+    for (index, kind) in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ]
+    .into_iter()
+    .enumerate()
+    {
         if let Some(button) = native.standardWindowButton(kind) {
             // Native window and button are retained and only used on the main thread.
             if let Some(parent) = unsafe { button.superview() } {
@@ -63,7 +74,9 @@ fn align_main_window_controls(native: &objc2_app_kit::NSWindow) {
                 let mut origin = parent.convertPoint_fromView(center, None);
                 origin.x -= frame.size.width / 2.0;
                 origin.y -= frame.size.height / 2.0;
-                if (origin.x - frame.origin.x).abs() > 0.01 || (origin.y - frame.origin.y).abs() > 0.01 {
+                if (origin.x - frame.origin.x).abs() > 0.01
+                    || (origin.y - frame.origin.y).abs() > 0.01
+                {
                     button.setFrameOrigin(origin);
                 }
             }
@@ -72,49 +85,81 @@ fn align_main_window_controls(native: &objc2_app_kit::NSWindow) {
 }
 
 #[tauri::command]
-async fn sync_header_controls(window: tauri::WebviewWindow, keep_visible: bool) -> Result<bool, String> {
-    if window.label() != "main" { return Ok(true); }
+async fn sync_header_controls(
+    window: tauri::WebviewWindow,
+    keep_visible: bool,
+) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Ok(true);
+    }
     #[cfg(target_os = "macos")]
     {
-        use objc2_app_kit::{NSAnimatablePropertyContainer, NSAnimationContext, NSWindow, NSWindowButton};
+        use objc2_app_kit::{
+            NSAnimatablePropertyContainer, NSAnimationContext, NSWindow, NSWindowButton,
+        };
         use objc2_quartz_core::CAMediaTimingFunction;
         thread_local! { static LAST_VISIBLE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
         let (send, receive) = std::sync::mpsc::channel();
         let target = window.clone();
-        window.run_on_main_thread(move || {
-            let result = target.ns_window().map(|pointer| unsafe {
-                let native: &NSWindow = &*pointer.cast();
-                align_main_window_controls(native);
-                let point = native.mouseLocationOutsideOfEventStream();
-                let height = native.frame().size.height;
-                let hovered = point.x >= 0.0 && point.x <= 246.0 && point.y <= height && point.y >= height - 48.0;
-                let visible = keep_visible || hovered;
-                LAST_VISIBLE.with(|previous| {
-                    let last = previous.replace(Some(visible));
-                    if last == Some(visible) { return; }
-                    NSAnimationContext::beginGrouping();
-                    let context = NSAnimationContext::currentContext();
-                    context.setDuration(0.45);
-                    let timing = CAMediaTimingFunction::functionWithControlPoints(0.42, 0.0, 0.58, 1.0);
-                    context.setTimingFunction(Some(&timing));
-                    for kind in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
-                        if let Some(button) = native.standardWindowButton(kind) {
-                            button.setHidden(false);
-                            button.setEnabled(visible);
-                            if last.is_none() { button.setAlphaValue(0.0); }
-                            button.animator().setAlphaValue(if visible { 1.0 } else { 0.0 });
-                        }
-                    }
-                    NSAnimationContext::endGrouping();
-                });
-                hovered
-            }).map_err(|error| error.to_string());
-            let _ = send.send(result);
-        }).map_err(|error| error.to_string())?;
+        window
+            .run_on_main_thread(move || {
+                let result = target
+                    .ns_window()
+                    .map(|pointer| unsafe {
+                        let native: &NSWindow = &*pointer.cast();
+                        align_main_window_controls(native);
+                        let point = native.mouseLocationOutsideOfEventStream();
+                        let height = native.frame().size.height;
+                        let hovered = point.x >= 0.0
+                            && point.x <= 246.0
+                            && point.y <= height
+                            && point.y >= height - 48.0;
+                        let visible = keep_visible || hovered;
+                        LAST_VISIBLE.with(|previous| {
+                            let last = previous.replace(Some(visible));
+                            if last == Some(visible) {
+                                return;
+                            }
+                            NSAnimationContext::beginGrouping();
+                            let context = NSAnimationContext::currentContext();
+                            context.setDuration(0.45);
+                            let timing = CAMediaTimingFunction::functionWithControlPoints(
+                                0.42, 0.0, 0.58, 1.0,
+                            );
+                            context.setTimingFunction(Some(&timing));
+                            for kind in [
+                                NSWindowButton::CloseButton,
+                                NSWindowButton::MiniaturizeButton,
+                                NSWindowButton::ZoomButton,
+                            ] {
+                                if let Some(button) = native.standardWindowButton(kind) {
+                                    button.setHidden(false);
+                                    button.setEnabled(visible);
+                                    if last.is_none() {
+                                        button.setAlphaValue(0.0);
+                                    }
+                                    button.animator().setAlphaValue(if visible {
+                                        1.0
+                                    } else {
+                                        0.0
+                                    });
+                                }
+                            }
+                            NSAnimationContext::endGrouping();
+                        });
+                        hovered
+                    })
+                    .map_err(|error| error.to_string());
+                let _ = send.send(result);
+            })
+            .map_err(|error| error.to_string())?;
         receive.recv().map_err(|error| error.to_string())?
     }
     #[cfg(not(target_os = "macos"))]
-    { let _ = keep_visible; Ok(false) }
+    {
+        let _ = keep_visible;
+        Ok(false)
+    }
 }
 
 #[cfg(any(test, all(not(debug_assertions), target_os = "windows")))]
@@ -171,7 +216,9 @@ fn read_clipboard_file_paths() -> Result<Vec<String>, String> {
     }
     #[cfg(target_os = "windows")]
     unsafe {
-        use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+        use windows_sys::Win32::System::DataExchange::{
+            CloseClipboard, GetClipboardData, OpenClipboard,
+        };
         use windows_sys::Win32::UI::Shell::DragQueryFileW;
         if OpenClipboard(std::ptr::null_mut()) == 0 {
             return Err("无法读取剪贴板，请重试".into());
@@ -1104,6 +1151,20 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
                     }
                 }
             }
+            if let Some(window) = app.get_webview_window(live_island::LIVE_ISLAND_WINDOW_LABEL) {
+                match format!("http://127.0.0.1:{port}/live-island").parse() {
+                    Ok(url) => {
+                        if let Err(error) = window.navigate(url) {
+                            startup_log(format!("live-island navigation failed: {error}"));
+                            eprintln!("failed to open live-island window: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        startup_log(format!("invalid live-island URL: {error}"));
+                        eprintln!("invalid live-island URL: {error}");
+                    }
+                }
+            }
         }
         Ok(_) => backend.stop(),
         Err(message) => {
@@ -1180,6 +1241,16 @@ pub fn run() {
             hide_quick_session_window,
             mark_quick_session_ready,
             resize_quick_session_window,
+            live_island::live_island_push_events,
+            live_island::live_island_clear,
+            live_island::mark_live_island_ready,
+            live_island::get_live_island_setting_command,
+            live_island::set_live_island_setting,
+            live_island::get_live_island_scale_command,
+            live_island::set_live_island_scale,
+            live_island::set_live_island_drawer_height,
+            live_island::dismiss_live_island_row,
+            live_island::focus_live_island_row,
         ])
         .setup(move |app| {
             #[cfg(debug_assertions)]
@@ -1203,7 +1274,9 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let Ok(pointer) = window.ns_window() {
                 // setup runs on the main thread. Position before the first UI sync.
-                unsafe { align_main_window_controls(&*pointer.cast()); }
+                unsafe {
+                    align_main_window_controls(&*pointer.cast());
+                }
             }
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             {
@@ -1259,6 +1332,10 @@ pub fn run() {
                     })
                     .build()?;
             position_quick_session_window(&quick_session_window)?;
+
+            // Create the 灵动岛 overlay up-front but keep it hidden until a
+            // DeerHux session reports activity.
+            live_island::init_live_island(app.handle());
 
             let quick_session_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Backquote);
             if let Err(error) = app.global_shortcut().register(quick_session_shortcut) {

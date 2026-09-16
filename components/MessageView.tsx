@@ -17,6 +17,7 @@ import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { useTheme } from "@/hooks/useTheme";
 import { formatMessageUsage } from "@/lib/message-usage";
+import { normalizeLegacyFileApiReadUrl } from "@/lib/file-paths";
 import type {
   AgentMessage,
   FileReference,
@@ -415,19 +416,20 @@ function UserMessageView({ turnSkillMessages, alwaysShowMetadata, message, entry
       {imageBlocks.map((img, i) => {
         // URL/file path images: load directly from the API — no data bloat.
         if (img.source?.type === "url" && img.source.url) {
+          const imageUrl = normalizeLegacyFileApiReadUrl(img.source.url);
           return (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               key={i}
               className="user-message-image-thumbnail user-message-image-thumbnail-clickable"
-              src={img.source.url}
+              src={imageUrl}
               alt=""
               role="button"
               tabIndex={0}
               aria-label="查看图片"
               title="查看图片"
-              onClick={(event) => openImagePreview(event, img.source!.url!)}
-              onKeyDown={(event) => handleImagePreviewKeyDown(event, img.source!.url!)}
+              onClick={(event) => openImagePreview(event, imageUrl)}
+              onKeyDown={(event) => handleImagePreviewKeyDown(event, imageUrl)}
             />
           );
         }

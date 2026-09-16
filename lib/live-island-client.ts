@@ -1,40 +1,47 @@
 /**
- * Live Island bridge client for DeerHux.
+ * DeerHux 灵动岛 bridge.
  *
- * Connects to AIControls' Live Island TCP listener (127.0.0.1:38971) and
- * reports agent session events so DeerHux sessions appear in the macOS
- * 灵动岛 alongside Claude Code sessions.
+ * DeerHux hosts its own dynamic-island overlay (see `src-tauri/src/live_island.rs`).
+ * This module is the Node-side producer: it turns agent engine events into island
+ * rows and pushes them to the Tauri host through the `live_island_push_events`
+ * command.
  *
- * Protocol: same JSON-line format as AIControls' live-island-bridge.mjs.
+ * Design constraints (DeerHux runs many sessions concurrently in one process):
+ *
+ *  - One shared state map keyed by session id. N wrappers may call into this
+ *    module at any time; each call only touches its own session entry.
+ *  - All timestamps are absolute epoch ms computed here, never in the host. The
+ *    host merges idempotently, so a batched/delayed flush cannot skew elapsed
+ *    time or resurrect stale rows.
+ *  - Events are coalesced into micro-batches and flushed off the hot path, so
+ *    streaming sessions never block on IPC and a burst of tool calls collapses
+ *    into a single push.
+ *  - Rows are dropped when their session is destroyed, so a long-lived process
+ *    with churning sessions cannot leak island rows.
  */
 
-import { connect, type Socket } from "node:net";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename } from "node:path";
+import { hostEventBus } from "./host-event-bus.ts";
 import type { AgentEvent } from "./rpc-manager";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const HOST = "127.0.0.1";
-const PORT = 38971;
-const RECONNECT_DELAY_MS = 2000;
 const DONE_RETRACT_MS = 5_000;
 const MAX_DETAIL_LENGTH = 56;
-
-const DEERHUX_BUNDLE_ID = "com.deermansayno.deerhux";
+const FLUSH_INTERVAL_MS = 80;
 const DEERHUX_APP_NAME = "DeerHux";
-const AICONTROLS_DEERHUX_EXTENSION = `${homedir()}/.deerhux/agent/extensions/aicontrols-bridge.js`;
 
 // ---------------------------------------------------------------------------
-// Types (matching AIControls live_island.rs LiveIslandEvent)
+// Types (mirroring src-tauri/src/live_island.rs)
 // ---------------------------------------------------------------------------
 
-type LiveIslandRowStatus =
+export type LiveIslandRowStatus =
   | "thinking" | "reading" | "editing" | "writing"
   | "running" | "searching" | "done" | "interrupted" | "error" | "waiting";
+
+export type LiveIslandScale = "small" | "medium" | "large" | "xlarge";
 
 interface LiveIslandMessage {
   id: string;
@@ -50,14 +57,29 @@ interface LiveIslandMessage {
   frozenDetailElapsed?: number | null;
   delayMs?: number;
   cwd?: string;
-  appBundleId?: string | null;
-  appName?: string | null;
-  appPid?: number | null;
 }
 
-// ---------------------------------------------------------------------------
-// Session state
-// ---------------------------------------------------------------------------
+/** Mirrors the host's `LiveIslandRow` after merge. */
+export interface LiveIslandRow {
+  id: string;
+  project: string;
+  status: LiveIslandRowStatus;
+  detail: string;
+  prompt: string;
+  startedAt: number;
+  lastActiveAt: number;
+  detailStartedAt: number;
+  frozenElapsed?: number | null;
+  frozenDetailElapsed?: number | null;
+  cwd?: string | null;
+}
+
+export interface LiveIslandSnapshot {
+  rows: LiveIslandRow[];
+  scale: LiveIslandScale;
+  layout: { hasNotch: boolean; notchWidth: number };
+  enabled: boolean;
+}
 
 interface SessionState {
   id: string;
@@ -73,6 +95,10 @@ interface SessionState {
   frozenElapsed: number | null;
   frozenDetailElapsed: number | null;
   activeToolCount: number;
+  /** Set when the row changed since the last flush. */
+  dirty: boolean;
+  /** Set when the session must disappear from the island entirely. */
+  dropped: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,56 +115,56 @@ function nowMs(): number {
   return Date.now();
 }
 
+const META_DIRS = new Set([
+  ".claude", ".cursor", ".codex", ".hermes", ".openclaw",
+  ".deerhux", ".config", ".local", "src", "lib", "app",
+]);
+
 function projectNameFromCwd(cwd: string): string {
-  if (!cwd) return "DeerHux";
-  const name = basename(cwd.replace(/\/+$/, ""));
-  const metaDirs = new Set([
-    ".claude", ".cursor", ".codex", ".hermes", ".openclaw",
-    ".trae", ".qoder", ".qoderwork", ".kiro", ".config",
-  ]);
-  if (metaDirs.has(name)) {
-    const parts = cwd.replace(/\/+$/, "").split("/");
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (parts[i] && !metaDirs.has(parts[i])) return parts[i];
-    }
+  if (!cwd) return DEERHUX_APP_NAME;
+  const trimmed = cwd.replace(/\/+$/, "");
+  const name = basename(trimmed);
+  if (name && !META_DIRS.has(name)) return name;
+  const parts = trimmed.split("/");
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i] && !META_DIRS.has(parts[i])) return parts[i];
   }
-  return name || "DeerHux";
-}
-
-function hasAIControlsDeerHuxExtension(): boolean {
-  if (process.env.DEERHUX_LIVE_ISLAND_FORCE === "1") return false;
-  return existsSync(AICONTROLS_DEERHUX_EXTENSION);
+  return name || DEERHUX_APP_NAME;
 }
 
 // ---------------------------------------------------------------------------
-// Tool → Live Island status
+// Tool → island status
 // ---------------------------------------------------------------------------
 
-function toolToStatus(toolName: string, input: Record<string, unknown> = {}): { status: LiveIslandRowStatus; detail: string } {
+function toolToStatus(
+  toolName: string,
+  input: Record<string, unknown> = {},
+): { status: LiveIslandRowStatus; detail: string } {
   const name = String(toolName ?? "").toLowerCase();
   const mcpShort = name.startsWith("mcp__")
     ? name.split("__").filter(Boolean).slice(1).join(" · ")
     : name;
+  const fileArg = String(input.file_path ?? input.path ?? "");
+  const fileLabel = fileArg ? basename(fileArg) : "file";
 
-  // Normalize known deerhux tool names (DeerHux SDK uses lowercase with optional prefixes)
   if (name === "read" || name.endsWith("_read")) {
-    return { status: "reading", detail: truncate(`Read · ${basename(String(input.file_path ?? input.path ?? "")) || "file"}`, MAX_DETAIL_LENGTH) };
+    return { status: "reading", detail: truncate(`Read · ${fileLabel}`, MAX_DETAIL_LENGTH) };
   }
   if (name === "edit" || name.endsWith("_edit")) {
-    return { status: "editing", detail: truncate(`Edit · ${basename(String(input.file_path ?? input.path ?? "")) || "file"}`, MAX_DETAIL_LENGTH) };
+    return { status: "editing", detail: truncate(`Edit · ${fileLabel}`, MAX_DETAIL_LENGTH) };
   }
   if (name === "write" || name.endsWith("_write")) {
-    return { status: "writing", detail: truncate(`Write · ${basename(String(input.file_path ?? input.path ?? "")) || "file"}`, MAX_DETAIL_LENGTH) };
+    return { status: "writing", detail: truncate(`Write · ${fileLabel}`, MAX_DETAIL_LENGTH) };
   }
   if (name === "bash" || name.endsWith("_bash") || name === "execute_command") {
     const cmd = String(input.command ?? "").replace(/\s+/g, " ").trim();
     return { status: "running", detail: truncate(`Bash · ${cmd || "shell"}`, MAX_DETAIL_LENGTH) };
   }
-  if (name === "grep" || name.includes("search_content")) {
-    return { status: "searching", detail: truncate(`Grep · ${String(input.pattern ?? "text")}`, MAX_DETAIL_LENGTH) };
+  if (name === "grep" || name.includes("search_content") || name.includes("code_search")) {
+    return { status: "searching", detail: truncate(`Grep · ${String(input.pattern ?? input.query ?? "text")}`, MAX_DETAIL_LENGTH) };
   }
   if (name === "find" || name === "ls" || name === "list_files" || name === "glob" || name.includes("search_file")) {
-    return { status: "searching", detail: truncate(`Search · ${String(input.path ?? "").split("/").pop() || "files"}`, MAX_DETAIL_LENGTH) };
+    return { status: "searching", detail: truncate(`Search · ${fileLabel === "file" ? "files" : fileLabel}`, MAX_DETAIL_LENGTH) };
   }
   if (name === "task" || name === "agent" || name.includes("subagent")) {
     return { status: "running", detail: truncate(`Task · ${String(input.description ?? "sub-agent")}`, MAX_DETAIL_LENGTH) };
@@ -147,48 +173,74 @@ function toolToStatus(toolName: string, input: Record<string, unknown> = {}): { 
 }
 
 // ---------------------------------------------------------------------------
-// Live Island Client
+// Bridge
 // ---------------------------------------------------------------------------
 
-class LiveIslandClient {
-  private socket: Socket | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Transport seam. The default implementation talks to the Tauri host; tests
+ * inject a recorder that captures batches without a desktop runtime.
+ */
+export type LiveIslandTransport = (
+  cmd: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+async function defaultTransport(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  if (cmd !== "live_island_push_events") return null;
+  const events = (args?.events ?? []) as LiveIslandMessage[];
+  hostEventBus.emit({ type: "live_island_events", events, updatedAt: Date.now() });
+  return null;
+}
+
+export class LiveIslandBridge {
   private sessions = new Map<string, SessionState>();
-  private pendingRemovals = new Map<string, ReturnType<typeof setTimeout>>();
-  private disposed = false;
-  private disabled = false;
+  private outbox: LiveIslandMessage[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private initialized = false;
+  private available = true;
   private logPrefix = "[deerhux-live-island]";
+
+  /** Serializes pushes so out-of-order IPC completion cannot interleave batches. */
+  private pushChain: Promise<void> = Promise.resolve();
+
+  /** Overrides Tauri IPC in tests. */
+  private transport: LiveIslandTransport | null;
+
+  constructor(transport: LiveIslandTransport | null = null) {
+    this.transport = transport;
+  }
 
   private log(msg: string): void {
     console.error(`${this.logPrefix} ${msg}`);
   }
 
-  start(): void {
-    if (hasAIControlsDeerHuxExtension()) {
-      this.disabled = true;
-      this.disposed = true;
-      this.log(`bridge disabled; AIControls deerhux extension is installed at ${AICONTROLS_DEERHUX_EXTENSION}`);
-      return;
+  private async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
+    if (!this.available) return null;
+    try {
+      const call = this.transport ?? defaultTransport;
+      return (await call(cmd, args)) as T;
+    } catch (error) {
+      // Browser dev, or the host rejected the call: disable further attempts
+      // rather than spamming on every event.
+      this.available = false;
+      this.log(`invoke ${cmd} failed, bridge disabled: ${String(error)}`);
+      return null;
     }
-    this.disabled = false;
-    this.disposed = false;
-    this.connect();
-    this.log("bridge started");
   }
 
-  dispose(): void {
-    this.disposed = true;
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
-    this.socket?.destroy();
-    this.socket = null;
-    this.sessions.clear();
-    this.pendingRemovals.forEach((t) => clearTimeout(t));
-    this.pendingRemovals.clear();
+  // ---- Lifecycle ----
+
+  /** Idempotent. Safe to call from any session wrapper. */
+  async init(): Promise<void> {
+    if (this.initialized) return;
+    this.initialized = true;
   }
 
-  /** Register a deerhux session. Called by AgentSessionWrapper.start(). */
+  /** Register a session. Called by AgentSessionWrapper.start(). */
   trackSession(sessionId: string, cwd: string): void {
-    if (this.disabled) return;
     if (this.sessions.has(sessionId)) return;
     const now = nowMs();
     const project = projectNameFromCwd(cwd);
@@ -206,42 +258,36 @@ class LiveIslandClient {
       frozenElapsed: null,
       frozenDetailElapsed: null,
       activeToolCount: 0,
+      dirty: false,
+      dropped: true,
     });
-    this.log(`tracked session: ${sessionId} project=${project} cwd=${cwd}`);
   }
 
-  /** Record the user's prompt text — call BEFORE inner.prompt() in AgentSessionWrapper. */
+  /** Record the user's prompt text — call BEFORE inner.prompt(). */
   recordPrompt(sessionId: string, promptText: string): void {
-    if (this.disabled) return;
     const session = this.sessions.get(sessionId);
-    if (session) {
-      session.prompt = truncate(promptText, 48);
-      this.log(`prompt recorded: ${sessionId} text="${session.prompt}"`);
-    }
+    if (!session) return;
+    session.prompt = truncate(promptText, 48);
   }
 
-  /** Handle a deerhux event for a session. */
+  /** Release a session's row. Called when the wrapper is destroyed. */
+  releaseSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(sessionId);
+    this.enqueue({ id: sessionId, type: "remove" });
+  }
+
+  /** Handle an agent event for a session. */
   handleEvent(sessionId: string, cwd: string, event: AgentEvent): void {
-    if (this.disabled) return;
-    if (this.disposed) return;
-
-    const session = this.sessions.get(sessionId);
+    let session = this.sessions.get(sessionId);
     if (!session) {
-      // Auto-track if not already tracked (may happen for resumed sessions)
+      // Auto-track (resumed sessions may emit before start() runs).
       this.trackSession(sessionId, cwd);
-      const s = this.sessions.get(sessionId);
-      if (!s) return;
-      this.handleEventInternal(s, event);
-      return;
+      session = this.sessions.get(sessionId);
+      if (!session) return;
     }
-
-    session.lastActiveAt = nowMs();
-    session.cwd = cwd || session.cwd;
-    this.handleEventInternal(session, event);
-  }
-
-  private handleEventInternal(session: SessionState, event: AgentEvent): void {
-    this.log(`event: session=${session.id.substring(0, 8)} type=${event.type} tool=${String(event.toolName ?? event.name ?? "")}`);
+    if (cwd) session.cwd = cwd;
 
     switch (event.type) {
       case "agent_start":
@@ -259,53 +305,84 @@ class LiveIslandClient {
     }
   }
 
-  // ---- TCP ----
+  // ---- Batch transport ----
 
-  private connect(): void {
-    if (this.disposed) return;
-    this.socket?.destroy();
+  private enqueue(message: LiveIslandMessage): void {
+    this.outbox.push(message);
+    this.scheduleFlush();
+  }
 
-    this.socket = connect(PORT, HOST, () => {
-      this.log(`connected to ${HOST}:${PORT}`);
-      // Resend active sessions
-      for (const [, session] of this.sessions) {
-        if (!session.finished) {
-          this.write(this.buildUpdate(session));
+  private scheduleFlush(): void {
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flush();
+    }, FLUSH_INTERVAL_MS);
+    // Never hold the event loop open just to ship island rows.
+    this.flushTimer.unref?.();
+  }
+
+  private async flush(): Promise<void> {
+    if (!this.outbox.length) return;
+    const batch = this.outbox;
+    this.outbox = [];
+
+    // Coalesce only *replaceable* messages: consecutive renders of the same
+    // row collapse to the newest one. Control messages (`remove`,
+    // `done-retract`) are never dropped — a `done-retract` carries the retract
+    // delay the host needs, and a `remove` must survive a preceding update.
+    const events: LiveIslandMessage[] = [];
+    const pendingRender = new Map<string, number>();
+
+    for (const message of batch) {
+      if (message.type === "update") {
+        const at = pendingRender.get(message.id);
+        if (at !== undefined) {
+          events[at] = message;
+          continue;
         }
+        pendingRender.set(message.id, events.length);
+        events.push(message);
+        continue;
       }
-    });
-
-    this.socket.on("error", (err) => {
-      this.log(`connection error: ${err.message}`);
-    });
-
-    this.socket.on("close", () => {
-      this.log("connection closed");
-      this.socket = null;
-      this.scheduleReconnect();
-    });
-  }
-
-  private scheduleReconnect(): void {
-    if (this.disposed) return;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.log(`reconnecting in ${RECONNECT_DELAY_MS}ms`);
-    this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_DELAY_MS);
-  }
-
-  private write(message: LiveIslandMessage): void {
-    if (!this.socket || this.socket.destroyed) {
-      this.log(`write skipped (no socket): id=${message.id} status=${message.status}`);
-      return;
+      // A control message closes any pending render for that row.
+      pendingRender.delete(message.id);
+      events.push(message);
     }
-    try {
-      this.socket.write(JSON.stringify(message) + "\n");
-    } catch (err) {
-      this.log(`write error: ${String(err)}`);
+
+    // Every frame is also a reconnect baseline: include the latest row for
+    // sessions that did not change in this batch. The browser can reconnect at
+    // any time and still reconstruct all concurrent rows from one frame.
+    const updatedIds = new Set(
+      events.filter((event) => event.type === "update").map((event) => event.id),
+    );
+    for (const session of this.sessions.values()) {
+      if (!session.dropped && !updatedIds.has(session.id)) {
+        events.push(this.buildUpdate(session));
+      }
     }
+
+    if (!events.length) return;
+    this.pushChain = this.pushChain
+      .then(async () => {
+        await this.invoke("live_island_push_events", { events });
+      })
+      .catch((error) => {
+        this.log(`flush failed: ${String(error)}`);
+      });
+    await this.pushChain;
   }
 
-  // ---- Message builders ----
+  /** Force any pending rows out immediately. Used on shutdown. */
+  async flushNow(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    await this.flush();
+  }
+
+  // ---- Event handlers ----
 
   private buildUpdate(session: SessionState): LiveIslandMessage {
     return {
@@ -318,101 +395,80 @@ class LiveIslandClient {
       startedAt: session.startedAt,
       lastActiveAt: session.lastActiveAt,
       detailStartedAt: session.detailStartedAt,
-      frozenElapsed: session.finished ? (session.frozenElapsed ?? nowMs() - session.startedAt) : null,
-      frozenDetailElapsed: session.finished ? (session.frozenDetailElapsed ?? nowMs() - session.detailStartedAt) : null,
+      frozenElapsed: session.finished ? session.frozenElapsed : null,
+      frozenDetailElapsed: session.finished ? session.frozenDetailElapsed : null,
       cwd: session.cwd,
-      appBundleId: DEERHUX_BUNDLE_ID,
-      appName: DEERHUX_APP_NAME,
-      appPid: null,
     };
   }
 
-  // ---- Event handlers ----
-
   private handleAgentStart(session: SessionState): void {
-    this.cancelPendingRemoval(session.id);
-
-    // Remove the existing row first so AIControls clears its internal
-    // remove_at deadline (set by a previous done-retract). Without this,
-    // AIControls may silently delete the row mid-run after the deadline
-    // expires — even though client-side state has been reset.
-    this.write({ id: session.id, type: "remove" });
+    // Remove the row first so the host clears any pending done-retract deadline
+    // left by the previous run of this same session.
+    this.enqueue({ id: session.id, type: "remove" });
 
     session.finished = false;
     session.activeToolCount = 0;
     session.frozenElapsed = null;
     session.frozenDetailElapsed = null;
     session.startedAt = nowMs();
+    session.lastActiveAt = session.startedAt;
     session.detailStartedAt = session.startedAt;
     session.islandStatus = "thinking";
-    session.islandDetail = "Thinking · DeerHux";
+    session.islandDetail = `Thinking · ${DEERHUX_APP_NAME}`;
+    session.dropped = false;
 
-    this.log(`agent_start: ${session.id.substring(0, 8)} project=${session.project}`);
-    this.write(this.buildUpdate(session));
+    this.enqueue(this.buildUpdate(session));
   }
 
   private handleAgentEnd(session: SessionState): void {
     if (session.finished) return;
     session.finished = true;
-    session.frozenElapsed = nowMs() - session.startedAt;
-    session.frozenDetailElapsed = nowMs() - session.detailStartedAt;
+    const now = nowMs();
+    session.lastActiveAt = now;
+    session.frozenElapsed = now - session.startedAt;
+    session.frozenDetailElapsed = now - session.detailStartedAt;
     session.islandStatus = "done";
     session.islandDetail = "Done · 完成";
 
-    this.log(`agent_end: ${session.id.substring(0, 8)} elapsed=${session.frozenElapsed}ms`);
-    this.write(this.buildUpdate(session));
-    this.write({ id: session.id, type: "done-retract", delayMs: DONE_RETRACT_MS });
-    this.scheduleSessionRemoval(session.id);
+    this.enqueue(this.buildUpdate(session));
+    this.enqueue({ id: session.id, type: "done-retract", delayMs: DONE_RETRACT_MS });
+    // The explicit update above remains visible until the host's retract
+    // deadline. Exclude it from later reconnect baselines so an expired row
+    // cannot be recreated without a matching done-retract event.
+    session.dropped = true;
   }
 
   private handleToolStart(session: SessionState, event: AgentEvent): void {
-    this.cancelPendingRemoval(session.id);
     session.activeToolCount++;
     session.finished = false;
+    session.lastActiveAt = nowMs();
 
     const toolName = String(event.toolName ?? event.name ?? "");
     const toolInput = (event.input ?? event.args ?? {}) as Record<string, unknown>;
     const { status, detail } = toolToStatus(toolName, toolInput);
 
     if (session.islandDetail !== detail) {
-      session.detailStartedAt = nowMs();
+      session.detailStartedAt = session.lastActiveAt;
+      session.frozenDetailElapsed = null;
     }
     session.islandStatus = status;
     session.islandDetail = detail;
+    session.dropped = false;
 
-    this.log(`tool_start: ${toolName} → ${status} "${detail}"`);
-    this.write(this.buildUpdate(session));
+    this.enqueue(this.buildUpdate(session));
   }
 
   private handleToolEnd(session: SessionState, event: AgentEvent): void {
     session.activeToolCount = Math.max(0, session.activeToolCount - 1);
+    session.lastActiveAt = nowMs();
 
-    const hadError = event.error || event.isError;
+    const hadError = Boolean(event.error ?? event.isError);
     session.islandDetail = truncate(
       `${session.islandDetail} ${hadError ? "✗" : "✓"}`,
       MAX_DETAIL_LENGTH,
     );
 
-    this.log(`tool_end: ok=${!hadError} detail="${session.islandDetail}"`);
-    this.write(this.buildUpdate(session));
-  }
-
-  // ---- Session lifecycle ----
-
-  private cancelPendingRemoval(sessionId: string): void {
-    const timer = this.pendingRemovals.get(sessionId);
-    if (timer) { clearTimeout(timer); this.pendingRemovals.delete(sessionId); }
-  }
-
-  private scheduleSessionRemoval(sessionId: string): void {
-    this.cancelPendingRemoval(sessionId);
-    const timer = setTimeout(() => {
-      this.pendingRemovals.delete(sessionId);
-      this.write({ id: sessionId, type: "remove" });
-      this.sessions.delete(sessionId);
-      this.log(`session removed: ${sessionId.substring(0, 8)}`);
-    }, DONE_RETRACT_MS + 1000);
-    this.pendingRemovals.set(sessionId, timer);
+    this.enqueue(this.buildUpdate(session));
   }
 }
 
@@ -420,13 +476,17 @@ class LiveIslandClient {
 // Singleton
 // ---------------------------------------------------------------------------
 
-const instance = new LiveIslandClient();
-let started = false;
+declare global {
+  var __deerhuxLiveIslandBridge: LiveIslandBridge | undefined;
+}
 
-export function getLiveIslandClient(): LiveIslandClient {
-  if (!started) {
-    started = true;
-    instance.start();
-  }
-  return instance;
+/**
+ * Process-wide singleton. Uses a global so Next.js HMR and route modules share
+ * one bridge — otherwise concurrent sessions could end up split across two
+ * instances with divergent row state.
+ */
+export function getLiveIslandBridge(): LiveIslandBridge {
+  const bridge = globalThis.__deerhuxLiveIslandBridge ??= new LiveIslandBridge();
+  void bridge.init();
+  return bridge;
 }

@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { getAllowedRoots, isPathAllowed } from "@/lib/file-access";
+import { fileApiReadUrl } from "@/lib/file-paths";
 
 const IMAGE_EXT_TO_MIME: Record<string, string> = {
   png: "image/png",
@@ -92,8 +93,8 @@ export async function POST(request: NextRequest) {
     const targetPath = path.join(assetsDir, fileName);
     fs.writeFileSync(targetPath, Buffer.from(await image.arrayBuffer()));
 
-    // Build the /api/files/... URL for frontend access
-    const apiUrl = `/api/files${targetPath}?type=read`;
+    // Build the encoded /api/files/... URL for frontend access.
+    const apiUrl = fileApiReadUrl(targetPath);
 
     return NextResponse.json({
       ok: true,

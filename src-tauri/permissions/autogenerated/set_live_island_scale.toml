@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-live-island-scale"
+description = "Enables the set_live_island_scale command without any pre-configured scope."
+commands.allow = ["set_live_island_scale"]
+
+[[permission]]
+identifier = "deny-set-live-island-scale"
+description = "Denies the set_live_island_scale command without any pre-configured scope."
+commands.deny = ["set_live_island_scale"]

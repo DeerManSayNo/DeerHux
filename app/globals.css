@@ -146,6 +146,13 @@ body {
   height: 100dvh;
 }
 
+/* The live-island webview is a transparent native overlay. Keep the app theme
+   background everywhere else, but let the rounded island edges reveal macOS. */
+html:has([data-live-island-root]),
+body:has([data-live-island-root]) {
+  background: transparent;
+}
+
 ::-webkit-scrollbar {
   width: 4px;
   height: 4px;

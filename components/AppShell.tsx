@@ -24,6 +24,10 @@ import { WindowControls, useNeedsWindowControls } from "./WindowControls";
 import type { Tab } from "./TabBar";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import {
+  getLiveIslandEnabled,
+  setLiveIslandEnabled,
+} from "@/lib/live-island-window";
+import {
   normalizeExternalHref,
   openExternalLink,
   openLocalFileLink,
@@ -146,6 +150,22 @@ const WINDOW_DRAG_EXCLUDE_SELECTOR = [
   "[data-tauri-drag-region='false']",
 ].join(",");
 
+const TEXT_INPUT_SELECTOR = [
+  "input",
+  "textarea",
+  "select",
+  "[contenteditable]:not([contenteditable='false'])",
+  "[role='textbox']",
+].join(",");
+
+function isDrawerShortcut(event: KeyboardEvent) {
+  return event.code === "Backslash"
+    || event.code === "IntlBackslash"
+    || event.key === "|"
+    || event.key === "｜"
+    || event.key === "、";
+}
+
 function shouldStartWindowDrag(event: PointerEventType<Element>) {
   if (event.button !== 0 || event.clientY > WINDOW_DRAG_HEIGHT || event.defaultPrevented) return false;
   const target = event.target;
@@ -224,6 +244,7 @@ export function AppShell() {
   const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "mcp" | "role" | null>(null);
   const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
   const [wechatConfigOpen, setWechatConfigOpen] = useState(false);
+  const [liveIslandEnabled, setLiveIslandEnabledState] = useState(false);
   const [shareManagerOpen, setShareManagerOpen] = useState(false);
   const [wechatStatus, setWechatStatus] = useState<{ connected: boolean; polling: boolean; accountId?: string; activeUserCount?: number } | null>(null);
   const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
@@ -246,7 +267,7 @@ export function AppShell() {
 
   // Right workspace: remember explorer and preview widths separately.
   const RIGHT_PANEL_MIN = 250;
-  const EXPLORER_PANEL_MIN = 200;
+  const EXPLORER_PANEL_MIN = 320;
   const RIGHT_PANEL_MAX = 1000;
   const [rightPanelView, setRightPanelView] = useState<"explorer" | "preview">("explorer");
   const rightPanelMinWidth = rightPanelView === "explorer" ? EXPLORER_PANEL_MIN : RIGHT_PANEL_MIN;
@@ -280,6 +301,37 @@ export function AppShell() {
   const filePreviewChannelRef = useRef<BroadcastChannel | null>(null);
   const filePreviewStateRef = useRef<FilePreviewState>({ tabs: [], activeTabId: null, cwd: null, viewerCwd: null });
   const filePreviewPopupRef = useRef<Window | null>(null);
+
+  useEffect(() => {
+    const handleDrawerShortcut = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented
+        || event.isComposing
+        || event.repeat
+        || !isDrawerShortcut(event)
+        || event.metaKey
+        || event.ctrlKey
+        || event.altKey
+      ) return;
+
+      const target = event.target instanceof Element ? event.target : document.activeElement;
+      if (target?.closest(TEXT_INPUT_SELECTOR)) return;
+
+      event.preventDefault();
+      if (sidebarOpen && rightPanelOpen) {
+        setSidebarMode("closed");
+      } else if (rightPanelOpen) {
+        setRightPanelOpen(false);
+      } else if (!sidebarOpen) {
+        setSidebarMode("open");
+      } else {
+        setRightPanelOpen(true);
+      }
+    };
+
+    window.addEventListener("keydown", handleDrawerShortcut, true);
+    return () => window.removeEventListener("keydown", handleDrawerShortcut, true);
+  }, [rightPanelOpen, sidebarOpen]);
 
   const handleAtMention = useCallback((relativePath: string) => {
     chatInputRef.current?.addReference(relativePath);
@@ -396,8 +448,8 @@ export function AppShell() {
       if (Number.isFinite(parsed)) setPreviewPanelWidth(Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, parsed)));
     }
     const storedExplorerWidth = Number(getLocalStorageItem("deerhux.explorer-panel-width"));
-    if (Number.isFinite(storedExplorerWidth) && storedExplorerWidth >= EXPLORER_PANEL_MIN) {
-      setExplorerPanelWidth(Math.min(RIGHT_PANEL_MAX, storedExplorerWidth));
+    if (Number.isFinite(storedExplorerWidth) && storedExplorerWidth > 0) {
+      setExplorerPanelWidth(Math.min(RIGHT_PANEL_MAX, Math.max(EXPLORER_PANEL_MIN, storedExplorerWidth)));
     }
     setRightPanelPinned(getLocalStorageItem("deerhux.right-panel-pinned") === "true");
     setCustomCwds(readCustomCwds());
@@ -446,6 +498,15 @@ export function AppShell() {
       if (changed) setRefreshKey((key) => key + 1);
     });
   }, [loadRunningSessions]);
+
+  // Reflect the 灵动岛 toggle, which is owned by the Tauri host.
+  useEffect(() => {
+    let active = true;
+    void getLiveIslandEnabled().then((enabled) => {
+      if (active) setLiveIslandEnabledState(enabled);
+    });
+    return () => { active = false; };
+  }, [settingsMenuOpen]);
 
   // Poll WeChat bot status for the settings dropdown inline indicator
   useEffect(() => {
@@ -1778,6 +1839,61 @@ export function AppShell() {
                   {item.label}
                 </button>
               ))}
+              <div role="separator" style={{ height: 1, margin: "5px 4px", background: "var(--border)" }} />
+              {/* 灵动岛开关：本地窗口浮层，随 DeerHux 会话状态显示 */}
+              <button
+                role="menuitemcheckbox"
+                aria-checked={liveIslandEnabled}
+                onClick={() => {
+                  const next = !liveIslandEnabled;
+                  setLiveIslandEnabledState(next);
+                  void setLiveIslandEnabled(next);
+                }}
+                style={{
+                  width: "100%",
+                  padding: "8px 9px",
+                  border: "none",
+                  borderRadius: "var(--radius-control)",
+                  background: "transparent",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontSize: 12,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    marginLeft: "auto",
+                    width: 28,
+                    height: 16,
+                    flexShrink: 0,
+                    borderRadius: 999,
+                    background: liveIslandEnabled ? "var(--accent)" : "var(--border)",
+                    position: "relative",
+                    transition: "background 0.15s ease",
+                  }}
+                >
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: 2,
+                      left: liveIslandEnabled ? 14 : 2,
+                      width: 12,
+                      height: 12,
+                      borderRadius: "50%",
+                      background: "#fff",
+                      transition: "left 0.15s ease",
+                    }}
+                  />
+                </span>
+                <span>灵动岛</span>
+              </button>
             </div>
           )}
 
@@ -1978,6 +2094,7 @@ export function AppShell() {
         style={{
           display: "flex",
           flexDirection: "column",
+          flexShrink: 0,
           borderLeft: "1px solid var(--border)",
           background: "var(--bg)",
           width: rightPanelOpen ? rightPanelWidth : 0,

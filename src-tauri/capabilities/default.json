@@ -26,6 +26,10 @@
     "core:window:allow-set-size",
     "core:window:allow-set-always-on-top",
     "core:webview:allow-create-webview-window",
+    "allow-get-live-island-setting-command",
+    "allow-set-live-island-setting",
+    "allow-get-live-island-scale-command",
+    "allow-set-live-island-scale",
     "clipboard-manager:allow-write-text",
     "dialog:allow-open",
     "shell:allow-open"

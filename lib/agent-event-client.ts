@@ -6,6 +6,7 @@ import { isCollaborationSnapshotOlder } from "@/lib/collaboration-ui-state";
 import type {
   HostControlFrame,
   HostRunningSnapshot,
+  LiveIslandEventsFrame,
   SessionTransientSnapshot,
   SubagentRunsSnapshot,
   SubagentRunUpdate,
@@ -32,6 +33,7 @@ type ControlEvent =
 type SessionListener = (event: MultiplexAgentEvent["event"] & { turnId?: string }) => void;
 type SnapshotListener = (reason: string) => void | Promise<void>;
 export type HostEventListener = (frame: HostRunningSnapshot) => void;
+export type LiveIslandEventListener = (frame: LiveIslandEventsFrame) => void;
 export type SessionTransientListener = (frame: SessionTransientSnapshot | null) => void;
 export type SubagentRunsListener = (frame: SubagentRunsSnapshot | SubagentRunUpdate) => void;
 
@@ -183,6 +185,8 @@ class AgentEventClient {
   private snapshotRecoveryAttempt = 0;
   private keepAlive = 0;
   private readonly hostListeners = new Set<HostEventListener>();
+  private readonly liveIslandListeners = new Set<LiveIslandEventListener>();
+  private liveIslandMirror: LiveIslandEventsFrame | null = null;
   private readonly transientListeners = new Map<string, Set<SessionTransientListener>>();
   private readonly subagentListeners = new Map<string, Set<SubagentRunsListener>>();
   private hostMirror: HostRunningSnapshot | null = null;
@@ -250,6 +254,13 @@ class AgentEventClient {
     this.ensureConnected();
     if (this.hostMirror) listener(this.hostMirror);
     return () => { this.hostListeners.delete(listener); this.disconnectIfUnused(); };
+  }
+
+  subscribeLiveIsland(listener: LiveIslandEventListener): () => void {
+    this.liveIslandListeners.add(listener);
+    this.ensureConnected();
+    if (this.liveIslandMirror) listener(this.liveIslandMirror);
+    return () => { this.liveIslandListeners.delete(listener); this.disconnectIfUnused(); };
   }
 
   subscribeTransient(sessionId: string, listener: SessionTransientListener): () => void {
@@ -397,6 +408,11 @@ class AgentEventClient {
       for (const listener of [...this.hostListeners]) listener(frame);
       return;
     }
+    if (frame.type === "live_island_events") {
+      this.liveIslandMirror = frame;
+      for (const listener of [...this.liveIslandListeners]) listener(frame);
+      return;
+    }
     if (frame.type === "session_transient_snapshot") {
       const previous = this.transientMirror.get(frame.sessionId);
       if (previous && previous.updatedAt > frame.updatedAt) return;
@@ -424,6 +440,7 @@ class AgentEventClient {
 
   private clearMirrors(): void {
     this.hostMirror = null;
+    this.liveIslandMirror = null;
     this.transientMirror.clear();
     this.subagentMirror.clear();
     // Null is an explicit invalidation. Consumers must wait for the new baseline
@@ -742,6 +759,10 @@ export function subscribeAgentEvents(
 
 export function subscribeHostEvents(listener: HostEventListener): () => void {
   return client.subscribeHost(listener);
+}
+
+export function subscribeLiveIslandEvents(listener: LiveIslandEventListener): () => void {
+  return client.subscribeLiveIsland(listener);
 }
 
 export function subscribeSessionTransient(

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-focus-live-island-row"
+description = "Enables the focus_live_island_row command without any pre-configured scope."
+commands.allow = ["focus_live_island_row"]
+
+[[permission]]
+identifier = "deny-focus-live-island-row"
+description = "Denies the focus_live_island_row command without any pre-configured scope."
+commands.deny = ["focus_live_island_row"]

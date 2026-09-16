@@ -387,10 +387,52 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the dismiss_live_island_row command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-dismiss-live-island-row",
+          "markdownDescription": "Enables the dismiss_live_island_row command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the focus_live_island_row command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-focus-live-island-row",
+          "markdownDescription": "Enables the focus_live_island_row command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_live_island_scale_command command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-live-island-scale-command",
+          "markdownDescription": "Enables the get_live_island_scale_command command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_live_island_setting_command command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-live-island-setting-command",
+          "markdownDescription": "Enables the get_live_island_setting_command command without any pre-configured scope."
+        },
+        {
           "description": "Enables the hide_quick_session_window command without any pre-configured scope.",
           "type": "string",
           "const": "allow-hide-quick-session-window",
           "markdownDescription": "Enables the hide_quick_session_window command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the live_island_clear command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-live-island-clear",
+          "markdownDescription": "Enables the live_island_clear command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the live_island_push_events command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-live-island-push-events",
+          "markdownDescription": "Enables the live_island_push_events command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mark_live_island_ready command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mark-live-island-ready",
+          "markdownDescription": "Enables the mark_live_island_ready command without any pre-configured scope."
         },
         {
           "description": "Enables the mark_quick_session_ready command without any pre-configured scope.",
@@ -411,16 +453,76 @@
           "markdownDescription": "Enables the resize_quick_session_window command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_live_island_drawer_height command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-live-island-drawer-height",
+          "markdownDescription": "Enables the set_live_island_drawer_height command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_live_island_scale command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-live-island-scale",
+          "markdownDescription": "Enables the set_live_island_scale command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_live_island_setting command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-live-island-setting",
+          "markdownDescription": "Enables the set_live_island_setting command without any pre-configured scope."
+        },
+        {
           "description": "Enables the sync_header_controls command without any pre-configured scope.",
           "type": "string",
           "const": "allow-sync-header-controls",
           "markdownDescription": "Enables the sync_header_controls command without any pre-configured scope."
         },
         {
+          "description": "Denies the dismiss_live_island_row command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-dismiss-live-island-row",
+          "markdownDescription": "Denies the dismiss_live_island_row command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the focus_live_island_row command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-focus-live-island-row",
+          "markdownDescription": "Denies the focus_live_island_row command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_live_island_scale_command command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-live-island-scale-command",
+          "markdownDescription": "Denies the get_live_island_scale_command command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_live_island_setting_command command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-live-island-setting-command",
+          "markdownDescription": "Denies the get_live_island_setting_command command without any pre-configured scope."
+        },
+        {
           "description": "Denies the hide_quick_session_window command without any pre-configured scope.",
           "type": "string",
           "const": "deny-hide-quick-session-window",
           "markdownDescription": "Denies the hide_quick_session_window command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the live_island_clear command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-live-island-clear",
+          "markdownDescription": "Denies the live_island_clear command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the live_island_push_events command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-live-island-push-events",
+          "markdownDescription": "Denies the live_island_push_events command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mark_live_island_ready command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mark-live-island-ready",
+          "markdownDescription": "Denies the mark_live_island_ready command without any pre-configured scope."
         },
         {
           "description": "Denies the mark_quick_session_ready command without any pre-configured scope.",
@@ -439,6 +541,24 @@
           "type": "string",
           "const": "deny-resize-quick-session-window",
           "markdownDescription": "Denies the resize_quick_session_window command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_live_island_drawer_height command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-live-island-drawer-height",
+          "markdownDescription": "Denies the set_live_island_drawer_height command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_live_island_scale command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-live-island-scale",
+          "markdownDescription": "Denies the set_live_island_scale command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_live_island_setting command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-live-island-setting",
+          "markdownDescription": "Denies the set_live_island_setting command without any pre-configured scope."
         },
         {
           "description": "Denies the sync_header_controls command without any pre-configured scope.",

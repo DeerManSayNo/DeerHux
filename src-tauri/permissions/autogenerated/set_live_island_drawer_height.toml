@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-live-island-drawer-height"
+description = "Enables the set_live_island_drawer_height command without any pre-configured scope."
+commands.allow = ["set_live_island_drawer_height"]
+
+[[permission]]
+identifier = "deny-set-live-island-drawer-height"
+description = "Denies the set_live_island_drawer_height command without any pre-configured scope."
+commands.deny = ["set_live_island_drawer_height"]
