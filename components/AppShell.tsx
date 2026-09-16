@@ -166,6 +166,22 @@ function isDrawerShortcut(event: KeyboardEvent) {
     || event.key === "、";
 }
 
+function isNewSessionShortcut(event: KeyboardEvent) {
+  return event.code === "Equal"
+    || event.code === "NumpadAdd"
+    || event.key === "+"
+    || event.key === "=";
+}
+
+function isCloseSessionShortcut(event: KeyboardEvent) {
+  return event.code === "Minus"
+    || event.code === "NumpadSubtract"
+    || event.key === "-"
+    || event.key === "_"
+    || event.key === "—"
+    || event.key === "－";
+}
+
 function shouldStartWindowDrag(event: PointerEventType<Element>) {
   if (event.button !== 0 || event.clientY > WINDOW_DRAG_HEIGHT || event.defaultPrevented) return false;
   const target = event.target;
@@ -796,6 +812,40 @@ export function AppShell() {
     }
   }, [activeSessionTabId, chatSlotIds, focusedChatSlotIndex, replaceUrl, selectedSession?.id]);
 
+  const handleCloseFocusedChatSlot = useCallback(() => {
+    const slotIndex = focusedChatSlotIndexRef.current;
+    if (!chatSlotIdsRef.current[slotIndex]) return;
+
+    handleClearChatSlot(slotIndex);
+    const nextFocusedSlotIndex = Math.max(0, slotIndex - 1);
+    focusedChatSlotIndexRef.current = nextFocusedSlotIndex;
+    setFocusedChatSlotIndex(nextFocusedSlotIndex);
+  }, [handleClearChatSlot]);
+
+  useEffect(() => {
+    const handleCloseSessionShortcut = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented
+        || event.isComposing
+        || event.repeat
+        || !isCloseSessionShortcut(event)
+        || event.metaKey
+        || event.ctrlKey
+        || event.altKey
+      ) return;
+
+      const target = event.target instanceof Element ? event.target : document.activeElement;
+      if (target?.closest(TEXT_INPUT_SELECTOR)) return;
+      if (!chatSlotIdsRef.current[focusedChatSlotIndexRef.current]) return;
+
+      event.preventDefault();
+      handleCloseFocusedChatSlot();
+    };
+
+    window.addEventListener("keydown", handleCloseSessionShortcut, true);
+    return () => window.removeEventListener("keydown", handleCloseSessionShortcut, true);
+  }, [handleCloseFocusedChatSlot]);
+
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     ignoredWorkspaceSessionIdsRef.current.delete(session.id);
     // Do not clear pendingSession here: a newly-created session is not written
@@ -943,6 +993,29 @@ export function AppShell() {
     setNewSessionCwd(cwd);
     replaceUrl("/");
   }, [getTargetChatSlotIndex, hasOpenChatWindowCapacity, placeSessionInFocusedSlot, replaceUrl, showChatWindowLimitMessage, topNewSessionCwd]);
+
+  useEffect(() => {
+    const handleNewSessionShortcut = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented
+        || event.isComposing
+        || event.repeat
+        || !isNewSessionShortcut(event)
+        || event.metaKey
+        || event.ctrlKey
+        || event.altKey
+      ) return;
+
+      const target = event.target instanceof Element ? event.target : document.activeElement;
+      if (target?.closest(TEXT_INPUT_SELECTOR)) return;
+
+      event.preventDefault();
+      handleTopNewSession();
+    };
+
+    window.addEventListener("keydown", handleNewSessionShortcut, true);
+    return () => window.removeEventListener("keydown", handleNewSessionShortcut, true);
+  }, [handleTopNewSession]);
 
   const handleSessionStarted = useCallback((session: SessionInfo | null, slotIndex: number, sourceSessionId?: string | null) => {
     // A ChatWindow can finish starting after its slot has switched to another
@@ -1278,13 +1351,13 @@ export function AppShell() {
     setActiveFileTabId(tabId);
   }, [activeFileTabId, effectiveProjectCwd, fileTabs, rightPanelOpen]);
 
-  const handleAgentEnd = useCallback((sessionId: string, _changedFiles?: string[]) => {
+  const handleAgentEnd = useCallback((sessionId: string, changedFiles?: string[]) => {
     setSessionRunning(sessionId, false);
     // Keep pendingSession until /api/sessions has actually listed it. The
     // session list is cached and DeerHux may flush the new jsonl slightly after
     // the final event; clearing the optimistic row here makes it disappear.
     setRefreshKey((k) => k + 1);
-    setExplorerRefreshKey((k) => k + 1);
+    if (changedFiles?.length) setExplorerRefreshKey((k) => k + 1);
   }, [setSessionRunning]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {

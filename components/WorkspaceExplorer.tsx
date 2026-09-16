@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { FileExplorer } from "./FileExplorer";
 import { AppIcon } from "./AppIcon";
 import { type ExplorerProjectState, readFileExplorerState, writeFileExplorerState } from "@/lib/file-explorer-state";
@@ -14,7 +14,7 @@ interface Props {
 }
 
 // The parent keys this component by cwd, so each project's state is restored independently.
-export function WorkspaceExplorer({ cwd, refreshKey, revealRequest, onOpenFile, onAtMention }: Props) {
+export const WorkspaceExplorer = memo(function WorkspaceExplorer({ cwd, refreshKey, revealRequest, onOpenFile, onAtMention }: Props) {
   const [initialState, setInitialState] = useState<ExplorerProjectState | null>(null);
   const [filterQuery, setFilterQuery] = useState("");
   const currentState = useRef<ExplorerProjectState>({ expandedPaths: [], activePath: null });
@@ -124,4 +124,4 @@ export function WorkspaceExplorer({ cwd, refreshKey, revealRequest, onOpenFile, 
       </div>
     </div>
   );
-}
+});

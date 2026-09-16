@@ -214,10 +214,12 @@ function TreeNode({
         >
           {node.name}
         </span>
-        {loading && (
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round">
-            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
-          </svg>
+        {node.isDir && (
+          <span style={{ width: 10, height: 10, flexShrink: 0, display: "flex", opacity: loading ? 1 : 0 }} aria-hidden="true">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round">
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
+            </svg>
+          </span>
         )}
         {onAtMention && hovered && (
           <button
