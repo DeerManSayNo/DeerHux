@@ -5,7 +5,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(not(debug_assertions))]
 use std::net::TcpStream;
 #[cfg(not(debug_assertions))]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(not(debug_assertions))]
 use std::process::{Child, Command, Stdio};
 #[cfg(not(debug_assertions))]
@@ -18,6 +19,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 use std::{mem::size_of, os::windows::io::AsRawHandle, os::windows::process::CommandExt};
+use tauri::path::BaseDirectory;
 #[cfg(not(debug_assertions))]
 use tauri::webview::PageLoadEvent;
 #[cfg(target_os = "macos")]
@@ -208,6 +210,72 @@ fn normalize_windows_node_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
+const STARTUP_THEME_PATH: &str = "theme.json";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupTheme {
+    Dark,
+    Light,
+}
+
+impl StartupTheme {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    fn native(self) -> tauri::Theme {
+        match self {
+            Self::Dark => tauri::Theme::Dark,
+            Self::Light => tauri::Theme::Light,
+        }
+    }
+
+    fn background(self) -> tauri::utils::config::Color {
+        match self {
+            Self::Dark => tauri::utils::config::Color(25, 26, 27, 255),
+            Self::Light => tauri::utils::config::Color(255, 255, 255, 255),
+        }
+    }
+}
+
+fn startup_theme_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .resolve(STARTUP_THEME_PATH, BaseDirectory::AppData)
+        .map_err(|error| format!("无法解析主题设置路径: {error}"))
+}
+
+fn load_startup_theme(app: &tauri::AppHandle) -> StartupTheme {
+    let stored = startup_theme_path(app)
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<String>(&text).ok())
+        .and_then(|theme| StartupTheme::parse(&theme));
+    stored.unwrap_or(StartupTheme::Dark)
+}
+
+#[tauri::command]
+fn set_startup_theme(app: tauri::AppHandle, theme: String) -> Result<(), String> {
+    let theme = StartupTheme::parse(&theme).ok_or_else(|| "无效的主题设置".to_string())?;
+    let path = startup_theme_path(&app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建主题设置目录失败: {error}"))?;
+    }
+    let json = serde_json::to_string(theme.as_str()).map_err(|error| error.to_string())?;
+    std::fs::write(path, json).map_err(|error| format!("写入主题设置失败: {error}"))
+}
+
 const QUICK_SESSION_WINDOW_LABEL: &str = "quick-session";
 
 /// Read references from the OS clipboard without reading or copying file contents.
@@ -342,7 +410,7 @@ fn set_quick_session_bootstrap_mode(window: &tauri::WebviewWindow, enabled: bool
 #[cfg(not(target_os = "macos"))]
 fn set_quick_session_bootstrap_mode(_window: &tauri::WebviewWindow, _enabled: bool) {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(all(not(debug_assertions), target_os = "macos"))]
 fn wake_quick_session_webview(app: &tauri::AppHandle) {
     let wake_app = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -372,6 +440,9 @@ fn wake_quick_session_webview(app: &tauri::AppHandle) {
         });
     });
 }
+
+#[cfg(all(not(debug_assertions), not(target_os = "macos")))]
+fn wake_quick_session_webview(_app: &tauri::AppHandle) {}
 
 #[tauri::command]
 fn hide_quick_session_window(app: tauri::AppHandle, restore_focus: bool) {
@@ -1049,6 +1120,14 @@ fn resolve_node(resource_dir: &Path) -> PathBuf {
 }
 
 #[cfg(not(debug_assertions))]
+fn node_command(node: &Path) -> Command {
+    let mut command = Command::new(node);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(debug_assertions))]
 fn show_startup_error(app: &tauri::AppHandle, message: &str) {
     startup_log(format!("startup failed: {message}"));
     if let Some(window) = app.get_webview_window("main") {
@@ -1080,7 +1159,7 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
         let resource_dir = normalize_windows_node_path(&resource_dir);
         let node = resolve_node(&resource_dir);
         let server_js = resource_dir.join("deerhux-server.js");
-        let node_version = Command::new(&node)
+        let node_version = node_command(&node)
             .arg("--version")
             .output()
             .map_err(|error| format!("无法执行内置 Node.js：{error}"))?;
@@ -1104,7 +1183,7 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
         let compile_cache = node_compile_cache_dir();
         let _ = std::fs::create_dir_all(&compile_cache);
 
-        let mut command = Command::new(&node);
+        let mut command = node_command(&node);
         command
             .arg(&server_js)
             .env("DEERHUX_RESOURCE_DIR", &resource_dir)
@@ -1116,8 +1195,6 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(target_os = "windows")]
-        command.creation_flags(CREATE_NO_WINDOW);
 
         #[cfg(target_os = "windows")]
         let job =
@@ -1310,6 +1387,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             sync_header_controls,
+            set_startup_theme,
             read_clipboard_file_paths,
             hide_quick_session_window,
             mark_quick_session_ready,
@@ -1331,10 +1409,18 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             let webview_url = WebviewUrl::App("index.html".into());
 
+            let startup_theme = load_startup_theme(app.handle());
+            let startup_theme_script = format!(
+                "window.__DEERHUX_STARTUP_THEME = {};",
+                serde_json::to_string(startup_theme.as_str())?
+            );
             let builder = WebviewWindowBuilder::new(app, "main", webview_url)
                 .title("DeerHux")
                 .inner_size(1280.0, 800.0)
-                .min_inner_size(960.0, 640.0);
+                .min_inner_size(960.0, 640.0)
+                .theme(Some(startup_theme.native()))
+                .background_color(startup_theme.background())
+                .initialization_script(startup_theme_script);
 
             #[cfg(target_os = "macos")]
             let builder = builder
@@ -1457,7 +1543,14 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_windows_verbatim_prefix;
+    use super::{strip_windows_verbatim_prefix, StartupTheme};
+
+    #[test]
+    fn parses_only_supported_startup_themes() {
+        assert_eq!(StartupTheme::parse("dark"), Some(StartupTheme::Dark));
+        assert_eq!(StartupTheme::parse("light"), Some(StartupTheme::Light));
+        assert_eq!(StartupTheme::parse("system"), None);
+    }
 
     #[test]
     fn strips_windows_verbatim_drive_prefix_for_node() {

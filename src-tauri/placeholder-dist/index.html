@@ -4,10 +4,25 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>DeerHux</title>
+  <script>
+    document.documentElement.dataset.theme =
+      window.__DEERHUX_STARTUP_THEME === 'light' ? 'light' : 'dark';
+  </script>
   <style>
     :root {
-      color-scheme: light dark;
+      color-scheme: dark;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+      --base: #191a1b;
+      --text: #ededee;
+      --muted: #b0b0b6;
+      --border: #3c3c40;
+      --brand: #ff8a45;
+      --danger: #ff8ba6;
+      --danger-bg: #3c222c;
+      --danger-border: #63404a;
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
       --base: #fcfcfc;
       --text: #202022;
       --muted: #626268;
@@ -42,6 +57,9 @@
       transform: translateY(5px);
       animation: brand-in 360ms cubic-bezier(.2, .8, .2, 1) 60ms forwards;
     }
+    .brand-light { display: none; }
+    :root[data-theme="light"] .brand-dark { display: none; }
+    :root[data-theme="light"] .brand-light { display: block; }
     .activity { display: flex; align-items: center; justify-content: center; gap: 9px; }
     .activity-dot {
       width: 6px;
@@ -99,18 +117,6 @@
     .error #detail { display: block; }
     @keyframes brand-in { to { opacity: 1; transform: translateY(0); } }
     @keyframes activity-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --base: #282a2b;
-        --text: #ededee;
-        --muted: #b0b0b6;
-        --border: #3c3c40;
-        --brand: #ff8a45;
-        --danger: #ff8ba6;
-        --danger-bg: #3c222c;
-        --danger-border: #63404a;
-      }
-    }
     @media (prefers-reduced-motion: reduce) {
       .brand { opacity: 1; transform: none; animation: none; }
       .activity-dot { animation: none; opacity: 1; }
@@ -121,10 +127,8 @@
 </head>
 <body>
   <main id="status" role="status" aria-live="polite">
-    <picture>
-      <source srcset="deerhux-v2-lockup-dark.svg" media="(prefers-color-scheme: dark)">
-      <img class="brand" src="deerhux-v2-lockup.svg" alt="DeerHux" width="620" height="180">
-    </picture>
+    <img class="brand brand-dark" src="deerhux-v2-lockup-dark.svg" alt="DeerHux" width="620" height="180">
+    <img class="brand brand-light" src="deerhux-v2-lockup.svg" alt="" width="620" height="180" aria-hidden="true">
     <div class="activity">
       <span class="activity-dot" aria-hidden="true"></span>
       <h1 id="title">正在启动 DeerHux</h1>

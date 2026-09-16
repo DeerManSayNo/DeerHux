@@ -4,6 +4,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "sync_header_controls",
+            "set_startup_theme",
             "read_clipboard_file_paths",
             "hide_quick_session_window",
             "mark_quick_session_ready",

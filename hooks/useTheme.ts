@@ -96,6 +96,12 @@ function persistTheme(theme: Theme) {
   } catch {
     // ignore storage errors (private mode, quota, etc.)
   }
+
+  // The startup page has a different origin and cannot read this localStorage.
+  // Mirror the preference natively so its very first frame uses the same theme.
+  void import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke("set_startup_theme", { theme }))
+    .catch(() => {});
 }
 
 function ensureThemeSyncChannels() {
