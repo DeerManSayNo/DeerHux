@@ -10,6 +10,26 @@ type InstrumentationGlobal = typeof globalThis & {
   __deerhuxMaintenanceByHome?: Map<string, Promise<void>>;
 };
 
+type InstrumentationTraceGlobal = typeof globalThis & {
+  __deerhuxStartupTraceOrigin?: number;
+  __deerhuxStartupTracePrevious?: number;
+};
+
+// Temporary startup diagnosis. The desktop host records "+Nms" milestones for
+// placeholder/backend-ready, but everything between the Next.js listener and
+// the scheduler was invisible — on Windows that gap reaches 27s. Keep the same
+// origin across the module's separate import sites so the deltas line up.
+function traceStartup(stage: string): void {
+  const globals = globalThis as InstrumentationTraceGlobal;
+  const origin = globals.__deerhuxStartupTraceOrigin ??= Date.now();
+  const previous = globals.__deerhuxStartupTracePrevious ?? origin;
+  const now = Date.now();
+  globals.__deerhuxStartupTracePrevious = now;
+  console.log(
+    `[startup-trace] ${stage} at +${now - origin}ms (delta ${now - previous}ms)`,
+  );
+}
+
 function startBackgroundMaintenance(home: string): Promise<void> {
   const globals = globalThis as InstrumentationGlobal;
   const maintenanceByHome = globals.__deerhuxMaintenanceByHome ??= new Map();
@@ -99,6 +119,7 @@ function startBackgroundMaintenance(home: string): Promise<void> {
 }
 
 export async function registerNodeInstrumentation(): Promise<void> {
+  traceStartup("registerNodeInstrumentation entered");
   const path = await import("path");
   const home = process.env.HOME || process.env.USERPROFILE;
 
@@ -116,15 +137,19 @@ export async function registerNodeInstrumentation(): Promise<void> {
     // Scheduler config is the only migration on the startup barrier. The
     // exclusive copy cannot overwrite a file concurrently created by the app.
     const { migratePiSchedulerConfig } = await import("./lib/legacy-migration");
+    traceStartup("legacy-migration module loaded");
     if (migratePiSchedulerConfig(home)) {
       console.log("[init] Migrated legacy scheduler config");
     }
+    traceStartup("scheduler config migration done");
   }
 
   // Keep the scheduler implementation lazy, but never let it observe the store
   // before the scheduler-specific migration barrier above has completed.
   const { startScheduler } = await import("./lib/scheduler/engine");
+  traceStartup("scheduler engine module loaded");
   startScheduler();
+  traceStartup("startScheduler returned");
 
   if (home) await startBackgroundMaintenance(home);
 }

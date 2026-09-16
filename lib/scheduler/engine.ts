@@ -16,6 +16,22 @@ let started = false;
 let schedulerLockOwned = false;
 const SCHEDULER_LOCK_FILE = "scheduler.lock";
 
+// Temporary startup diagnosis: Windows cold starts spend 15-45s somewhere
+// between the Next.js listener coming up and the scheduler starting, and the
+// existing log only had one marker for that whole stretch. Emits absolute
+// timestamps so the desktop host's log lines can be aligned with its own
+// "+Nms" milestones. Remove once the slow phase is identified.
+const STARTUP_TRACE_ORIGIN = Date.now();
+let startupTracePrevious = STARTUP_TRACE_ORIGIN;
+
+function traceStartup(stage: string): void {
+  const now = Date.now();
+  console.log(
+    `[startup-trace] ${stage} at +${now - STARTUP_TRACE_ORIGIN}ms (delta ${now - startupTracePrevious}ms)`,
+  );
+  startupTracePrevious = now;
+}
+
 function getSchedulerLockPath(): string {
   const dir = getAgentDir();
   fs.mkdirSync(dir, { recursive: true });
@@ -152,8 +168,11 @@ function unscheduleJob(taskId: string): void {
 }
 
 export function startScheduler(): void {
+  traceStartup("startScheduler entered");
   if (started) return;
-  if (!acquireSchedulerLock()) return;
+  const lockAcquired = acquireSchedulerLock();
+  traceStartup(`scheduler lock ${lockAcquired ? "acquired" : "skipped"}`);
+  if (!lockAcquired) return;
   started = true;
 
   // Kill any stale cron jobs left over from previous module load (e.g. HMR in dev).
@@ -170,6 +189,7 @@ export function startScheduler(): void {
   }
 
   const tasks = loadTasks();
+  traceStartup(`tasks loaded (${tasks.length})`);
   console.log(`[scheduler] Starting scheduler with ${tasks.length} task(s)`);
 
   for (const task of tasks) {

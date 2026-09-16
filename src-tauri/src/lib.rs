@@ -84,6 +84,19 @@ fn align_main_window_controls(native: &objc2_app_kit::NSWindow) {
     }
 }
 
+/// Startup is an opaque wait on Windows (V8 cold start, module compilation and
+/// the first Defender scan). Push coarse milestones to the placeholder page so
+/// the user sees movement instead of a frozen "starting" screen.
+#[cfg(not(debug_assertions))]
+fn push_startup_progress(app: &tauri::AppHandle, message: &str) {
+    if let Some(window) = app.get_webview_window("main") {
+        let encoded = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".into());
+        let _ = window.eval(&format!(
+            "window.__DEERHUX_STARTUP_PROGRESS && window.__DEERHUX_STARTUP_PROGRESS({encoded})"
+        ));
+    }
+}
+
 #[tauri::command]
 async fn sync_header_controls(
     window: tauri::WebviewWindow,
@@ -758,8 +771,34 @@ fn find_available_port() -> std::io::Result<u16> {
 #[cfg(not(debug_assertions))]
 enum ReadinessProbe {
     Ready,
+    /// TCP accepted but the readiness body has not arrived yet. On Windows this
+    /// is the long V8/module-loading stretch; callers surface it as progress.
+    Connected,
     Pending,
     Failed(String),
+}
+
+/// Coarse startup milestones. Only the labels the user reads live here; the
+/// placeholder page decides how to render them.
+#[cfg(not(debug_assertions))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartupStage {
+    Spawning,
+    SelfCheck,
+    Preheating,
+    Ready,
+}
+
+#[cfg(not(debug_assertions))]
+impl StartupStage {
+    fn label(self) -> &'static str {
+        match self {
+            StartupStage::Spawning => "正在启动本地运行时",
+            StartupStage::SelfCheck => "正在自检模型配置",
+            StartupStage::Preheating => "正在预热运行时，首次启动可能稍慢",
+            StartupStage::Ready => "即将完成",
+        }
+    }
 }
 
 #[cfg(not(debug_assertions))]
@@ -784,7 +823,9 @@ fn probe_server_readiness(port: u16) -> ReadinessProbe {
 
     let mut buffer = Vec::with_capacity(4096);
     if stream.take(8192).read_to_end(&mut buffer).is_err() {
-        return ReadinessProbe::Pending;
+        // The listener accepted but the route has not answered: distinguishable
+        // from "never came up", so the caller can report real progress.
+        return ReadinessProbe::Connected;
     }
     let Ok(response) = std::str::from_utf8(&buffer) else {
         return ReadinessProbe::Pending;
@@ -823,16 +864,37 @@ fn probe_server_readiness(port: u16) -> ReadinessProbe {
 }
 
 #[cfg(not(debug_assertions))]
-fn wait_for_server(port: u16, backend: &BackendState) -> Result<(), String> {
+fn wait_for_server(
+    port: u16,
+    backend: &BackendState,
+    mut on_progress: impl FnMut(StartupStage),
+) -> Result<(), String> {
     let started = Instant::now();
+    let mut stage = StartupStage::Spawning;
     while started.elapsed() < Duration::from_secs(60) {
         if backend.stopping.load(Ordering::Acquire) {
             return Err("应用窗口已关闭".into());
         }
-        match probe_server_readiness(port) {
-            ReadinessProbe::Ready => return Ok(()),
+        // A single probe can block for 10s. Reconnecting every 250ms would race
+        // the server's backlog while the first (slow) readiness import runs, so
+        // only start a new probe once the previous one has settled.
+        let next_stage = match probe_server_readiness(port) {
+            ReadinessProbe::Ready => {
+                on_progress(StartupStage::Ready);
+                return Ok(());
+            }
             ReadinessProbe::Failed(error) => return Err(error),
-            ReadinessProbe::Pending => {}
+            ReadinessProbe::Connected => StartupStage::SelfCheck,
+            // First connections on Windows go through Defender, so a slow start
+            // is expected once; say so instead of looking stuck at 12s.
+            ReadinessProbe::Pending if started.elapsed() > Duration::from_secs(12) => {
+                StartupStage::Preheating
+            }
+            ReadinessProbe::Pending => StartupStage::Spawning,
+        };
+        if next_stage != stage {
+            stage = next_stage;
+            on_progress(stage);
         }
         if let Ok(mut slot) = backend.child.lock() {
             if let Some(process) = slot.as_mut() {
@@ -1105,9 +1167,20 @@ fn start_backend(app: tauri::AppHandle, backend: Arc<BackendState>, process_star
             "backend spawned pid={pid} +{}ms",
             process_started.elapsed().as_millis()
         ));
-        let readiness = wait_for_server(port, &backend);
-        backend.startup_logging.store(false, Ordering::Release);
-        readiness?;
+        push_startup_progress(&app, StartupStage::Spawning.label());
+        {
+            let handle = app.clone();
+            let mut reported = StartupStage::Spawning;
+            let readiness = wait_for_server(port, &backend, move |stage| {
+                if stage == reported {
+                    return;
+                }
+                reported = stage;
+                push_startup_progress(&handle, stage.label());
+            });
+            backend.startup_logging.store(false, Ordering::Release);
+            readiness?;
+        }
         Ok(port)
     })();
 

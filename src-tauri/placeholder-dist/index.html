@@ -52,7 +52,31 @@
       animation: activity-pulse 1.5s ease-in-out infinite;
     }
     h1 { margin: 0; color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.55; letter-spacing: 0; }
-    #message { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    #message {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+      transition: opacity 180ms ease;
+    }
+    #message.swapping { opacity: 0; }
+    .track {
+      position: relative;
+      width: 160px;
+      height: 2px;
+      margin: 18px auto 0;
+      overflow: hidden;
+      border-radius: 1px;
+      background: var(--border);
+    }
+    .track-fill {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--brand);
+      transition: width 420ms cubic-bezier(.2, .8, .2, 1);
+    }
+    .error .track { display: none; }
     #detail {
       display: none;
       max-height: min(180px, 30vh);
@@ -90,6 +114,8 @@
     @media (prefers-reduced-motion: reduce) {
       .brand { opacity: 1; transform: none; animation: none; }
       .activity-dot { animation: none; opacity: 1; }
+      #message { transition: none; }
+      .track-fill { transition: none; }
     }
   </style>
 </head>
@@ -104,9 +130,36 @@
       <h1 id="title">正在启动 DeerHux</h1>
     </div>
     <p id="message">正在准备本地工作区</p>
+    <div class="track" aria-hidden="true"><div class="track-fill" id="fill"></div></div>
     <p id="detail"></p>
   </main>
   <script>
+    var messageElement = document.getElementById('message');
+    var fillElement = document.getElementById('fill');
+    // The real wait is unbounded (V8 cold start plus security scanning), so the
+    // bar only claims coarse milestones and never implies a remaining time.
+    var STAGE_RATIO = {
+      '正在启动本地运行时': 0.18,
+      '正在自检模型配置': 0.52,
+      '正在预热运行时，首次启动可能稍慢': 0.74,
+      '即将完成': 0.94
+    };
+    var currentRatio = 0;
+    window.__DEERHUX_STARTUP_PROGRESS = function (message) {
+      if (typeof message !== 'string' || !message) return;
+      var ratio = STAGE_RATIO[message];
+      if (typeof ratio === 'number' && ratio > currentRatio) {
+        currentRatio = ratio;
+        fillElement.style.width = (ratio * 100).toFixed(0) + '%';
+      }
+      // Keep the previous line readable while the next one fades in, so a
+      // milestone switch never flashes an empty status area.
+      messageElement.classList.add('swapping');
+      window.setTimeout(function () {
+        messageElement.textContent = message;
+        messageElement.classList.remove('swapping');
+      }, 180);
+    };
     window.__DEERHUX_STARTUP_ERROR = function (message) {
       document.getElementById('status').classList.add('error');
       document.getElementById('title').textContent = 'DeerHux 启动失败';
