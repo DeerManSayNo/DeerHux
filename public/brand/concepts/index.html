@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeerHux Logo Concepts</title>
+  <style>
+    :root{color-scheme:light dark;--paper:#f4f4f1;--ink:#292a2b;--muted:#72756f;--line:#d8dad5;--accent:#c45d2e;--dark:#202221}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:0}
+    main{width:min(1180px,100%);margin:auto;padding:36px 28px 56px}
+    header{display:flex;align-items:end;justify-content:space-between;gap:24px;padding-bottom:24px;border-bottom:1px solid var(--line)}
+    h1{margin:0;font-size:24px;line-height:1.2;font-weight:600}
+    header p{max-width:580px;margin:0;color:var(--muted);font-size:13px;line-height:1.6}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line);border-bottom:1px solid var(--line)}
+    article{min-width:0;background:var(--paper);padding:32px 0}
+    article:nth-child(odd){padding-right:32px}
+    article:nth-child(even){padding-left:32px}
+    .title{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:22px}
+    h2{margin:0;font-size:16px;font-weight:600}
+    .tag{color:var(--accent);font-size:11px;font-weight:600;text-transform:uppercase}
+    .stage{display:grid;place-items:center;min-height:330px;background:#e8e9e5;border-radius:8px}
+    .stage img{display:block;width:256px;height:256px;filter:drop-shadow(0 18px 24px rgb(27 30 27 / .14))}
+    .samples{display:flex;align-items:center;gap:18px;margin-top:18px;min-height:72px}
+    .samples img{display:block;flex:none}
+    .samples .dark{display:grid;place-items:center;width:72px;height:72px;border-radius:8px;background:var(--dark)}
+    .samples .dark img{filter:none}
+    .rationale{margin:18px 0 0;color:var(--muted);font-size:13px;line-height:1.65}
+    .criteria{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;padding-top:28px}
+    .criteria div{font-size:12px;line-height:1.55;color:var(--muted)}
+    .criteria strong{display:block;margin-bottom:4px;color:var(--ink);font-size:12px}
+    @media(max-width:720px){main{padding:24px 18px 40px}header{display:block}header p{margin-top:12px}.grid{display:block;background:transparent}.grid article{padding:28px 0;border-bottom:1px solid var(--line)}.stage{min-height:260px}.stage img{width:208px;height:208px}.criteria{grid-template-columns:1fr 1fr}}
+    @media(prefers-color-scheme:dark){:root{--paper:#202221;--ink:#f5f5f1;--muted:#a9ada6;--line:#3a3d3a}.stage{background:#2a2d2b}.samples>.light-icon{border-radius:8px;background:#ecece8}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>DeerHux / Logo Concepts</h1>
+    <p>以石墨、暖白和陶橙为统一品牌资产。四个方向均使用大色块与单一轮廓，优先保证 Dock、标题栏和 32px 小尺寸下的辨识度。</p>
+  </header>
+  <section class="grid">
+    <article>
+      <div class="title"><h2>01 · 分支 D</h2><span class="tag">品牌延续最佳</span></div>
+      <div class="stage"><img src="01-forked-d.svg" alt="分支 D 图标"></div>
+      <div class="samples"><img class="light-icon" src="01-forked-d.svg" width="72" height="72" alt=""><img src="01-forked-d.svg" width="48" height="48" alt=""><img src="01-forked-d.svg" width="32" height="32" alt=""><span class="dark"><img src="01-forked-d.svg" width="48" height="48" alt=""></span></div>
+      <p class="rationale">字母 D 建立名称识别，右上分支同时指向鹿角、Git 分支与 Agent 决策路径。形体最克制，也最容易扩展为单色标。</p>
+    </article>
+    <article>
+      <div class="title"><h2>02 · 鹿角 H</h2><span class="tag">识别最直接</span></div>
+      <div class="stage"><img src="02-antler-h.svg" alt="鹿角 H 图标"></div>
+      <div class="samples"><img class="light-icon" src="02-antler-h.svg" width="72" height="72" alt=""><img src="02-antler-h.svg" width="48" height="48" alt=""><img src="02-antler-h.svg" width="32" height="32" alt=""><span class="dark"><img src="02-antler-h.svg" width="48" height="48" alt=""></span></div>
+      <p class="rationale">将 H 的两根竖画直接处理为鹿角，保留 DeerHux 的动物记忆点。陶橙成为大面积识别色，适合在应用列表中快速定位。</p>
+    </article>
+    <article>
+      <div class="title"><h2>03 · 鹿首括号</h2><span class="tag">开发者语义最强</span></div>
+      <div class="stage"><img src="03-deer-brackets.svg" alt="鹿首括号图标"></div>
+      <div class="samples"><img class="light-icon" src="03-deer-brackets.svg" width="72" height="72" alt=""><img src="03-deer-brackets.svg" width="48" height="48" alt=""><img src="03-deer-brackets.svg" width="32" height="32" alt=""><span class="dark"><img src="03-deer-brackets.svg" width="48" height="48" alt=""></span></div>
+      <p class="rationale">两侧代码括号也构成抽象鹿角，中间只保留一个鹿面切片。保留产品领域，但相较具象鹿头更几何、更适合界面系统。</p>
+    </article>
+    <article>
+      <div class="title"><h2>04 · Agent Loop</h2><span class="tag">产品语义最强</span></div>
+      <div class="stage"><img src="04-agent-loop.svg" alt="Agent Loop 图标"></div>
+      <div class="samples"><img class="light-icon" src="04-agent-loop.svg" width="72" height="72" alt=""><img src="04-agent-loop.svg" width="48" height="48" alt=""><img src="04-agent-loop.svg" width="32" height="32" alt=""><span class="dark"><img src="04-agent-loop.svg" width="48" height="48" alt=""></span></div>
+      <p class="rationale">闭环箭头表达持续运行的 Agent Loop，内部终端提示符明确编码场景。语义清楚，但鹿的品牌资产会退居到名称层。</p>
+    </article>
+  </section>
+  <section class="criteria" aria-label="评估标准">
+    <div><strong>结构</strong>单一主轮廓，减少内部碎片。</div>
+    <div><strong>尺寸</strong>以 32px 仍可读为最低标准。</div>
+    <div><strong>颜色</strong>仅使用现有三种品牌色。</div>
+    <div><strong>容器</strong>统一 macOS squircle 安全区。</div>
+  </section>
+</main>
+</body>
+</html>

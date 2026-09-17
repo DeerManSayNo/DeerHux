@@ -11,6 +11,9 @@
 
 ## 引用
 
+- 品牌采用已选定的 A 方案（橙色曲面鹿形）。浅色、深色母版分别为 `public/brand/deerhux-a-light.png`、`public/brand/deerhux-a-dark.png`；网页图标跟随应用主题。首页空白区不展示图形 Logo，保留文字与新建会话入口。
+- `node scripts/sync-brand-icons.mjs` 从 PNG 母版生成网页缩略图及桌面 PNG／ICNS／ICO。桌面安装包固定使用浅色 A，不随应用主题切换；深色 A 保留用于网页主题适配。旧 v2 SVG 与字标作为历史资产保留，不再作为图标生成输入。
+
 - 实现：`components/AppIcon.tsx`。
 - 依赖：`lucide-react`，版本以 `package.json` 为准。
 - 示例：`components/ui/Button.tsx`。

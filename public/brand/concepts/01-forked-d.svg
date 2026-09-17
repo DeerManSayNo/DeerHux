@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <title>DeerHux Forked D concept</title>
+  <rect x="52" y="52" width="920" height="920" rx="216" fill="#292A2B"/>
+  <path fill="#FAFAF8" fill-rule="evenodd" d="M286 244h218c171 0 282 104 282 268S675 780 504 780H286V244Zm142 132v272h72c91 0 143-49 143-136s-52-136-143-136h-72Z"/>
+  <path d="M678 307v-74m0 42-53-53m53 53 53-53" stroke="#C45D2E" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

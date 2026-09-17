@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <title>DeerHux Deer Brackets concept</title>
+  <rect x="52" y="52" width="920" height="920" rx="216" fill="#FAFAF8"/>
+  <path d="M385 279 246 512l139 233M639 279l139 233-139 233" stroke="#292A2B" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m512 408-76 72 30 167h92l30-167-76-72Z" fill="#C45D2E"/>
+</svg>

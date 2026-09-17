@@ -76,6 +76,13 @@ function getServerSnapshot(): Theme {
 function applyTheme(theme: Theme) {
   const changed = getSnapshot() !== theme;
   document.documentElement.classList.toggle("dark", theme === "dark");
+  // Follow the app preference, which may intentionally differ from the OS theme.
+  const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+  if (icon) {
+    icon.href = `/brand/deerhux-a-${theme}-256.png`;
+    icon.type = "image/png";
+    icon.sizes.value = "256x256";
+  }
   if (changed) notifyListeners();
 }
 

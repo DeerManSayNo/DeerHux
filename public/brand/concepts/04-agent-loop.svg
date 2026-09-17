@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <title>DeerHux Agent Loop concept</title>
+  <rect x="52" y="52" width="920" height="920" rx="216" fill="#FAFAF8"/>
+  <path d="M700 350c-47-61-119-98-198-98-144 0-260 116-260 260s116 260 260 260c104 0 194-61 236-149" stroke="#292A2B" stroke-width="112" stroke-linecap="round"/>
+  <path d="m667 245 85 111-137 41" stroke="#C45D2E" stroke-width="74" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m420 430 86 82-86 82" stroke="#C45D2E" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M526 594h96" stroke="#C45D2E" stroke-width="62" stroke-linecap="round"/>
+</svg>
