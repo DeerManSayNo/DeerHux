@@ -823,11 +823,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (textOnly) return;
     const clipboard = e.clipboardData;
     const files = Array.from(clipboard.files);
+    const images = files.filter((file) => file.type.startsWith("image/"));
     const uriList = clipboard.getData("text/uri-list");
     const text = clipboard.getData("text/plain");
     const desktop = !!window.__TAURI_INTERNALS__;
     if (!desktop && !files.length && !uriList.includes("file://")) return;
     e.preventDefault();
+    // On Windows the native file-path lookup calls OpenClipboard. Avoid opening
+    // it again while WebView2 is already delivering image bytes for this paste.
+    if (images.length) {
+      processImageFiles(images);
+      return;
+    }
     const textarea = e.currentTarget;
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
@@ -847,19 +854,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setPendingPastes((count) => count + 1);
     setImageUploadError(null);
     try {
-      const paths = await clipboardFilePaths(uriList, desktop).catch((error: unknown) => {
-        // Native path lookup is optional when the clipboard already contains
-        // image bytes (for example a screenshot or a copied browser image).
-        if (files.some((file) => file.type.startsWith("image/"))) return [];
-        throw error;
-      });
+      const paths = await clipboardFilePaths(uriList, desktop);
       if (generation !== pasteGenerationRef.current) return;
       if (paths.length) {
         addFileReferences(paths);
         return;
       }
-      const images = files.filter((file) => file.type.startsWith("image/"));
-      if (images.length) processImageFiles(images);
       if (files.some((file) => !file.type.startsWith("image/"))) {
         setImageUploadError("无法获取文件原始路径，请复制文件路径后粘贴；文件不会复制到项目中");
       }

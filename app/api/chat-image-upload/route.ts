@@ -78,11 +78,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing cwd" }, { status: 400 });
     }
 
-    // Uploads can be the first request after reopening a historical session.
-    // Refresh roots here rather than trusting the short-lived access cache.
-    const allowedRoots = await getAllowedRoots(true);
+    let allowedRoots = await getAllowedRoots();
     if (!isPathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      // A historical project may not be present in the short-lived cache yet.
+      // Pay for a full session scan only after the cached authorization misses.
+      allowedRoots = await getAllowedRoots(true);
+      if (!isPathAllowed(cwd, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
     }
 
     const assetsDir = path.join(cwd, "assets", "chats");

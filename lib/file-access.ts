@@ -52,6 +52,7 @@ export function addAllowedRoot(root: string | null | undefined): void {
 
 async function buildAllowedRoots(fresh = false): Promise<Set<string>> {
   const { listAllSessions } = await import("@/lib/session-reader");
+  const { readProjectMeta } = await import("@/lib/project-meta");
   // Reuse the session reader's stale-while-revalidate cache. A forced scan here
   // makes every file-tree request walk all session JSONL files before it can
   // even read the requested directory. Callers can explicitly request a fresh
@@ -60,6 +61,13 @@ async function buildAllowedRoots(fresh = false): Promise<Set<string>> {
   const roots = new Set<string>();
   for (const s of sessions) {
     if (s.cwd) roots.add(normalizeRoot(s.cwd));
+  }
+
+  // A manually-added project is authorized before its first session exists.
+  // Without this, a new conversation cannot upload pasted images until the
+  // first prompt creates a session JSONL and makes the cwd discoverable above.
+  for (const cwd of readProjectMeta().customCwds) {
+    roots.add(normalizeRoot(cwd));
   }
 
   for (const root of globalThis.__deerhuxAllowedExtraRoots ?? []) {

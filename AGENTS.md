@@ -9,6 +9,11 @@
 - 代码检查：`npm run lint`。
 - 开发期间禁止运行 `next build`，它会污染 `.next/` 并影响 `npm run dev`；仅在 release 流程使用。
 
+## 设计系统
+
+- 界面、样式和交互任务使用 `design-system` Skill，先读取 `docs/design-system.md`，再按任务定位相关规则与资产。
+- 设计值以现有 Token 文件为权威来源，组件行为与 API 以源码为准；不要在文档中维护第二套具体值。
+
 ## 关键不变量
 
 - 生产主链路使用自研 `DeerLoopEngine`；Pi 提供模型传输、`SessionManager`、上下文转换和部分压缩能力，不是生产 Agent Loop 宿主。
