@@ -38,6 +38,7 @@ interface Props {
   onOptimisticSessionResolved?: (sessionId: string) => void;
   runningSessionStatuses?: Map<string, RunningSessionStatus>;
   onSessionDeleted?: (sessionId: string) => void;
+  onSessionRenamed?: (sessionId: string, name: string) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null) => void;
   explorerRefreshKey?: number;
@@ -283,7 +284,7 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, optimisticSessions, onOptimisticSessionResolved, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, explorerRefreshKey, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, optimisticSessions, onOptimisticSessionResolved, runningSessionStatuses = new Map(), onSessionDeleted, onSessionRenamed, selectedCwd: selectedCwdProp, onCwdChange, explorerRefreshKey, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
   const scrollbarHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (scrollbarHideTimerRef.current) clearTimeout(scrollbarHideTimerRef.current);
@@ -419,6 +420,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       }
     }
   }, []);
+
+  const handleSessionRenamed = useCallback((sessionId: string, name: string) => {
+    setAllSessions((sessions) => sessions.map((session) => (
+      session.id === sessionId ? { ...session, name: name || undefined } : session
+    )));
+    onSessionRenamed?.(sessionId, name);
+    void loadSessions();
+  }, [loadSessions, onSessionRenamed]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -1157,7 +1166,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 }}
                 onToggleShowAll={() => toggleShowAll(project.cwd)}
                 onSelectSession={handleSelectSidebarSession}
-                onRenamed={loadSessions}
+                onRenamed={handleSessionRenamed}
                 onSessionDeleted={(id) => {
                   onSessionDeleted?.(id);
                   loadSessions();
@@ -1190,7 +1199,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   isSelected={session.id === selectedSessionId}
                   runningStatus={runningSessionStatuses.get(session.id)}
                   onClick={() => handleSelectSidebarSession(session)}
-                  onRenamed={loadSessions}
+                  onRenamed={handleSessionRenamed}
                   onDeleted={(id) => {
                     onSessionDeleted?.(id);
                     loadSessions();
@@ -1410,7 +1419,7 @@ function ProjectSection({
   onToggle: () => void;
   onToggleShowAll: () => void;
   onSelectSession: (s: SessionInfo) => void;
-  onRenamed?: () => void;
+  onRenamed?: (sessionId: string, name: string) => void;
   onSessionDeleted?: (id: string) => void;
   onContextMenu?: (event: React.MouseEvent) => void;
   compact?: boolean;
@@ -1569,7 +1578,7 @@ function SessionTreeItem({
   selectedSessionId: string | null;
   runningSessionStatuses: Map<string, RunningSessionStatus>;
   onSelectSession: (s: SessionInfo) => void;
-  onRenamed?: () => void;
+  onRenamed?: (sessionId: string, name: string) => void;
   onSessionDeleted?: (id: string) => void;
   depth: number;
   compact?: boolean;
@@ -1643,7 +1652,7 @@ function SessionItem({
   isSelected: boolean;
   runningStatus?: RunningSessionStatus;
   onClick: () => void;
-  onRenamed?: () => void;
+  onRenamed?: (sessionId: string, name: string) => void;
   onDeleted?: (id: string) => void;
   depth?: number;
   hasChildren?: boolean;
@@ -1714,7 +1723,7 @@ function SessionItem({
       });
       if (!response.ok) throw new Error("Rename failed");
       setRenaming(false);
-      onRenamed?.();
+      onRenamed?.(session.id, name);
     } catch {
       setRenameError("保存失败，请重试");
     } finally {

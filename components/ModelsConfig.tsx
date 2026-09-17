@@ -4,98 +4,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { notifyApp } from "@/lib/app-notifications";
 import { findEmptyModelId } from "@/lib/models-config-validation";
-// Color icons (have their own fill colors — no background needed)
-import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
-import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
-import GoogleColorIcon from "@lobehub/icons/es/Google/components/Color";
-import DeepSeekColorIcon from "@lobehub/icons/es/DeepSeek/components/Color";
-import GroqIcon from "@lobehub/icons/es/Groq/components/Mono";
-import MistralColorIcon from "@lobehub/icons/es/Mistral/components/Color";
-import MoonshotIcon from "@lobehub/icons/es/Moonshot/components/Mono";
-import MinimaxColorIcon from "@lobehub/icons/es/Minimax/components/Color";
-import FireworksColorIcon from "@lobehub/icons/es/Fireworks/components/Color";
-import HuggingFaceColorIcon from "@lobehub/icons/es/HuggingFace/components/Color";
-import CerebrasColorIcon from "@lobehub/icons/es/Cerebras/components/Color";
-import OpenRouterIcon from "@lobehub/icons/es/OpenRouter/components/Mono";
-import XAIIcon from "@lobehub/icons/es/XAI/components/Mono";
-import CloudflareColorIcon from "@lobehub/icons/es/Cloudflare/components/Color";
-import VercelIcon from "@lobehub/icons/es/Vercel/components/Mono";
-import GithubCopilotIcon from "@lobehub/icons/es/GithubCopilot/components/Mono";
-import AwsColorIcon from "@lobehub/icons/es/Aws/components/Color";
-import AzureColorIcon from "@lobehub/icons/es/Azure/components/Color";
-import KimiColorIcon from "@lobehub/icons/es/Kimi/components/Color";
-import QwenColorIcon from "@lobehub/icons/es/Qwen/components/Color";
-import ZhipuColorIcon from "@lobehub/icons/es/Zhipu/components/Color";
-import CohereColorIcon from "@lobehub/icons/es/Cohere/components/Color";
-import PerplexityColorIcon from "@lobehub/icons/es/Perplexity/components/Color";
-import TogetherColorIcon from "@lobehub/icons/es/Together/components/Color";
-import GrokIcon from "@lobehub/icons/es/Grok/components/Mono";
-
-type IconComponent = React.ComponentType<{ size?: number | string; style?: React.CSSProperties }>;
-
-// hasColor=true → Color icon (self-colored SVG, no wrapper)
-// hasColor=false → Mono icon (rendered with currentColor, inherits theme text color)
-const PROVIDER_ICONS: Record<string, { Icon: IconComponent; hasColor: boolean }> = {
-  "anthropic":              { Icon: AnthropicIcon,        hasColor: false },
-  "openai":                 { Icon: OpenAIIcon,           hasColor: false },
-  "openai-codex":           { Icon: OpenAIIcon,           hasColor: false },
-  "google":                 { Icon: GoogleColorIcon,      hasColor: true },
-  "google-vertex":          { Icon: GoogleColorIcon,      hasColor: true },
-  "deepseek":               { Icon: DeepSeekColorIcon,    hasColor: true },
-  "groq":                   { Icon: GroqIcon,             hasColor: false },
-  "mistral":                { Icon: MistralColorIcon,     hasColor: true },
-  "moonshotai":             { Icon: MoonshotIcon,         hasColor: false },
-  "moonshotai-cn":          { Icon: MoonshotIcon,         hasColor: false },
-  "moonshot":               { Icon: MoonshotIcon,         hasColor: false },
-  "minimax":                { Icon: MinimaxColorIcon,     hasColor: true },
-  "minimax-cn":             { Icon: MinimaxColorIcon,     hasColor: true },
-  "fireworks":              { Icon: FireworksColorIcon,   hasColor: true },
-  "huggingface":            { Icon: HuggingFaceColorIcon, hasColor: true },
-  "cerebras":               { Icon: CerebrasColorIcon,    hasColor: true },
-  "openrouter":             { Icon: OpenRouterIcon,       hasColor: false },
-  "xai":                    { Icon: XAIIcon,              hasColor: false },
-  "cloudflare-ai-gateway":  { Icon: CloudflareColorIcon,  hasColor: true },
-  "cloudflare-workers-ai":  { Icon: CloudflareColorIcon,  hasColor: true },
-  "vercel-ai-gateway":      { Icon: VercelIcon,           hasColor: false },
-  "github-copilot":         { Icon: GithubCopilotIcon,    hasColor: false },
-  "amazon-bedrock":         { Icon: AwsColorIcon,         hasColor: true },
-  "azure-openai-responses": { Icon: AzureColorIcon,       hasColor: true },
-  "kimi-coding":            { Icon: KimiColorIcon,        hasColor: true },
-  "qwen":                   { Icon: QwenColorIcon,        hasColor: true },
-  "zai":                    { Icon: ZhipuColorIcon,       hasColor: true },
-  "cohere":                 { Icon: CohereColorIcon,      hasColor: true },
-  "perplexity":             { Icon: PerplexityColorIcon,  hasColor: true },
-  "together":               { Icon: TogetherColorIcon,    hasColor: true },
-  "grok":                   { Icon: GrokIcon,             hasColor: false },
-};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-
-interface OAuthProvider {
-  id: string;
-  name: string;
-  usesCallbackServer: boolean;
-  loggedIn: boolean;
-}
-
-interface ApiKeyProvider {
-  id: string;
-  displayName: string;
-  configured: boolean;
-  source?: string;
-  modelCount: number;
-}
-
-type OAuthLoginState =
-  | { phase: "idle" }
-  | { phase: "connecting" }
-  | { phase: "auth"; url: string; instructions: string | null; token: string }
-  | { phase: "device_code"; userCode: string; verificationUri: string; intervalSeconds: number | null; expiresInSeconds: number | null }
-  | { phase: "prompt"; message: string; placeholder: string | null; token: string }
-  | { phase: "select"; message: string; options: { id: string; label: string }[]; token: string }
-  | { phase: "progress"; message: string }
-  | { phase: "success" }
-  | { phase: "error"; message: string };
 
 interface ModelEntry {
   id: string;
@@ -141,9 +51,7 @@ type ModelTestState =
 type Selection =
   | { type: "provider"; name: string }
   | { type: "model"; providerName: string; index: number }
-  | { type: "recovery" }
-  | { type: "oauth"; providerId: string }
-  | { type: "apikey"; providerId: string };
+  | { type: "recovery" };
 
 const API_OPTIONS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
 
@@ -170,8 +78,9 @@ const inputStyle = {
   boxSizing: "border-box" as const,
 };
 
-function TextInput({ value, onChange, placeholder, mono }: { value: string; onChange: (v: string) => void; placeholder?: string; mono?: boolean }) {
-  return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+function TextInput({ value, onChange, placeholder, mono, autoFocus }: { value: string; onChange: (v: string) => void; placeholder?: string; mono?: boolean; autoFocus?: boolean }) {
+  return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoFocus={autoFocus}
+    onFocus={autoFocus ? (e) => e.currentTarget.select() : undefined}
     style={{ ...inputStyle, fontFamily: mono ? "var(--font-mono)" : "inherit" }} />;
 }
 
@@ -282,8 +191,9 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 // ── Provider detail ───────────────────────────────────────────────────────────
 
-function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
+function ProviderDetail({ name, provider, focusName, onChange, onRename, onDelete }: {
   name: string; provider: ProviderEntry;
+  focusName?: boolean;
   onChange: (p: ProviderEntry) => void; onRename: (n: string) => void; onDelete: () => void;
 }) {
   const [editingName, setEditingName] = useState(name);
@@ -306,7 +216,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
       </div>
 
       <Field label="服务商名称">
-        <TextInput value={editingName} onChange={setEditingName} placeholder="provider-name" mono />
+        <TextInput value={editingName} onChange={setEditingName} placeholder="provider-name" mono autoFocus={focusName} />
         {editingName !== name && editingName.trim() && (
           <button onClick={() => onRename(editingName.trim())}
             style={{ marginTop: 4, padding: "3px 10px", background: "var(--accent)", border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 11, alignSelf: "flex-start" }}>
@@ -863,545 +773,6 @@ function RecoveryFallbackEditor({
   );
 }
 
-// ── OAuth detail ──────────────────────────────────────────────────────────────
-
-function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefresh: () => void }) {
-  const [loginState, setLoginState] = useState<OAuthLoginState>({ phase: "idle" });
-  const [inputValue, setInputValue] = useState("");
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (loginState.phase === "auth" || loginState.phase === "prompt") {
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  }, [loginState.phase]);
-
-  // Reset state when provider changes
-  useEffect(() => {
-    setLoginState({ phase: "idle" });
-    setInputValue("");
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
-  }, [provider.id]);
-
-  useEffect(() => {
-    return () => { eventSourceRef.current?.close(); };
-  }, []);
-
-  const handleLogin = useCallback(() => {
-    eventSourceRef.current?.close();
-    setLoginState({ phase: "connecting" });
-    setInputValue("");
-
-    const es = new EventSource(`/api/auth/login/${encodeURIComponent(provider.id)}`);
-    eventSourceRef.current = es;
-
-    es.onmessage = (e) => {
-      const data = JSON.parse(e.data) as {
-        type: string; url?: string; instructions?: string | null;
-        token?: string; message?: string; placeholder?: string | null;
-        userCode?: string; verificationUri?: string; intervalSeconds?: number | null; expiresInSeconds?: number | null;
-        options?: { id: string; label: string }[];
-      };
-      if (data.type === "auth") {
-        setLoginState({ phase: "auth", url: data.url!, instructions: data.instructions ?? null, token: data.token! });
-        window.open(data.url!, "_blank", "noopener,noreferrer");
-      } else if (data.type === "device_code") {
-        setLoginState({
-          phase: "device_code",
-          userCode: data.userCode!,
-          verificationUri: data.verificationUri!,
-          intervalSeconds: data.intervalSeconds ?? null,
-          expiresInSeconds: data.expiresInSeconds ?? null,
-        });
-        window.open(data.verificationUri!, "_blank", "noopener,noreferrer");
-      } else if (data.type === "prompt_request") {
-        setLoginState({ phase: "prompt", message: data.message!, placeholder: data.placeholder ?? null, token: data.token! });
-      } else if (data.type === "select_request") {
-        setLoginState({ phase: "select", message: data.message!, options: data.options ?? [], token: data.token! });
-      } else if (data.type === "progress") {
-        setLoginState({ phase: "progress", message: data.message! });
-      } else if (data.type === "success") {
-        es.close();
-        setLoginState({ phase: "success" });
-        onRefresh();
-      } else if (data.type === "error") {
-        es.close();
-        setLoginState({ phase: "error", message: data.message! });
-      } else if (data.type === "cancelled") {
-        es.close();
-        setLoginState({ phase: "idle" });
-      }
-    };
-    es.onerror = () => {
-      es.close();
-      setLoginState((prev) => prev.phase === "success" ? prev : { phase: "error", message: "Connection lost" });
-    };
-  }, [provider.id, onRefresh]);
-
-  const handleLogout = useCallback(async () => {
-    await fetch(`/api/auth/logout/${encodeURIComponent(provider.id)}`, { method: "POST" });
-    setLoginState({ phase: "idle" });
-    onRefresh();
-  }, [provider.id, onRefresh]);
-
-  const submitCode = useCallback(async (token: string, code: string) => {
-    if (!code.trim()) return;
-    setLoginState({ phase: "progress", message: "Verifying…" });
-    try {
-      const res = await fetch(`/api/auth/login/${encodeURIComponent(provider.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, code: code.trim() }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({})) as { error?: string };
-        setLoginState({ phase: "error", message: d.error ?? `Server error ${res.status}` });
-        return;
-      }
-      setInputValue("");
-      // Success path: SSE stream will emit "success" and update state
-    } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : "Network error" });
-    }
-  }, [provider.id]);
-
-  const submitSelection = useCallback(async (token: string, value: string) => {
-    setLoginState({ phase: "progress", message: "Continuing…" });
-    try {
-      const res = await fetch(`/api/auth/login/${encodeURIComponent(provider.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, code: value }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({})) as { error?: string };
-        setLoginState({ phase: "error", message: d.error ?? `Server error ${res.status}` });
-      }
-    } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : "Network error" });
-    }
-  }, [provider.id]);
-
-  const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
-    loginState.phase === "auth" || loginState.phase === "device_code" ||
-    loginState.phase === "prompt" || loginState.phase === "select";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <SectionTitle>订阅授权 (Subscription)</SectionTitle>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: provider.loggedIn ? "#4ade80" : "var(--border)", display: "inline-block" }} />
-          <span style={{ fontSize: 11, color: provider.loggedIn ? "#4ade80" : "var(--text-dim)" }}>
-            {provider.loggedIn ? "已连接" : "未连接"}
-          </span>
-        </div>
-      </div>
-
-      {/* Status */}
-      <div style={{ minHeight: 48 }}>
-        {loginState.phase === "idle" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-            {provider.loggedIn ? "已成功连接。您可以重新登录或断开连接。" : `连接您的 ${provider.name} 账户。`}
-          </p>
-        )}
-        {loginState.phase === "connecting" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>正在打开浏览器…</p>
-        )}
-        {loginState.phase === "select" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              {loginState.message}
-            </p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {loginState.options.map((option) => (
-                <button
-                  key={option.id}
-                  onClick={() => submitSelection(loginState.token, option.id)}
-                  style={{ padding: "6px 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", cursor: "pointer", fontSize: 12, textAlign: "left" }}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {(loginState.phase === "auth" || loginState.phase === "prompt") && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              {loginState.phase === "auth"
-                ? "在浏览器中完成登录，然后从地址栏中复制重定向 URL 并粘贴到下方。"
-                : loginState.message}
-            </p>
-            {loginState.phase === "auth" && (
-              <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
-                如果浏览器窗口没有打开，{" "}
-                <a href={loginState.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
-                  点击此处打开登录页面
-                </a>
-                。
-              </p>
-            )}
-            <div style={{ display: "flex", gap: 6 }}>
-              <input
-                ref={inputRef}
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submitCode(loginState.token, inputValue); }}
-                placeholder={loginState.phase === "auth" ? "http://localhost:1455/auth/callback?code=…" : (loginState.placeholder ?? "输入内容…")}
-                style={{ flex: 1, padding: "6px 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 12, outline: "none", fontFamily: "var(--font-mono)", boxSizing: "border-box" }}
-              />
-              <button
-                onClick={() => submitCode(loginState.token, inputValue)}
-                disabled={!inputValue.trim()}
-                style={{ padding: "6px 12px", background: inputValue.trim() ? "var(--accent)" : "var(--bg-panel)", border: "none", borderRadius: 5, color: inputValue.trim() ? "#fff" : "var(--text-dim)", cursor: inputValue.trim() ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600, flexShrink: 0 }}
-              >
-                提交
-              </button>
-            </div>
-          </div>
-        )}
-        {loginState.phase === "device_code" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              打开验证页面并输入此验证码：
-            </p>
-            <div style={{ padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 16, fontWeight: 700, fontFamily: "var(--font-mono)", letterSpacing: 0 }}>
-              {loginState.userCode}
-            </div>
-            <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
-              <a href={loginState.verificationUri} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
-                {loginState.verificationUri}
-              </a>
-              {loginState.expiresInSeconds ? ` 验证码将在 ${Math.ceil(loginState.expiresInSeconds / 60)} 分钟后过期。` : ""}
-            </p>
-          </div>
-        )}
-        {loginState.phase === "progress" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>{loginState.message}</p>
-        )}
-        {loginState.phase === "success" && (
-          <p style={{ margin: 0, fontSize: 12, color: "#4ade80" }}>连接成功。</p>
-        )}
-        {loginState.phase === "error" && (
-          <p style={{ margin: 0, fontSize: 12, color: "#f87171" }}>{loginState.message}</p>
-        )}
-      </div>
-
-      {/* Actions */}
-      <div style={{ display: "flex", gap: 8 }}>
-        {isWorking ? (
-          <button
-            onClick={() => { eventSourceRef.current?.close(); setLoginState({ phase: "idle" }); }}
-            style={{ padding: "5px 12px", background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
-          >
-            取消
-          </button>
-        ) : (
-          <>
-            <button
-              onClick={handleLogin}
-              style={{ padding: "5px 14px", background: "var(--accent)", border: "none", borderRadius: 5, color: "#fff", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-            >
-              {provider.loggedIn ? "重新登录" : "登录"}
-            </button>
-            {provider.loggedIn && (
-              <button
-                onClick={handleLogout}
-                style={{ padding: "5px 12px", background: "none", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 5, color: "#ef4444", cursor: "pointer", fontSize: 12 }}
-              >
-                断开连接
-              </button>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── API Key detail ────────────────────────────────────────────────────────────
-
-function ApiKeyDetail({ provider, onRefresh }: { provider: ApiKeyProvider; onRefresh: () => void }) {
-  const [apiKey, setApiKey] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [removing, setRemoving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [savedOk, setSavedOk] = useState(false);
-
-  // Reset state when provider changes
-  useEffect(() => {
-    setApiKey("");
-    setError(null);
-    setSavedOk(false);
-  }, [provider.id]);
-
-  const handleSave = useCallback(async () => {
-    if (!apiKey.trim()) return;
-    setSaving(true);
-    setError(null);
-    setSavedOk(false);
-    try {
-      const res = await fetch(`/api/auth/api-key/${encodeURIComponent(provider.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: apiKey.trim() }),
-      });
-      const d = await res.json() as { success?: boolean; error?: string };
-      if (!res.ok || d.error) {
-        setError(d.error ?? `HTTP ${res.status}`);
-      } else {
-        setApiKey("");
-        setSavedOk(true);
-        setTimeout(() => setSavedOk(false), 2000);
-        onRefresh();
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
-    }
-  }, [apiKey, provider.id, onRefresh]);
-
-  const handleRemove = useCallback(async () => {
-    setRemoving(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/auth/api-key/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
-      const d = await res.json() as { success?: boolean; error?: string };
-      if (!res.ok || d.error) setError(d.error ?? `HTTP ${res.status}`);
-      else onRefresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setRemoving(false);
-    }
-  }, [provider.id, onRefresh]);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <SectionTitle>API 密钥</SectionTitle>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: provider.configured ? "#4ade80" : "var(--border)", display: "inline-block" }} />
-          <span style={{ fontSize: 11, color: provider.configured ? "#4ade80" : "var(--text-dim)" }}>
-            {provider.configured ? "已配置" : "未配置"}
-          </span>
-        </div>
-      </div>
-
-      <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-        {provider.configured
-          ? `API 密钥已保存。在下方输入新密钥以替换，或断开连接以清除。`
-          : `输入您的 ${provider.displayName} API 密钥以启用 ${provider.modelCount} 个模型。`}
-      </p>
-
-      <Field label="API 密钥">
-        <div style={{ display: "flex", gap: 6 }}>
-          <SecretTextInput
-            value={apiKey}
-            onChange={setApiKey}
-            onKeyDown={(e) => { if (e.key === "Enter" && apiKey.trim()) handleSave(); }}
-            placeholder={provider.configured ? "输入新密钥以替换…" : "sk-…"}
-            style={{ flex: 1 }}
-            autoComplete="off"
-            spellCheck={false}
-            mono
-          />
-          <button
-            onClick={handleSave}
-            disabled={saving || !apiKey.trim() || savedOk}
-            style={{
-              padding: "6px 12px",
-              background: savedOk ? "#16a34a" : apiKey.trim() ? "var(--accent)" : "var(--bg-panel)",
-              border: "none", borderRadius: 5,
-              color: (apiKey.trim() || savedOk) ? "#fff" : "var(--text-dim)",
-              cursor: (saving || !apiKey.trim() || savedOk) ? "not-allowed" : "pointer",
-              fontSize: 12, fontWeight: 600, flexShrink: 0,
-              display: "flex", alignItems: "center", gap: 5,
-            }}
-          >
-            {savedOk && (
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            )}
-            {savedOk ? "已保存" : saving ? "保存中…" : "保存"}
-          </button>
-        </div>
-      </Field>
-
-      {error && <p style={{ margin: 0, fontSize: 12, color: "#f87171" }}>{error}</p>}
-
-      {provider.configured && (
-        <button
-          onClick={handleRemove}
-          disabled={removing}
-          style={{
-            alignSelf: "flex-start", padding: "5px 12px",
-            background: "none", border: "1px solid rgba(239,68,68,0.3)",
-            borderRadius: 5, color: "#ef4444",
-            cursor: removing ? "not-allowed" : "pointer", fontSize: 12,
-          }}
-        >
-          {removing ? "正在移除…" : "断开连接"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── Provider icon ─────────────────────────────────────────────────────────────
-
-function ProviderIcon({ id, size }: { id: string; size: number }) {
-  const pi = PROVIDER_ICONS[id];
-  if (!pi) return null;
-  // Color icons: self-colored SVG, no wrapper needed
-  if (pi.hasColor) return <pi.Icon size={size} />;
-  // Mono icons: use currentColor so they adapt to light/dark theme
-  return <pi.Icon size={size} style={{ color: "var(--text-muted)" }} />;
-}
-
-// ── Add provider picker ───────────────────────────────────────────────────────
-
-interface AddProviderPickerProps {
-  oauthProviders: OAuthProvider[];
-  apiKeyProviders: ApiKeyProvider[];
-  onSelectOAuth: (id: string) => void;
-  onSelectApiKey: (id: string) => void;
-  onAddCustom: () => void;
-  onClose: () => void;
-}
-
-function AddProviderPicker({
-  oauthProviders, apiKeyProviders,
-  onSelectOAuth, onSelectApiKey, onAddCustom, onClose,
-}: AddProviderPickerProps) {
-  const [search, setSearch] = useState("");
-
-  useEscapeClose(onClose);
-
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => { setTimeout(() => inputRef.current?.focus(), 30); }, []);
-
-  const q = search.trim().toLowerCase();
-
-  const availableOAuth = oauthProviders.filter((p) => !p.loggedIn && (!q || p.name.toLowerCase().includes(q)));
-  const availableApiKey = apiKeyProviders.filter((p) => !p.configured && (!q || p.displayName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)));
-  const showCustom = !q || "custom".includes(q) || "openai-compatible".includes(q) || "anthropic-compatible".includes(q);
-
-  const totalCount = availableOAuth.length + availableApiKey.length + (showCustom ? 1 : 0);
-
-  const cardStyle: React.CSSProperties = {
-    display: "flex", flexDirection: "row", alignItems: "center", gap: 8,
-    padding: "10px 12px",
-    background: "var(--bg-panel)",
-    border: "1px solid var(--border)",
-    borderRadius: 7,
-    boxSizing: "border-box",
-    cursor: "pointer",
-    minWidth: 0,
-    textAlign: "left",
-    transition: "border-color 0.12s, background 0.12s",
-    width: "100%",
-  };
-
-
-
-  return (
-    <div
-      style={{ position: "fixed", inset: 0, zIndex: 1100, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center" }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div style={{ width: 820, maxWidth: "calc(100vw - 32px)", maxHeight: "min(72vh, calc(100vh - 32px))", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, display: "flex", flexDirection: "column", boxShadow: "0 8px 32px rgba(0,0,0,0.22)", overflow: "hidden" }}>
-        {/* Search */}
-        <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)", flexShrink: 0 }}>
-            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
-          <input
-            ref={inputRef}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
-            placeholder="搜索服务商…"
-            style={{ flex: 1, background: "none", border: "none", outline: "none", color: "var(--text)", fontSize: 13, boxSizing: "border-box" }}
-          />
-        </div>
-
-        {/* Card grid */}
-        <div style={{ flex: 1, overflowY: "auto", padding: 14 }}>
-          {totalCount === 0 ? (
-            <div style={{ padding: "20px 0", fontSize: 12, color: "var(--text-dim)", textAlign: "center" }}>未找到匹配的服务商</div>
-          ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(240px, 100%), 1fr))", gap: 8 }}>
-              {showCustom && (
-                <div style={{ gridColumn: "1 / -1", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>自定义</div>
-              )}
-              {showCustom && (
-                <button
-                  onClick={() => { onAddCustom(); onClose(); }}
-                  style={cardStyle}
-                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.background = "var(--bg-panel)"; }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>兼容 OpenAI / Anthropic</div>
-                    <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>自定义端点格式</div>
-                  </div>
-                  <span style={{ width: 26, height: 26, borderRadius: 5, background: "var(--bg-hover)", border: "1px dashed var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)" }}>
-                      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
-                  </span>
-                </button>
-              )}
-
-              {availableOAuth.length > 0 && (
-                <div style={{ gridColumn: "1 / -1", paddingTop: showCustom ? 6 : 0, fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>订阅授权</div>
-              )}
-              {availableOAuth.map((p) => (
-                <button key={p.id} onClick={() => { onSelectOAuth(p.id); onClose(); }}
-                  style={cardStyle}
-                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.background = "var(--bg-panel)"; }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-                    <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>OAuth</div>
-                  </div>
-                  <ProviderIcon id={p.id} size={28} />
-                </button>
-              ))}
-
-              {availableApiKey.length > 0 && (
-                <div style={{ gridColumn: "1 / -1", paddingTop: availableOAuth.length > 0 ? 6 : 0, fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>API 密钥</div>
-              )}
-              {availableApiKey.map((p) => (
-                <button key={p.id} onClick={() => { onSelectApiKey(p.id); onClose(); }}
-                  style={cardStyle}
-                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.background = "var(--bg-panel)"; }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</div>
-                    <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>{p.modelCount} 个模型</div>
-                  </div>
-                  <ProviderIcon id={p.id} size={28} />
-                </button>
-              ))}
-
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSaved?: () => void }) {
@@ -1411,25 +782,10 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
-  const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
-  const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const [newProviderName, setNewProviderName] = useState<string | null>(null);
+  const providerRowRefs = useRef(new Map<string, HTMLDivElement>());
 
-  useEscapeClose(onClose, !pickerOpen);
-
-  const loadOAuthProviders = useCallback(() => {
-    fetch("/api/auth/providers")
-      .then((r) => r.json())
-      .then((d: { providers: OAuthProvider[] }) => setOauthProviders(d.providers))
-      .catch(() => {});
-  }, []);
-
-  const loadApiKeyProviders = useCallback(() => {
-    fetch("/api/auth/all-providers")
-      .then((r) => r.json())
-      .then((d: { providers: ApiKeyProvider[] }) => setApiKeyProviders(d.providers))
-      .catch(() => {});
-  }, []);
+  useEscapeClose(onClose);
 
   useEffect(() => {
     fetch("/api/models-config")
@@ -1442,17 +798,25 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
       })
       .catch(() => setConfig({ providers: {} }))
       .finally(() => setLoading(false));
-    loadOAuthProviders();
-    loadApiKeyProviders();
-  }, [loadOAuthProviders, loadApiKeyProviders]);
+  }, []);
 
   const addCustomProvider = useCallback(() => {
+    if (loading) return;
     let finalName = "new-provider";
     let n = 1;
     while (config.providers?.[finalName]) finalName = `new-provider-${n++}`;
     setConfig((prev) => ({ ...prev, providers: { ...(prev.providers ?? {}), [finalName]: { api: "openai-completions" } } }));
+    setNewProviderName(finalName);
     setSelection({ type: "provider", name: finalName });
-  }, [config.providers]);
+  }, [config.providers, loading]);
+
+  useEffect(() => {
+    if (selection?.type !== "provider" || selection.name !== newProviderName) return;
+    const frame = requestAnimationFrame(() => {
+      providerRowRefs.current.get(selection.name)?.scrollIntoView({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [newProviderName, selection]);
 
   const updateProvider = useCallback((name: string, p: ProviderEntry) => {
     setConfig((prev) => ({ ...prev, providers: { ...(prev.providers ?? {}), [name]: p } }));
@@ -1556,8 +920,6 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
   }, [config, onSaved]);
 
   const providers = Object.entries(config.providers ?? {});
-  const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
-  const activeApiKey = apiKeyProviders.filter((p) => p.configured);
   const modelOptions = providers.flatMap(([providerName, provider]) =>
     (provider.models ?? [])
       .filter((model) => model.id.trim())
@@ -1580,16 +942,6 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
         />
       );
     }
-    if (selection.type === "oauth") {
-      const p = oauthProviders.find((p) => p.id === selection.providerId);
-      if (!p) return null;
-      return <OAuthDetail key={p.id} provider={p} onRefresh={loadOAuthProviders} />;
-    }
-    if (selection.type === "apikey") {
-      const p = apiKeyProviders.find((p) => p.id === selection.providerId);
-      if (!p) return null;
-      return <ApiKeyDetail key={p.id} provider={p} onRefresh={loadApiKeyProviders} />;
-    }
     if (selection.type === "provider") {
       const provider = config.providers?.[selection.name];
       if (!provider) return null;
@@ -1598,6 +950,7 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
           key={selection.name}
           name={selection.name}
           provider={provider}
+          focusName={selection.name === newProviderName}
           onChange={(p) => updateProvider(selection.name, p)}
           onRename={(n) => renameProvider(selection.name, n)}
           onDelete={() => deleteProvider(selection.name)}
@@ -1655,46 +1008,7 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
                 <span style={{ fontSize: 12, fontWeight: selection?.type === "recovery" ? 600 : 400, color: "var(--text)" }}>自动续跑兜底</span>
               </div>
 
-              {(activeOAuth.length > 0 || activeApiKey.length > 0 || providers.length > 0) && (
-                <div style={{ margin: "4px 8px", borderTop: "1px solid var(--border)" }} />
-              )}
-
-              {/* Active OAuth subscriptions */}
-              {activeOAuth.map((p) => {
-                const isSelected = selection?.type === "oauth" && selection.providerId === p.id;
-                return (
-                  <div
-                    key={p.id}
-                    onClick={() => setSelection({ type: "oauth", providerId: p.id })}
-                    style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", borderRadius: 5, cursor: "pointer", background: isSelected ? "var(--bg-selected)" : "none" }}
-                    onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "none"; }}
-                  >
-                    <ProviderIcon id={p.id} size={16} />
-                    <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
-                  </div>
-                );
-              })}
-
-              {/* Active API key providers */}
-              {activeApiKey.map((p) => {
-                const isSelected = selection?.type === "apikey" && selection.providerId === p.id;
-                return (
-                  <div
-                    key={p.id}
-                    onClick={() => setSelection({ type: "apikey", providerId: p.id })}
-                    style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", borderRadius: 5, cursor: "pointer", background: isSelected ? "var(--bg-selected)" : "none" }}
-                    onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "none"; }}
-                  >
-                    <ProviderIcon id={p.id} size={16} />
-                    <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</span>
-                  </div>
-                );
-              })}
-
-              {/* Divider before custom providers, only when there are active managed providers */}
-              {(activeOAuth.length > 0 || activeApiKey.length > 0) && providers.length > 0 && (
+              {providers.length > 0 && (
                 <div style={{ margin: "4px 8px", borderTop: "1px solid var(--border)" }} />
               )}
 
@@ -1705,7 +1019,14 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
                 const isProviderSelected = selection?.type === "provider" && selection.name === pName;
                 const models = pData.models ?? [];
                 return (
-                  <div key={pName} style={{ marginBottom: 2 }}>
+                  <div
+                    key={pName}
+                    ref={(node) => {
+                      if (node) providerRowRefs.current.set(pName, node);
+                      else providerRowRefs.current.delete(pName);
+                    }}
+                    style={{ marginBottom: 2 }}
+                  >
                     {/* Provider row */}
                     <div
                       onClick={() => setSelection({ type: "provider", name: pName })}
@@ -1762,15 +1083,15 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
 
             {/* Add provider */}
             <div style={{ borderTop: "1px solid var(--border)", padding: "8px 6px" }}>
-              <button onClick={() => setPickerOpen(true)} style={{
+              <button onClick={addCustomProvider} disabled={loading} style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
                 width: "100%", padding: "6px 0", background: "none", border: "1px dashed var(--border)", borderRadius: 5,
-                color: "var(--text-muted)", cursor: "pointer", fontSize: 12,
+                color: "var(--text-muted)", cursor: loading ? "not-allowed" : "pointer", fontSize: 12,
               }}
                 onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.color = "var(--accent)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}
               >
-                + 添加服务商
+                {loading ? "加载中…" : "+ 添加服务商"}
               </button>
             </div>
           </div>
@@ -1814,16 +1135,6 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
         </div>
       </div>
     </div>
-    {pickerOpen && (
-      <AddProviderPicker
-        oauthProviders={oauthProviders}
-        apiKeyProviders={apiKeyProviders}
-        onSelectOAuth={(id) => setSelection({ type: "oauth", providerId: id })}
-        onSelectApiKey={(id) => setSelection({ type: "apikey", providerId: id })}
-        onAddCustom={addCustomProvider}
-        onClose={() => setPickerOpen(false)}
-      />
-    )}
     </>
   );
 }

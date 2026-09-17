@@ -812,6 +812,28 @@ export function AppShell() {
     }
   }, [activeSessionTabId, chatSlotIds, focusedChatSlotIndex, replaceUrl, selectedSession?.id]);
 
+  const handleSessionRenamed = useCallback((sessionId: string, name: string) => {
+    const updateName = (session: SessionInfo) => (
+      session.id === sessionId ? { ...session, name: name || undefined } : session
+    );
+
+    setSessionTabs((sessions) => {
+      const next = sessions.map(updateName);
+      sessionTabsRef.current = next;
+      return next;
+    });
+    setSelectedSession((session) => {
+      const next = session ? updateName(session) : null;
+      selectedSessionRef.current = next;
+      return next;
+    });
+    setPendingSession((session) => {
+      const next = session ? updateName(session) : null;
+      pendingSessionRef.current = next;
+      return next;
+    });
+  }, []);
+
   const handleCloseFocusedChatSlot = useCallback(() => {
     const slotIndex = focusedChatSlotIndexRef.current;
     if (!chatSlotIdsRef.current[slotIndex]) return;
@@ -1591,6 +1613,10 @@ export function AppShell() {
     if (!shouldStartWindowDrag(event)) return;
     if (typeof window === "undefined" || !window.__TAURI_INTERNALS__) return;
 
+    // Cancel the webview's text-selection gesture before the async Tauri call
+    // hands this pointer sequence over to the native window manager.
+    event.preventDefault();
+
     const now = Date.now();
     const prev = lastTitlebarPointerDownRef.current;
     const DOUBLE_CLICK_THRESHOLD_MS = 400;
@@ -1657,6 +1683,7 @@ export function AppShell() {
         }}
         runningSessionStatuses={runningSessionStatuses}
         onSessionDeleted={handleSessionDeleted}
+        onSessionRenamed={handleSessionRenamed}
         selectedCwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         explorerRefreshKey={explorerRefreshKey}

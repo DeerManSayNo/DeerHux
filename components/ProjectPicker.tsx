@@ -22,10 +22,11 @@ type ProjectPickerProps = {
   onSelect?: (cwd: string) => void;
   compact?: boolean;
   sessionName?: string;
+  isHighlighted?: boolean;
 };
 
 // Project switcher shared by session headers and the idle start surface.
-export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compact = false, sessionName }: ProjectPickerProps) {
+export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compact = false, sessionName, isHighlighted = false }: ProjectPickerProps) {
   const [open, setOpen] = useState(false);
   const options = useMemo(() => {
     const byCwd = new Map<string, string>();
@@ -99,7 +100,17 @@ export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compa
           event.currentTarget.style.background = open ? "var(--bg-hover)" : "transparent";
         }}
       >
-        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: isHighlighted ? "var(--accent)" : "inherit",
+          }}
+        >
+          {label}
+        </span>
         {sessionName && (
           <span
             title={sessionName}

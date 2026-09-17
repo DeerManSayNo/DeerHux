@@ -30,6 +30,25 @@ html.dark :is(.chat-window-surface, .chat-session-frame) {
 
 .chat-window-surface [data-composer-toolbar] button { border-radius: var(--radius-control); }
 
+.chat-window-surface [data-chat-context-reveal] {
+  display: grid;
+  overflow: hidden;
+  animation: chat-context-reveal 180ms ease-out both;
+}
+
+@keyframes chat-context-reveal {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @container chat-input (max-width: 620px) {
   .chat-window-surface [data-chat-skill-row] {
     flex-direction: column !important;
@@ -70,5 +89,11 @@ html.dark :is(.chat-window-surface, .chat-session-frame) {
   .chat-window-surface [data-chat-file-reference-primary],
   .chat-window-surface [data-chat-context-chip] {
     flex: 0 0 auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-window-surface [data-chat-context-reveal] {
+    animation: none;
   }
 }

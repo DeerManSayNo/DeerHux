@@ -7,6 +7,7 @@ const styles = readFileSync(new URL("../components/chat-surface.css", import.met
 for (const marker of [
   "data-chat-input",
   "data-chat-skill-row",
+  "data-chat-context-reveal",
   "data-chat-project-skills",
   "data-chat-file-references",
   "data-chat-context-chip",
@@ -20,6 +21,9 @@ assert.match(styles, /@container chat-input \(max-width: 620px\)/);
 assert.match(styles, /\[data-chat-skill-row\][\s\S]*?flex-direction: column !important/);
 assert.match(styles, /\[data-chat-file-references\][\s\S]*?overflow-x: auto !important/);
 assert.match(styles, /\[data-chat-file-references\][\s\S]*?flex-direction: row !important/);
+assert.match(styles, /\[data-chat-context-reveal\][\s\S]*?animation: chat-context-reveal 180ms ease-out both/);
+assert.match(styles, /@keyframes chat-context-reveal[\s\S]*?grid-template-rows: 0fr[\s\S]*?grid-template-rows: 1fr/);
+assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\[data-chat-context-reveal\][\s\S]*?animation: none/);
 
 const previewSource = input.slice(
   input.indexOf("function attachedImagePreviewSource"),

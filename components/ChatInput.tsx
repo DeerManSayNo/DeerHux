@@ -1328,18 +1328,20 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
         {/* Input context row: project skills on the left, file references on the right */}
         {(commonProjectSkills.length > 0 || hasFileReferences) && (
-          <div
-            ref={skillRowRef}
-            data-chat-skill-row
-            style={{
-              display: "flex",
-              alignItems: "flex-end",
-              justifyContent: "space-between",
-              gap: 6,
-              marginBottom: 6,
-              padding: "0 1px 2px",
-            }}
-          >
+          <div data-chat-context-reveal>
+            <div
+              ref={skillRowRef}
+              data-chat-skill-row
+              style={{
+                display: "flex",
+                alignItems: "flex-end",
+                justifyContent: "space-between",
+                gap: 6,
+                minHeight: 0,
+                marginBottom: 6,
+                padding: "0 1px 2px",
+              }}
+            >
             <div
               data-chat-project-skills
               style={{
@@ -1498,6 +1500,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 </>
               </div>
             )}
+            </div>
           </div>
         )}
 

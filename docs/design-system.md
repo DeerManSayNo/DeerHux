@@ -13,6 +13,7 @@ DeerHux 是面向持续编码工作的桌面 Agent 工作台，采用安静、�
 - Token：[Token 使用契约](design-system/token-contract.md)；权威源为 `app/design-tokens.css` 与 `app/globals.css`。
 - 组件：`components/ui/`、`components/AppIcon.tsx`；公开 API 以源码为准。
 - 页面与任务模式：[工作台模式](design-system/patterns/workbench.md)。
+- 安装与分发：[macOS 安装窗口](design-system/patterns/macos-installer.md)。
 - 领域契约：`docs/shared-workspace-design.md` 记录分享工作区的产品与安全边界。
 - 验证：设计 Token、主题色、主题同步和生产主题门禁脚本，详见 Token 使用契约。
 

@@ -1584,6 +1584,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               projectOptions={selectableProjectOptions}
               sessionName={sessionHeaderName}
               compact={compact}
+              isHighlighted={isFocused}
               onSelect={canSwitchEmptyProject ? onNewSessionCwdChange : undefined}
             />
           </div>
