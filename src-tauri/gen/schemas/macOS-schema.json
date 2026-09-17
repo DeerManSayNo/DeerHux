@@ -471,6 +471,12 @@
           "markdownDescription": "Enables the set_live_island_setting command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_startup_theme command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-startup-theme",
+          "markdownDescription": "Enables the set_startup_theme command without any pre-configured scope."
+        },
+        {
           "description": "Enables the sync_header_controls command without any pre-configured scope.",
           "type": "string",
           "const": "allow-sync-header-controls",
@@ -559,6 +565,12 @@
           "type": "string",
           "const": "deny-set-live-island-setting",
           "markdownDescription": "Denies the set_live_island_setting command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_startup_theme command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-startup-theme",
+          "markdownDescription": "Denies the set_startup_theme command without any pre-configured scope."
         },
         {
           "description": "Denies the sync_header_controls command without any pre-configured scope.",

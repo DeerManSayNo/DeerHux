@@ -68,7 +68,10 @@ pub fn query_notch_layout() -> NotchLayout {
     let right_width = screen.auxiliaryTopRightArea().size.width;
 
     let base_width = if left_width > 0.0 && right_width > 0.0 {
-        (frame_width - left_width - right_width).max(0.0)
+        // Some macOS versions report auxiliary areas whose remaining gap is
+        // narrower than the physical camera housing. Keep the known-safe
+        // exclusion as a floor so paired sessions never enter the notch.
+        (frame_width - left_width - right_width).max(FALLBACK_NOTCH_EXCLUSION_WIDTH)
     } else {
         FALLBACK_NOTCH_EXCLUSION_WIDTH
     };

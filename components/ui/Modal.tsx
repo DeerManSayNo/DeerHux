@@ -6,7 +6,7 @@ import { Button } from "./Button";
 import styles from "./Modal.module.css";
 
 /**
- * 二级窗口外壳。规范见 docs/design-system.md「二级窗口与弹层」。
+ * 二级窗口外壳。
  *
  * 统一承担：遮罩与层级、Escape 关闭、点击遮罩关闭、焦点约束与恢复、
  * 弹窗圆角与阴影、滚动容器（.app-scrollbar）。

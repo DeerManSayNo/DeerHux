@@ -236,6 +236,12 @@ impl LiveIslandState {
                             tracked.row.frozen_elapsed =
                                 Some(now.saturating_sub(tracked.row.started_at));
                         }
+                        // Fallback only: the renderer stopped sending step timers
+                        // (old build / dropped batch), so close the step clock here.
+                        if tracked.row.frozen_detail_elapsed.is_none() {
+                            tracked.row.frozen_detail_elapsed =
+                                Some(now.saturating_sub(tracked.row.detail_started_at));
+                        }
                         tracked.row.last_active_at = now;
                         tracked.remove_at = Some(now + event.delay_ms.unwrap_or(5_000));
                         self.version += 1;

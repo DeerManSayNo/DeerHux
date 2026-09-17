@@ -126,6 +126,13 @@ export function currentToolActivity(tool: ToolCallContent): string {
   return TOOL_ACTIVITIES[tool.toolName]?.current ?? `调用 ${tool.toolName}`;
 }
 
+/** Return the currently assembled write payload size for live progress text. */
+export function getWriteContentLength(tool: ToolCallContent): number | null {
+  if (tool.toolName !== "write") return null;
+  const content = tool.input?.content;
+  return typeof content === "string" ? content.length : null;
+}
+
 function bashCommandPreview(args: unknown): string {
   if (!args || typeof args !== "object" || Array.isArray(args)) return "";
   const command = (args as Record<string, unknown>).command;

@@ -45,6 +45,15 @@ assert.match(html, /tool-activity-spinner/, "回合仍在等待模型时应继�
 html = renderToStaticMarkup(<StreamingToolHistory group={bottom.bottomGroup!} activeToolIds={new Set(["b"])} toolResults={new Map([["r", results.get("r")!]])} expanded={false} onToggle={() => {}} statusLabel="正在运行工具：运行命令…" />);
 assert.match(html, /正在运行工具：运行命令…/);
 assert.match(html, /tool-activity-spinner/);
+const streamingWrite = (content: string): ToolCallContent => ({ type: "toolCall", toolName: "write", toolCallId: "w", input: { filePath: "result.txt", content } });
+const renderWriteProgress = (content: string, active = false, showInputProgress = true) => {
+  const writeBottom = moveCurrentToolGroupToBottom(buildStreamingToolLayout([], { ...message, content: [streamingWrite(content)] }, true));
+  return renderToStaticMarkup(<StreamingToolHistory group={writeBottom.bottomGroup!} activeToolIds={active ? new Set(["w"]) : undefined} expanded={false} onToggle={() => {}} statusLabel="正在思考..." showInputProgress={showInputProgress} />);
+};
+assert.match(renderWriteProgress("hello"), /正在生成写入内容 · 5 字符…/);
+assert.match(renderWriteProgress("x".repeat(1234)), /正在生成写入内容 · 1,234 字符…/);
+assert.match(renderWriteProgress("hello", true), /正在写入文件 · 5 字符…/);
+assert.match(renderWriteProgress("hello", false, false), /正在思考.../, "工具完成后应恢复阶段文案");
 console.log("bottom tool status rendering tests passed");
 
 for (const props of [{ isStreaming: true }, { hideMetadata: true, alwaysShowMetadata: true }]) {

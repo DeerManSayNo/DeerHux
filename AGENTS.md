@@ -18,5 +18,3 @@
 - 不要破坏 SSE 对新旧压缩事件名的兼容处理。
 
 详细架构、模块边界与演进说明见 `docs/agent-architecture-research.md`，仅在相关任务需要时读取。
-
-界面交互规范与实现入口见 `docs/design-system.md`。

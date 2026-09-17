@@ -1938,7 +1938,11 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                       toolResults={toolResultsMap}
                       expanded={expandedToolGroups.has(streamingToolLayout.bottomGroup.id)}
                       onToggle={() => toggleToolGroup(streamingToolLayout.bottomGroup!.id)}
-                      statusLabel={agentPhase?.kind === "running_tools" ? rawPhaseLabel : (phaseLabelText || rawPhaseLabel)}
+                      statusLabel={phaseLabelText || rawPhaseLabel}
+                      showInputProgress={agentPhase === null
+                        || agentPhase.kind === "thinking_after_tool"
+                        || agentPhase.kind === "running_tools"
+                        || (agentPhase.kind === "waiting_model" && agentPhase.reason === "after_message")}
                     />
                     <AgentStatusTicker
                       serverStatus={serverStatus}

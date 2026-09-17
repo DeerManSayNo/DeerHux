@@ -23,7 +23,9 @@ interface Message {
   status?: string;
   detail?: string;
   startedAt?: number;
+  detailStartedAt?: number;
   frozenElapsed?: number | null;
+  frozenDetailElapsed?: number | null;
   delayMs?: number;
 }
 
@@ -102,7 +104,8 @@ function recorder(): {
   assert.equal(byId.get("sess-c")?.status, "editing");
   assert.equal(byId.get("sess-a")?.detail, "Read · index.ts", "详情应取文件 basename");
 
-  // Absolute timestamps: the host computes elapsed, so startedAt must be epoch ms.
+  // Absolute timestamps: the renderer computes elapsed from them, so startedAt
+  // must be epoch ms.
   const startedAt = Number(byId.get("sess-a")?.startedAt);
   assert.ok(
     Number.isFinite(startedAt) && startedAt > 1_600_000_000_000,
@@ -111,7 +114,16 @@ function recorder(): {
   assert.equal(
     byId.get("sess-a")?.frozenElapsed,
     null,
-    "运行中的行不得冻结耗时，否则计时器会停住",
+    "运行中的行不得冻结总耗时，否则计时器会停住",
+  );
+  assert.ok(
+    Number.isFinite(byId.get("sess-a")?.detailStartedAt),
+    "每一步（模型轮次 / 工具调用）都必须带自己的起始时间戳",
+  );
+  assert.equal(
+    byId.get("sess-a")?.frozenDetailElapsed,
+    null,
+    "进行中的步骤不得冻结，否则灵动岛上的秒表不会走",
   );
 }
 
@@ -146,6 +158,79 @@ function recorder(): {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. Each model round and tool call restarts the step clock
+// ---------------------------------------------------------------------------
+
+{
+  const rec = recorder();
+  const bridge = new LiveIslandBridge(rec.transport);
+  await bridge.init();
+  bridge.trackSession("step", "/work/step");
+  bridge.handleEvent("step", "/work/step", { type: "agent_start" });
+  await bridge.flushNow();
+
+  const turnStart = rec.events().filter((m) => m.id === "step" && m.type === "update").pop();
+  assert.equal(turnStart?.detail, "Thinking · DeerHux", "回合开始应计时模型思考");
+
+  bridge.handleEvent("step", "/work/step", { type: "message_start" });
+  await bridge.flushNow();
+  const roundStart = rec.events().filter((m) => m.id === "step").pop();
+  assert.ok(
+    typeof roundStart?.detailStartedAt === "number",
+    "每个模型轮次必须有独立的起始时间戳",
+  );
+
+  bridge.handleEvent("step", "/work/step", { type: "message_end" });
+  await bridge.flushNow();
+  const roundEnd = rec.events().filter((m) => m.id === "step").pop();
+  assert.ok(
+    typeof roundEnd?.frozenDetailElapsed === "number",
+    "模型轮次结束时必须冻结该轮计时（工具调用前的等待不计入）",
+  );
+
+  const beforeTool = rec.events().length;
+  bridge.handleEvent("step", "/work/step", {
+    type: "tool_execution_start",
+    toolCallId: "call-1",
+    toolName: "read",
+    input: { file_path: "/work/step/a.ts" },
+  });
+  await bridge.flushNow();
+  const toolStart = rec.events().slice(beforeTool).filter((m) => m.id === "step").pop();
+  assert.equal(toolStart?.detail, "Read · a.ts");
+  assert.equal(
+    toolStart?.frozenDetailElapsed,
+    null,
+    "新的工具调用必须让计时从 0 重新开始，而不是沿用上一段",
+  );
+  assert.ok(
+    typeof toolStart?.detailStartedAt === "number",
+    "工具调用也必须带自己的起始时间戳",
+  );
+
+  const beforeDone = rec.events().length;
+  bridge.handleEvent("step", "/work/step", {
+    type: "tool_execution_end",
+    toolCallId: "call-1",
+    toolName: "read",
+    isError: false,
+  });
+  await bridge.flushNow();
+  const toolEnd = rec.events().slice(beforeDone).filter((m) => m.id === "step").pop();
+  assert.ok(
+    typeof toolEnd?.frozenDetailElapsed === "number",
+    "工具结束后必须冻结该工具调用的耗时，直到下一步开始",
+  );
+
+  const beforeNext = rec.events().length;
+  bridge.handleEvent("step", "/work/step", { type: "message_start" });
+  await bridge.flushNow();
+  const nextRound = rec.events().slice(beforeNext).filter((m) => m.id === "step").pop();
+  assert.equal(nextRound?.frozenDetailElapsed, null, "下一个模型轮次必须重新计时");
+  assert.equal(nextRound?.detail, "Thinking · DeerHux");
+}
+
+// ---------------------------------------------------------------------------
 // 3. Restart clears the stale retract deadline; done freezes elapsed
 // ---------------------------------------------------------------------------
 
@@ -164,6 +249,10 @@ function recorder(): {
   assert.ok(
     typeof doneMessage.frozenElapsed === "number",
     "done 行必须携带冻结耗时，避免继续走时",
+  );
+  assert.ok(
+    typeof doneMessage.frozenDetailElapsed === "number",
+    "done 行必须冻结最后一步的计时读数",
   );
   assert.ok(
     afterEnd.some((m) => m.type === "done-retract"),

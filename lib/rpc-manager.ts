@@ -1926,7 +1926,10 @@ export class AgentSessionWrapper {
           sessionId: this.session.id,
           turnId: compactionRunId,
           requestKind: "compaction",
-          model: { provider: this.inner.model.provider, modelId: this.inner.model.id },
+          model: {
+            provider: (summaryModel ?? this.inner.model).provider,
+            modelId: (summaryModel ?? this.inner.model).id,
+          },
         });
         const previousRunId = this.currentRunId;
         this.currentRunId = compactionRunId;

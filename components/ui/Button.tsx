@@ -5,7 +5,7 @@ import { AppIcon, type AppIconName } from "../AppIcon";
 import styles from "./Button.module.css";
 
 /**
- * 通用按钮。规范见 docs/design-system.md「按钮系统」。
+ * 通用按钮。
  *
  * - variant 表达操作层级，不与尺寸混用。
  * - 图标按钮（icon-only）用 `icon` 属性 + 必填 aria-label；正文与图标同用时用 `leadingIcon`。

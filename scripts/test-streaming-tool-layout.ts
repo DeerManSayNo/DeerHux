@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildStreamingToolLayout, buildCompletedToolLayout, countRunningGroupTools, summarizeToolActivities, currentToolActivity, formatToolActivityList } from "../lib/streaming-tool-layout.ts";
+import { buildStreamingToolLayout, buildCompletedToolLayout, countRunningGroupTools, summarizeToolActivities, currentToolActivity, formatToolActivityList, getWriteContentLength } from "../lib/streaming-tool-layout.ts";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, TextContent, ToolCallContent } from "../lib/types.ts";
 
 const tool = (id: number, toolName = "read"): ToolCallContent => ({ type: "toolCall", toolCallId: `t${id}`, toolName, input: {} });
@@ -69,6 +69,8 @@ assert.equal(summarizeToolActivities([tool(1, "grep"), tool(2, "code_search")]),
 assert.equal(summarizeToolActivities([tool(1, "custom_read_database")]), "已调用其他工具");
 assert.equal(summarizeToolActivities([tool(1, "edit"), tool(2, "write")]), "已修改文件并写入文件");
 assert.equal(currentToolActivity(tool(1, "bash")), "运行命令");
+assert.equal(getWriteContentLength({ ...tool(1, "write"), input: { content: "写入abc" } }), 5);
+assert.equal(getWriteContentLength(tool(1, "read")), null);
 assert.equal(formatToolActivityList([
   { name: "read" },
   { name: "bash", args: { command: "npm run lint" } },

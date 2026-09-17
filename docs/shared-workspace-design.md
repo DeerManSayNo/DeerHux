@@ -52,7 +52,7 @@ node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/reg
 
 公网验证覆盖 HTTPS 证书校验、匹配码登录、Secure Cookie、创建窗口、未授权 API 拒绝、撤销失效；不开放宿主原始端口。停止中继可执行 `launchctl bootout gui/$(id -u)/site.deerhux.share-relay`；恢复局域网模式需移除上述环境变量并重启应用。
 
-界面样式统一于 `components/sharing/sharing.module.css`，共享图标、复制反馈与错误提示位于 `components/sharing/ShareUI.tsx`。主人弹窗采用原生 dialog，访客工作台采用资源侧栏与聊天画布，支持明暗主题与窄屏布局。具体设计与交互规范见 `docs/design-system.md` 的「分享窗口」。
+界面样式统一于 `components/sharing/sharing.module.css`，共享图标、复制反馈与错误提示位于 `components/sharing/ShareUI.tsx`。主人弹窗采用原生 dialog，访客工作台采用资源侧栏与聊天画布，支持明暗主题与窄屏布局。
 
 主人管理列表可重新查看和复制匹配码。匹配码显示值仅保留于当前进程，随分享撤销或进程退出移除；只经本机主人 API 返回并禁用响应缓存，访客 catalog 不包含匹配码。旧版内存分享仅保留哈希时，主人可显式生成新码：链接和权限保持不变，旧码失效，已登录访客保持会话；重复请求返回同一新码。
 

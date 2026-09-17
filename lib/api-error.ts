@@ -14,12 +14,16 @@ import { NextResponse } from "next/server";
  *
  * For known business errors (4xx), keep returning explicit messages.
  */
-export function apiError(context: string, error: unknown, status = 500): NextResponse {
+export function logApiError(context: string, error: unknown): void {
   const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   console.error(`[api] ${context}:`, detail);
   if (error instanceof Error && error.stack) {
     console.error(error.stack);
   }
+}
+
+export function apiError(context: string, error: unknown, status = 500): NextResponse {
+  logApiError(context, error);
   return NextResponse.json(
     { error: status >= 500 ? "Internal server error" : "Request failed" },
     { status },

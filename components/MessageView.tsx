@@ -31,7 +31,7 @@ import type {
   ThinkingContent,
 } from "@/lib/types";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
-import { buildCompletedToolLayout, countRunningGroupTools, summarizeToolActivities, currentToolActivity, type StreamingToolGroup, type StreamingToolMessageLayout } from "@/lib/streaming-tool-layout";
+import { buildCompletedToolLayout, countRunningGroupTools, summarizeToolActivities, currentToolActivity, getWriteContentLength, type StreamingToolGroup, type StreamingToolMessageLayout } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { AppIcon } from "./AppIcon";
 import { MessageImagePreview } from "./MessageImagePreview";
@@ -1240,8 +1240,9 @@ function AssistantMessageView({
   );
 }
 
-export function StreamingToolHistory({ group, expanded, onToggle, toolResults, activeToolIds, statusLabel }: {
+export function StreamingToolHistory({ group, expanded, onToggle, toolResults, activeToolIds, statusLabel, showInputProgress = false }: {
   statusLabel?: string;
+  showInputProgress?: boolean;
   activeToolIds?: ReadonlySet<string>;
   group: StreamingToolGroup;
   expanded: boolean;
@@ -1251,14 +1252,17 @@ export function StreamingToolHistory({ group, expanded, onToggle, toolResults, a
   const running = countRunningGroupTools(group, activeToolIds, toolResults);
   const errors = group.tools.filter(({ block }) => toolResults?.get(block.toolCallId)?.isError).length;
   const summary = summarizeToolActivities(group.tools.map(({ block }) => block));
-  const current = !group.closedByText && !statusLabel
+  const current = !group.closedByText
     ? group.tools.filter(({ block }) => activeToolIds?.has(block.toolCallId) && !toolResults?.has(block.toolCallId)).at(-1)?.block
     : undefined;
-  const pending = !group.closedByText && !current && !statusLabel
+  const pending = !group.closedByText && !current
     ? group.tools.filter(({ block }) => !toolResults?.has(block.toolCallId)).at(-1)?.block
     : undefined;
   const visibleTool = current ?? pending;
-  const label = statusLabel ?? (visibleTool
+  const writeContentLength = showInputProgress && visibleTool ? getWriteContentLength(visibleTool) : null;
+  const label = writeContentLength !== null
+    ? `${current ? "正在写入文件" : "正在生成写入内容"} · ${writeContentLength.toLocaleString("zh-CN")} 字符…`
+    : statusLabel ?? (visibleTool
     ? `${current ? "正在" : "等待执行："}${currentToolActivity(visibleTool)}${getToolPreview(visibleTool) ? ` · ${getToolPreview(visibleTool)}` : ""}`
     : summary);
   const showLoading = running > 0 || Boolean(pending) || Boolean(statusLabel);

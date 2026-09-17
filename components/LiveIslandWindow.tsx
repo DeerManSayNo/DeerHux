@@ -62,11 +62,17 @@ function formatElapsed(ms: number): string {
  * Elapsed time is derived from absolute timestamps rather than a server-pushed
  * counter, so many concurrent sessions stay accurate without extra IPC.
  *
+ * The clock is the *current step* clock: every model round and every tool call
+ * restarts `detailStartedAt`, and the host freezes `frozenDetailElapsed` when
+ * the step (or the turn) ends. `startedAt` is the run start and is deliberately
+ * not rendered — a whole-run counter would keep growing across steps.
+ *
  * The clock reading lives in state so render stays pure; the interval only
- * re-reads it while the row is still running.
+ * re-reads it while the step is still running.
  */
 function useElapsed(row: LiveIslandRow): string {
-  const frozen = row.frozenElapsed;
+  const frozen = row.frozenDetailElapsed;
+  const startedAt = row.detailStartedAt;
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -74,9 +80,9 @@ function useElapsed(row: LiveIslandRow): string {
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [frozen, row.startedAt]);
+  }, [frozen, startedAt]);
 
-  const elapsed = frozen != null ? frozen : now - row.startedAt;
+  const elapsed = frozen != null ? frozen : now - startedAt;
   return formatElapsed(elapsed);
 }
 

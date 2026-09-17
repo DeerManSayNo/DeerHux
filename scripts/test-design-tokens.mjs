@@ -1,7 +1,6 @@
 /**
  * 设计令牌回归：校验字号、字重、行高、阴影、层级五类令牌的定义集合，
  * 并阻止已迁移的二级窗口模块重新引入裸数值。
- * 规范见 docs/design-system.md。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

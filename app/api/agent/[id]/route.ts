@@ -5,6 +5,8 @@ import { validateSessionId, SessionIdValidationError } from "@/lib/validate";
 import { readSessionFileCached, resolveSessionPath } from "@/lib/session-reader";
 import { isSessionPersistenceError } from "@/lib/session/errors";
 import { getAgentRunStore } from "@/lib/agent-runtime/run-store";
+import { apiError, logApiError } from "@/lib/api-error";
+import { getCompactionClientError } from "@/lib/compaction-error";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -12,10 +14,12 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  let commandType: unknown;
 
   try {
     validateSessionId(id);
     const body = await req.json() as { type: string; [key: string]: unknown };
+    commandType = body.type;
     const commandSignal = body.type === "prompt"
       ? AbortSignal.any([req.signal, AbortSignal.timeout(40_000)])
       : body.type === "compact"
@@ -58,9 +62,23 @@ export async function POST(
       return NextResponse.json({ error: error.message.slice("AGENT_BUSY:".length).trim() }, { status: 409 });
     }
     if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      return NextResponse.json({ error: "历史会话启动超时，本次发送已安全取消" }, { status: 504 });
+      return NextResponse.json({
+        error: commandType === "compact"
+          ? "上下文压缩超时或已取消，请重试或切换压缩模型。"
+          : "历史会话启动超时，本次发送已安全取消",
+      }, { status: 504 });
     }
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    if (commandType === "compact") {
+      const clientError = getCompactionClientError(error);
+      if (clientError) {
+        logApiError("agent/[id] compact", error);
+        return NextResponse.json(
+          { error: clientError.message, errorCode: clientError.errorCode },
+          { status: clientError.status },
+        );
+      }
+    }
+    return apiError("agent/[id] POST", error);
   }
 }
 

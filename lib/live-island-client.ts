@@ -18,6 +18,10 @@
  *    into a single push.
  *  - Rows are dropped when their session is destroyed, so a long-lived process
  *    with churning sessions cannot leak island rows.
+ *  - The pill's timer is a per-step timer, not a whole-run timer: every model
+ *    round and every tool call restarts `detailStartedAt`, and the row freezes
+ *    it when the step ends (`frozenDetailElapsed`). `startedAt` still carries
+ *    the run start, which the host keeps for dismiss bookkeeping only.
  */
 
 import { basename } from "node:path";
@@ -86,8 +90,10 @@ interface SessionState {
   cwd: string;
   project: string;
   prompt: string;
+  /** Run start. Only used by the host for dismiss bookkeeping. */
   startedAt: number;
   lastActiveAt: number;
+  /** Start of the step the pill is currently timing (model round or tool call). */
   detailStartedAt: number;
   islandStatus: LiveIslandRowStatus;
   islandDetail: string;
@@ -95,11 +101,17 @@ interface SessionState {
   frozenElapsed: number | null;
   frozenDetailElapsed: number | null;
   activeToolCount: number;
+  /** Tool call ids whose `tool_execution_end` has not arrived yet. */
+  activeToolIds: Set<string>;
+  /** Set from `message_start`, cleared once the model round stops producing. */
+  modelStreaming: boolean;
   /** Set when the row changed since the last flush. */
   dirty: boolean;
   /** Set when the session must disappear from the island entirely. */
   dropped: boolean;
 }
+
+const MODEL_THINKING_DETAIL = `Thinking · ${DEERHUX_APP_NAME}`;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -258,6 +270,8 @@ export class LiveIslandBridge {
       frozenElapsed: null,
       frozenDetailElapsed: null,
       activeToolCount: 0,
+      activeToolIds: new Set(),
+      modelStreaming: false,
       dirty: false,
       dropped: true,
     });
@@ -295,6 +309,15 @@ export class LiveIslandBridge {
         break;
       case "agent_end":
         this.handleAgentEnd(session);
+        break;
+      case "message_start":
+        if (!session.modelStreaming) this.beginStep(session, "thinking", MODEL_THINKING_DETAIL);
+        break;
+      case "message_end":
+        // The model round ended: freeze its timer (which for a tool-calling round
+        // covers the model's own thinking time) until the next step starts.
+        session.modelStreaming = false;
+        this.freezeStep(session);
         break;
       case "tool_execution_start":
         this.handleToolStart(session, event);
@@ -396,9 +419,43 @@ export class LiveIslandBridge {
       lastActiveAt: session.lastActiveAt,
       detailStartedAt: session.detailStartedAt,
       frozenElapsed: session.finished ? session.frozenElapsed : null,
-      frozenDetailElapsed: session.finished ? session.frozenDetailElapsed : null,
+      // The step timer keeps ticking while running and is replaced wholesale by
+      // `done`'s frozen value at the end of the turn.
+      frozenDetailElapsed: session.frozenDetailElapsed,
       cwd: session.cwd,
     };
+  }
+
+  /**
+   * Start timing a new step (model round or tool call): the pill restarts from
+   * 0s. Reasoning to the *same* detail text (for example the second parallel
+   * tool of an identical call) keeps the running clock instead of resetting it.
+   */
+  private beginStep(
+    session: SessionState,
+    status: LiveIslandRowStatus,
+    detail: string,
+  ): void {
+    const now = nowMs();
+    session.lastActiveAt = now;
+    session.finished = false;
+    session.dropped = false;
+    if (session.islandDetail !== detail || session.frozenDetailElapsed !== null) {
+      session.detailStartedAt = now;
+      session.frozenDetailElapsed = null;
+    }
+    session.islandStatus = status;
+    session.islandDetail = detail;
+    this.enqueue(this.buildUpdate(session));
+  }
+
+  /** Stop the step clock and keep the final reading until the next step starts. */
+  private freezeStep(session: SessionState): void {
+    if (session.frozenDetailElapsed !== null) return;
+    const now = nowMs();
+    session.lastActiveAt = now;
+    session.frozenDetailElapsed = Math.max(0, now - session.detailStartedAt);
+    this.enqueue(this.buildUpdate(session));
   }
 
   private handleAgentStart(session: SessionState): void {
@@ -408,13 +465,15 @@ export class LiveIslandBridge {
 
     session.finished = false;
     session.activeToolCount = 0;
+    session.activeToolIds.clear();
+    session.modelStreaming = false;
     session.frozenElapsed = null;
     session.frozenDetailElapsed = null;
     session.startedAt = nowMs();
     session.lastActiveAt = session.startedAt;
     session.detailStartedAt = session.startedAt;
     session.islandStatus = "thinking";
-    session.islandDetail = `Thinking · ${DEERHUX_APP_NAME}`;
+    session.islandDetail = MODEL_THINKING_DETAIL;
     session.dropped = false;
 
     this.enqueue(this.buildUpdate(session));
@@ -425,8 +484,11 @@ export class LiveIslandBridge {
     session.finished = true;
     const now = nowMs();
     session.lastActiveAt = now;
+    session.activeToolIds.clear();
+    session.modelStreaming = false;
     session.frozenElapsed = now - session.startedAt;
-    session.frozenDetailElapsed = now - session.detailStartedAt;
+    // Keep the last step's reading so the completed pill shows that step's time.
+    session.frozenDetailElapsed = Math.max(0, now - session.detailStartedAt);
     session.islandStatus = "done";
     session.islandDetail = "Done · 完成";
 
@@ -440,33 +502,32 @@ export class LiveIslandBridge {
 
   private handleToolStart(session: SessionState, event: AgentEvent): void {
     session.activeToolCount++;
-    session.finished = false;
-    session.lastActiveAt = nowMs();
+    const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : "";
+    if (toolCallId) session.activeToolIds.add(toolCallId);
 
     const toolName = String(event.toolName ?? event.name ?? "");
     const toolInput = (event.input ?? event.args ?? {}) as Record<string, unknown>;
     const { status, detail } = toolToStatus(toolName, toolInput);
 
-    if (session.islandDetail !== detail) {
-      session.detailStartedAt = session.lastActiveAt;
-      session.frozenDetailElapsed = null;
-    }
-    session.islandStatus = status;
-    session.islandDetail = detail;
-    session.dropped = false;
-
-    this.enqueue(this.buildUpdate(session));
+    this.beginStep(session, status, detail);
   }
 
   private handleToolEnd(session: SessionState, event: AgentEvent): void {
     session.activeToolCount = Math.max(0, session.activeToolCount - 1);
-    session.lastActiveAt = nowMs();
+    const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : "";
+    if (toolCallId) session.activeToolIds.delete(toolCallId);
+    const now = nowMs();
+    session.lastActiveAt = now;
 
     const hadError = Boolean(event.error ?? event.isError);
     session.islandDetail = truncate(
       `${session.islandDetail} ${hadError ? "✗" : "✓"}`,
       MAX_DETAIL_LENGTH,
     );
+    // Parallel tools of the same call: only the last one closes the step.
+    if (session.activeToolIds.size === 0) {
+      session.frozenDetailElapsed = Math.max(0, now - session.detailStartedAt);
+    }
 
     this.enqueue(this.buildUpdate(session));
   }
