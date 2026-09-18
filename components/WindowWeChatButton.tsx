@@ -84,7 +84,7 @@ export function WindowWeChatButton({ sessionId, project, role, ensureSession, he
       </button>;
   return <>
     {headerTargetId ? headerTarget && createPortal(trigger, headerTarget) : <div className={styles.toolbar}>{trigger}</div>}
-    <dialog ref={dialog} aria-label="当前窗口微信连接" className={styles.dialog} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); dialog.current?.close(); } }} onClick={(event) => { if (event.target === event.currentTarget) dialog.current?.close(); }}>
+    <dialog ref={dialog} aria-label="当前窗口微信连接" className={`${styles.dialog} app-window-scrollbars`} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); dialog.current?.close(); } }} onClick={(event) => { if (event.target === event.currentTarget) dialog.current?.close(); }}>
       <div className={styles.heading}><strong>当前窗口 · 微信连接</strong><button type="button" className={styles.closeButton} onClick={() => dialog.current?.close()} aria-label="关闭微信连接"><AppIcon name="close" size="toolbar" /></button></div>
       <p className={styles.context}>{project} · {role}</p>
       <p>电脑与微信共用项目、角色和已有上下文。在电脑发送的消息和 AI 最终回复也会同步到微信。一个微信端同时接入一个窗口，切换后后续消息进入新窗口。</p>

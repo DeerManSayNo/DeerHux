@@ -19,6 +19,7 @@ export interface CreateStandardCodingToolsOptions {
 const MAX_TEXT_BYTES = 200_000;
 /** 进程输出内存硬上限；超过后截断。LLM 侧由 spill（~12KB）控制上下文体积。 */
 const MAX_PROCESS_OUTPUT_BYTES = 2_000_000;
+const MAX_LIVE_PROCESS_OUTPUT_CHARS = 12_000;
 const DEFAULT_PROCESS_TIMEOUT_MS = 120_000;
 const MAX_PROCESS_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_FIND_LIMIT = 200;
@@ -36,6 +37,12 @@ function textResult(text: string, details: unknown = undefined, changedFiles?: s
     details,
     ...(changedFiles?.length ? { changedFiles } : {}),
   };
+}
+
+function liveProcessOutput(stdout: string, stderr: string): string {
+  const text = [stdout, stderr].filter(Boolean).join("\n");
+  if (text.length <= MAX_LIVE_PROCESS_OUTPUT_CHARS) return text;
+  return `[earlier output omitted]\n${text.slice(-MAX_LIVE_PROCESS_OUTPUT_CHARS)}`;
 }
 
 /**
@@ -200,6 +207,7 @@ function runProcess(
     spillDir?: string;
     spillId?: string;
     processEnv?: Readonly<NodeJS.ProcessEnv>;
+    onOutput?: (output: { stdout: string; stderr: string }) => void;
   },
 ): Promise<ProcessRunResult> {
   if (opts.signal.aborted) {
@@ -221,6 +229,16 @@ function runProcess(
     let settled = false;
     let terminationError: Error | null = null;
     let postExitTimer: ReturnType<typeof setTimeout> | null = null;
+    let outputTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const emitOutput = () => {
+      outputTimer = null;
+      opts.onOutput?.({ stdout, stderr });
+    };
+    const scheduleOutput = () => {
+      if (!opts.onOutput || outputTimer) return;
+      outputTimer = setTimeout(emitOutput, 80);
+    };
 
     const ensureSpillFile = (): string => {
       if (combinedFile) return combinedFile;
@@ -242,6 +260,10 @@ function runProcess(
       settled = true;
       clearTimeout(timer);
       if (postExitTimer) clearTimeout(postExitTimer);
+      if (outputTimer) {
+        clearTimeout(outputTimer);
+        emitOutput();
+      }
       opts.signal.removeEventListener("abort", onAbort);
       child.stdout.destroy();
       child.stderr.destroy();
@@ -253,6 +275,7 @@ function runProcess(
         fs.appendFileSync(combinedFile, `\n--- ${target} continued ---\n${text}`, "utf8");
         if (target === "stdout") stdout = truncateText(stdout + text, MAX_PROCESS_OUTPUT_BYTES);
         else stderr = truncateText(stderr + text, MAX_PROCESS_OUTPUT_BYTES);
+        scheduleOutput();
         return;
       }
       const nextStdout = target === "stdout" ? stdout + text : stdout;
@@ -261,6 +284,7 @@ function runProcess(
       if (totalBytes <= MAX_PROCESS_OUTPUT_BYTES) {
         stdout = nextStdout;
         stderr = nextStderr;
+        scheduleOutput();
         return;
       }
       // 超内存上限：有 spillDir 则落盘保全文，否则退回旧 truncate（丢尾）。
@@ -270,10 +294,12 @@ function runProcess(
         ensureSpillFile();
         stdout = truncateText(stdout, MAX_PROCESS_OUTPUT_BYTES);
         stderr = truncateText(stderr, MAX_PROCESS_OUTPUT_BYTES);
+        scheduleOutput();
         return;
       }
       if (target === "stdout") stdout = truncateText(nextStdout, MAX_PROCESS_OUTPUT_BYTES);
       else stderr = truncateText(nextStderr, MAX_PROCESS_OUTPUT_BYTES);
+      scheduleOutput();
     };
     const onAbort = () => {
       terminationError = new DOMException("Process aborted", "AbortError");
@@ -405,7 +431,7 @@ export function createStandardCodingTools(
         affectedFiles: Type.Optional(Type.Array(Type.String(), { description: "Concrete files this command may create, modify or delete, required for changes outside cwd. Absolute paths recommended; relative paths resolve from cwd, not shell cd. No directories, globs, ~ or variable expansion. Unchanged files are excluded automatically." })),
       }),
       executionMode: "sequential" as const,
-      execute: async (toolCallId, raw, signal) => {
+      execute: async (toolCallId, raw, signal, onUpdate) => {
         const params = raw as Record<string, unknown>;
         const command = stringParam(params, ["command", "cmd"]);
         if (!command) throw new Error("command is required");
@@ -421,6 +447,9 @@ export function createStandardCodingTools(
           spillDir,
           spillId: toolCallId,
           processEnv: options?.processEnv,
+          onOutput: ({ stdout, stderr }) => {
+            onUpdate?.(textResult(liveProcessOutput(stdout, stderr), { command, running: true }));
+          },
         });
         const text = [
           `exit_code: ${result.code ?? "null"}${result.signal ? ` signal: ${result.signal}` : ""}`,

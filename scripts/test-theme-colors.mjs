@@ -11,10 +11,13 @@ root.walkRules(rule => {
   rule.walkDecls(decl => { tokens[decl.prop] = decl.value; });
   themes.set(rule.selector, tokens);
 });
-function luminance(color) {
-  const rgb = color.startsWith('#')
+function colorChannels(color) {
+  return color.startsWith('#')
     ? color.slice(1).match(/../g).map(value => parseInt(value, 16))
     : color.match(/[\d.]+/g).map(Number);
+}
+function luminance(color) {
+  const rgb = colorChannels(color);
   return rgb.map(value => {
     const channel = value / 255;
     return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
@@ -22,6 +25,8 @@ function luminance(color) {
 }
 assert.equal(themes.size, 2);
 for (const [theme, tokens] of themes) {
+  const selectedChannels = colorChannels(tokens['--bg-selected']);
+  assert.ok(Math.max(...selectedChannels) - Math.min(...selectedChannels) <= 2, `${theme} 列表选中表面必须保持中性`);
   const pairs = [['text', 'inline-code-bg']];
   for (const text of ['text', 'text-muted', 'text-dim', 'accent']) {
     for (const surface of ['bg', 'bg-panel', 'bg-selected']) pairs.push([text, surface]);

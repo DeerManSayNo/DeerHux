@@ -344,7 +344,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
       onClick={onClose}
     >
       <div
-        className={styles.dialog}
+        className={`${styles.dialog} app-window-scrollbars`}
         onClick={(e) => e.stopPropagation()}
         style={{ width: "min(920px, calc(100vw - 32px))", height: "min(720px, calc(100dvh - 32px))", border: "none", borderRadius: "var(--radius-window)", background: "var(--bg)", boxShadow: "var(--shadow-modal)", overflow: "hidden", display: "flex" }}
       >

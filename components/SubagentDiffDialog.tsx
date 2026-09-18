@@ -42,7 +42,7 @@ export function SubagentOperationDialog({ title, busy, onClose, children }: {
     ref={dialogRef}
     aria-labelledby={titleId}
     aria-busy={busy}
-    className={styles.dialog}
+    className={`${styles.dialog} app-window-scrollbars`}
     onKeyDown={(event) => {
       if (event.key === "Escape") {
         event.preventDefault();

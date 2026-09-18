@@ -55,7 +55,7 @@
   --bg: #ffffff;
   --bg-panel: #f5f5f5;
   --bg-hover: #eeeeee;
-  --bg-selected: #fff0e6;
+  --bg-selected: #f0f0f0;
   --border: #e3e3e5;
   --text: #202022;
   --text-muted: #626268;
@@ -91,7 +91,7 @@ html.dark {
   --bg: rgb(25, 26, 27);
   --bg-panel: rgb(31, 32, 34);
   --bg-hover: rgb(39, 40, 42);
-  --bg-selected: #38291f;
+  --bg-selected: rgb(40, 40, 40);
   --border: #3c3c40;
   --text: #ededee;
   --text-muted: #b0b0b6;
@@ -192,29 +192,59 @@ body:has([data-live-island-root]) {
 }
 
 /*
- * 统一滚轮：二级窗口、弹窗与面板的滚动容器使用。
- * 4px 圆角细线、轨道透明、无箭头，thumb 常态 border 色、悬停 text-dim。
+ * 统一滚动条：二级窗口、弹窗与面板的滚动容器使用。
+ * 4px 圆角细线、轨道透明、无箭头；thumb 默认透明，悬停或键盘焦点进入时显示。
+ * .app-window-scrollbars 统一窗口内所有嵌套滚动区，并阻止滚动穿透到底层工作台。
  * 侧栏等有显隐动画的场景使用 .sidebar-navigation-scroll，不复用本类。
  */
-.app-scrollbar {
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+@property --app-scrollbar-color {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: transparent;
 }
-.app-scrollbar::-webkit-scrollbar {
+
+.app-scrollbar,
+.app-window-scrollbars,
+.app-window-scrollbars * {
+  --app-scrollbar-color: transparent;
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-scrollbar-color) transparent;
+  overscroll-behavior: contain;
+  transition: --app-scrollbar-color 180ms ease-out;
+}
+.app-scrollbar:hover,
+.app-scrollbar:focus-within,
+.app-window-scrollbars:hover,
+.app-window-scrollbars:focus-within,
+.app-window-scrollbars *:hover,
+.app-window-scrollbars *:focus-within {
+  --app-scrollbar-color: color-mix(in srgb, var(--text-dim) 55%, transparent);
+}
+.app-scrollbar::-webkit-scrollbar,
+.app-window-scrollbars::-webkit-scrollbar,
+.app-window-scrollbars *::-webkit-scrollbar {
   width: 4px;
   height: 4px;
 }
-.app-scrollbar::-webkit-scrollbar-track {
+.app-scrollbar::-webkit-scrollbar-track,
+.app-window-scrollbars::-webkit-scrollbar-track,
+.app-window-scrollbars *::-webkit-scrollbar-track {
   background: transparent;
 }
-.app-scrollbar::-webkit-scrollbar-thumb {
-  background: var(--border);
+.app-scrollbar::-webkit-scrollbar-thumb,
+.app-window-scrollbars::-webkit-scrollbar-thumb,
+.app-window-scrollbars *::-webkit-scrollbar-thumb {
+  background: var(--app-scrollbar-color);
   border-radius: 2px;
 }
-.app-scrollbar::-webkit-scrollbar-thumb:hover {
+.app-scrollbar::-webkit-scrollbar-thumb:hover,
+.app-window-scrollbars::-webkit-scrollbar-thumb:hover,
+.app-window-scrollbars *::-webkit-scrollbar-thumb:hover {
   background: var(--text-dim);
 }
-.app-scrollbar::-webkit-scrollbar-button {
+.app-scrollbar::-webkit-scrollbar-button,
+.app-window-scrollbars::-webkit-scrollbar-button,
+.app-window-scrollbars *::-webkit-scrollbar-button {
   display: none;
 }
 

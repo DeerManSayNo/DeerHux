@@ -334,7 +334,17 @@ function describeModelsLoadError(error: unknown): string {
   return "模型列表加载失败，请检查本地后台服务或重启应用";
 }
 
-type AgentPhaseTool = { id: string; name: string; args: unknown };
+export type AgentPhaseTool = {
+  id: string;
+  name: string;
+  args: unknown;
+  partialResult?: unknown;
+};
+
+export type ToolTerminalEntry = AgentPhaseTool & {
+  status: "running" | "complete";
+  completedAt?: number;
+};
 
 export type AgentPhase =
   | { kind: "waiting_model"; reason: "initial" | "after_message" | "restored" | "recovery" }
@@ -724,6 +734,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [loadingFullHistory, setLoadingFullHistory] = useState(false);
   const loadingFullHistoryRef = useRef(false);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  const [toolTerminalEntries, setToolTerminalEntries] = useState<ToolTerminalEntry[]>([]);
+  const [toolTerminalGeneration, bumpToolTerminalGeneration] = useReducer((value: number) => value + 1, 0);
   const [watchdogInfo, setWatchdogInfo] = useState<WatchdogInfo | null>(null);
   const [lastModelError, setLastModelError] = useState<string | null>(null);
   const lastModelErrorRef = useRef<string | null>(null);
@@ -1641,6 +1653,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         autoContinueInProgressRef.current = false;
         awaitingAgentStartRef.current = false;
         setAgentRunning(true);
+        bumpToolTerminalGeneration();
+        setToolTerminalEntries([]);
         setAgentPhase({ kind: "waiting_model", reason: "initial" });
         dispatch({ type: "start" });
         break;
@@ -1928,6 +1942,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const sid = sessionIdRef.current;
           if (sid) startSubagentLiveRefresh(sid);
         }
+        setToolTerminalEntries((entries) => entries.some((tool) => tool.id === id)
+          ? entries
+          : [...entries, { id, name, args, status: "running" }]);
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           const batchTools = prev?.kind === "running_tools" ? [...prev.batchTools] : [];
@@ -1937,8 +1954,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       }
+      case "tool_execution_update": {
+        const id = event.toolCallId as string;
+        setToolTerminalEntries((entries) => entries.map((tool) => tool.id === id
+          ? { ...tool, partialResult: event.partialResult }
+          : tool));
+        setAgentPhase((prev) => {
+          if (prev?.kind !== "running_tools") return prev;
+          const update = (tool: AgentPhaseTool) => tool.id === id
+            ? { ...tool, partialResult: event.partialResult }
+            : tool;
+          return {
+            kind: "running_tools",
+            tools: prev.tools.map(update),
+            batchTools: prev.batchTools.map(update),
+          };
+        });
+        break;
+      }
       case "tool_execution_end": {
         const id = event.toolCallId as string;
+        const completedAt = Date.now();
+        setToolTerminalEntries((entries) => entries.map((tool) => tool.id === id
+          ? { ...tool, status: "complete", completedAt, partialResult: event.result }
+          : tool));
         if (activeSubagentToolIdsRef.current.delete(id)) {
           const sid = sessionIdRef.current;
           if (sid) finishSubagentLiveRefresh(sid);
@@ -2132,6 +2171,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     pendingUserMessagesRef.current.set(clientMessageId, userMsg);
     messageMutationEpochRef.current += 1;
     setMessages((prev) => [...prev, userMsg]);
+    bumpToolTerminalGeneration();
+    setToolTerminalEntries([]);
     setAgentRunning(true);
     setAgentPhase({ kind: "waiting_model", reason: "initial" });
     dispatch({ type: "start" });
@@ -2317,6 +2358,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     ));
 
     agentRunningRef.current = true;
+    bumpToolTerminalGeneration();
+    setToolTerminalEntries([]);
     setAgentRunning(true);
     setAgentPhase({ kind: "waiting_model", reason: "initial" });
     dispatch({ type: "start" });
@@ -3097,6 +3140,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
     awaitingAgentStartRef.current = true;
+    bumpToolTerminalGeneration();
+    setToolTerminalEntries([]);
     setAgentRunning(true);
     setAgentPhase({ kind: "waiting_model", reason: "initial" });
     dispatch({ type: "start" });
@@ -3220,6 +3265,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setIsCompacting(false);
     setCompactError(null);
     setAgentPhase(null);
+    bumpToolTerminalGeneration();
+    setToolTerminalEntries([]);
     setWatchdogInfo(null);
     dispatch({ type: "reset" });
 
@@ -3382,7 +3429,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunning, modelNames, modelList, modelsLoadError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, systemPrompt: systemPrompt ?? lastSystemPromptRef.current, forkingEntryId,
     isCompacting, compactionProgress, clearCompactionProgress: () => setCompactionProgress(null), compactError, lastModelError, terminalNotice, clearTerminalNotice, currentModel, displayModel, sessionStats,
-    agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,
+    agentPhase, toolTerminalEntries, toolTerminalGeneration, watchdogInfo, stallLevel, autoRecoveryMode,
     subagentEnabled,
     isNew,
     // TODO 3 — first-paint pagination affordance

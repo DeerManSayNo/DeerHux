@@ -119,7 +119,7 @@ export function ModalShell({
         aria-label={ariaLabel}
         aria-labelledby={ariaLabel ? undefined : titleId}
         tabIndex={-1}
-        className={[styles.panel, styles[layout], className ?? ""].filter(Boolean).join(" ")}
+        className={[styles.panel, styles[layout], "app-window-scrollbars", className ?? ""].filter(Boolean).join(" ")}
       >
         {isSplit ? (
           <>

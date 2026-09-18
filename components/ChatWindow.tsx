@@ -16,6 +16,7 @@ import { MessageView, StreamingToolHistory, type ToolProcessMessage, type Stream
 import { buildStreamingToolLayout, formatToolActivityList, moveCurrentToolGroupToBottom } from "@/lib/streaming-tool-layout";
 import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
+import { ActiveToolTerminal } from "./ActiveToolTerminal";
 import { CompactionConfirmModal } from "./CompactionConfirmModal";
 import { useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
@@ -34,6 +35,7 @@ import { subscribeSubagentRuns } from "@/lib/agent-event-client";
 import { getProjectDisplayName } from "@/lib/project-name";
 import { collaborationNeedsHydration, isCollaborationSnapshotOlder, mergeCollaborationMuxSnapshot } from "@/lib/collaboration-ui-state";
 import { calculateContextCacheMetrics } from "@/lib/context-metrics";
+import { findSupersededTimeoutMessageIndexes } from "@/lib/chat-message-visibility";
 
 import { ProjectHeaderSlot, ProjectPicker } from "./ProjectPicker";
 interface AgentRole {
@@ -514,7 +516,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
     agentRunning, modelNames, modelList, modelsLoadError, modelThinkingLevels, modelThinkingLevelMaps, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId, watchdogInfo,
     isCompacting, compactionProgress, clearCompactionProgress, compactError, lastModelError, terminalNotice, clearTerminalNotice, displayModel: displayModelValue, sessionStats,
-    agentPhase,
+    agentPhase, toolTerminalEntries, toolTerminalGeneration,
     isNew,
     stallLevel, autoRecoveryMode,
     subagentEnabled,
@@ -1467,6 +1469,13 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
           sidePadding={contentSidePadding}
         />
       )}
+      <ActiveToolTerminal
+        key={toolTerminalGeneration}
+        entries={toolTerminalEntries}
+        visible={isRunning && toolTerminalEntries.length > 0}
+        maxWidth={contentMaxWidth}
+        sidePadding={contentSidePadding}
+      />
       <ChatInput
         ref={chatInputRef}
         compact={compact}
@@ -1776,11 +1785,17 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
               const hasVisibleStream = streamState.isStreaming && streamState.streamingMessage
                 && !streamingToolLayout.hiddenMessageIndexes.has(messages.length)
                 && hasRenderableStreamOutput(streamState.streamingMessage);
+              const supersededTimeoutIndexes = findSupersededTimeoutMessageIndexes(
+                messages,
+                hasVisibleStream ? streamState.streamingMessage : null,
+              );
               let latestVisibleIndex = -1;
               if (!hasVisibleStream) {
                 for (let i = messages.length - 1; i >= 0; i--) {
                   const candidate = messages[i];
-                  if (toolProcessLayout.hiddenMessageIndexes.has(i) || streamingToolLayout.hiddenMessageIndexes.has(i)) continue;
+                  if (supersededTimeoutIndexes.has(i)
+                    || toolProcessLayout.hiddenMessageIndexes.has(i)
+                    || streamingToolLayout.hiddenMessageIndexes.has(i)) continue;
                   if (candidate.role === "user" || (candidate.role === "assistant" && hasRenderableStreamOutput(candidate))) {
                     latestVisibleIndex = i;
                     break;
@@ -1794,7 +1809,9 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
                 const currentRefIdx = isVisible ? refIdx++ : -1;
                 // 折叠的消息仍占用 ref 序号，与 userMsgIdxToRefIdx 保持一致，
                 // 否则后续提示词会定位到错误节点或空 ref。
-                if (toolProcessLayout.hiddenMessageIndexes.has(idx) || streamingToolLayout.hiddenMessageIndexes.has(idx)) return null;
+                if (supersededTimeoutIndexes.has(idx)
+                  || toolProcessLayout.hiddenMessageIndexes.has(idx)
+                  || streamingToolLayout.hiddenMessageIndexes.has(idx)) return null;
                 const needsUserTimeGap = msg.role === "user" && previousContentRole === "user";
                 if (msg.role === "user" || (msg.role === "assistant" && hasRenderableStreamOutput(msg))) {
                   previousContentRole = msg.role;

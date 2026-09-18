@@ -39,6 +39,24 @@ for (const prop of ['--shadow-control', '--shadow-popover', '--shadow-modal', '-
 }
 assert.ok(globals.includes('--shadow-control: var(--shadow-control)'), '@theme 未映射阴影令牌');
 assert.ok(globals.includes('.app-scrollbar'), '统一滚轮类缺失');
+assert.ok(globals.includes('.app-window-scrollbars *'), '窗口级滚动条作用域缺失');
+assert.ok(globals.includes('.app-window-scrollbars *:hover'), '窗口滚动条缺少悬停显现状态');
+assert.ok(globals.includes('.app-window-scrollbars *:focus-within'), '窗口滚动条缺少键盘焦点显现状态');
+
+for (const file of [
+  'components/ui/Modal.tsx',
+  'components/SkillsConfig.tsx',
+  'components/RoleConfig.tsx',
+  'components/SchedulerPanel.tsx',
+  'components/SystemPromptConfig.tsx',
+  'components/ShareManager.tsx',
+  'components/SubagentDiffDialog.tsx',
+  'components/WindowWeChatButton.tsx',
+  'components/ProjectBranch.tsx',
+  'components/MessageView.tsx',
+]) {
+  assert.ok(read(file).includes('app-window-scrollbars'), `${file} 缺少窗口级滚动条作用域`);
+}
 
 // 令牌必须通过 @theme 暴露为 Tailwind 语义类。
 const theme = globals.slice(globals.indexOf('@theme'), globals.indexOf(':root'));

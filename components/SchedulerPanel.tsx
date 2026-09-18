@@ -323,6 +323,7 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
       onClick={onClose}
     >
       <div
+        className="app-window-scrollbars"
         style={{
           width: 820,
           maxWidth: "calc(100vw - 32px)",

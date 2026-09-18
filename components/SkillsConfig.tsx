@@ -8,6 +8,9 @@ import type { SkillCliDependency } from "@/lib/skill-cli-types";
 
 import { SystemCliList, SystemCliDetail } from "./SystemCliManager";
 import type { SystemCli } from "@/lib/system-cli-types";
+import { AppIcon } from "./AppIcon";
+import { Button } from "./ui/Button";
+import styles from "./SkillsConfig.module.css";
 
 interface Skill {
   cliDependencies?: SkillCliDependency[];
@@ -1466,6 +1469,7 @@ export function SkillsConfig({
       }}
     >
       <div
+        className="app-window-scrollbars"
         style={{
           width: "min(860px, calc(100vw - 32px))",
           height: "min(720px, calc(100dvh - 32px))",
@@ -1479,96 +1483,32 @@ export function SkillsConfig({
         }}
       >
         {/* Header */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "12px 18px",
-            borderBottom: "none",
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-            <span
-              style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", flexShrink: 0 }}
-            >
-              技能配置
-            </span>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                minWidth: 0,
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setSelectedProjectCwd("")}
-                style={{
-                  padding: "4px 9px",
-                  fontSize: 12,
-                  borderRadius: 5,
-                  border: "1px solid var(--border)",
-                  background: selectedProjectCwd ? "none" : "var(--bg-selected)",
-                  color: selectedProjectCwd ? "var(--text-dim)" : "var(--text)",
-                  cursor: "pointer",
-                }}
-              >
-                全局
-              </button>
+        <div className={styles.header}>
+          <h2 className={styles.title}>技能配置</h2>
+          <label className={styles.scopeField}>
+            <span className={styles.scopeLabel}>范围</span>
+            <span className={styles.scopeSelectWrap}>
               <select
+                className={styles.scopeSelect}
                 value={selectedProjectCwd}
                 onChange={(e) => setSelectedProjectCwd(e.target.value)}
-                title={selectedProjectCwd || "选择项目视图"}
-                style={{
-                  maxWidth: 360,
-                  padding: "4px 8px",
-                  fontSize: 12,
-                  borderRadius: 5,
-                  border: "1px solid var(--border)",
-                  background: selectedProjectCwd ? "var(--bg-selected)" : "var(--bg)",
-                  color: selectedProjectCwd ? "var(--text)" : "var(--text-dim)",
-                  cursor: "pointer",
-                }}
+                title={selectedProjectCwd ? shortenPath(selectedProjectCwd) : "全局技能"}
               >
-                <option value="">选择项目视图…</option>
-                {projectChoices.map((project) => (
-                  <option key={project.cwd} value={project.cwd}>
-                    {project.displayName || projectName(project.cwd)}
-                  </option>
-                ))}
+                <option value="">全局技能</option>
+                {projectChoices.length > 0 && (
+                  <optgroup label="项目">
+                    {projectChoices.map((project) => (
+                      <option key={project.cwd} value={project.cwd}>
+                        {project.displayName || projectName(project.cwd)}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
-              <code
-                style={{
-                  fontSize: 11,
-                  color: "var(--text-muted)",
-                  fontFamily: "var(--font-mono)",
-                  maxWidth: 260,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {selectedProjectCwd ? shortenPath(selectedProjectCwd) : "global skills"}
-              </code>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: "none",
-              border: "none",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 20,
-              lineHeight: 1,
-              padding: "2px 6px",
-            }}
-          >
-            ×
-          </button>
+              <AppIcon name="chevron-down" size="compact" className={styles.scopeChevron} />
+            </span>
+          </label>
+          <Button variant="iconButton" size="sm" icon="close" aria-label="关闭技能配置" onClick={onClose} />
         </div>
 
         {/* Body */}

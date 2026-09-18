@@ -113,7 +113,7 @@ export function ShareManager({ open, onClose, projects }: { open: boolean; onClo
   const validityHint = !name.trim() ? "填写分享名称" : chosenProjects.length === 0 ? "至少选择一个项目" : chosenModels.length === 0 ? "至少选择一个模型" : chosenRoles.length === 0 ? "至少选择一个角色" : "有效期需为 1 至 168 小时";
   const selectionSummary = `${chosenProjects.length} 个项目 · ${chosenModels.length} 个模型 · ${chosenRoles.length} 个角色 · ${hours === null ? "永久有效" : `${hours || "—"} 小时`}`;
   return <>
-    <dialog ref={dialog} className={`${styles.scope} ${styles.dialog}`} aria-label="分享窗口" onCancel={() => onClose()} onClose={() => onClose()} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+    <dialog ref={dialog} className={`${styles.scope} ${styles.dialog} app-window-scrollbars`} aria-label="分享窗口" onCancel={() => onClose()} onClose={() => onClose()} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <section className={styles.modalShell}>
         <header className={styles.modalHeader}>
           <div className={styles.modalHeading}><h2>分享窗口</h2></div>

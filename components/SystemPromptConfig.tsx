@@ -281,6 +281,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
       onClick={onClose}
     >
       <div
+        className="app-window-scrollbars"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "min(900px, calc(100vw - 40px))",

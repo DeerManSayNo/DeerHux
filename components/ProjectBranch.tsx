@@ -139,6 +139,7 @@ export function ProjectBranch({ cwd, refreshKey }: { cwd: string; refreshKey: st
     {position && createPortal(
       <div
         ref={menuRef}
+        className="app-window-scrollbars"
         role="dialog"
         aria-label="切换项目分支"
         aria-busy={loading || switching}
