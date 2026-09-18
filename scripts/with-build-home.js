@@ -25,13 +25,16 @@ fs.mkdirSync(buildHome, { recursive: true });
 const nodeOptions = process.env.NODE_OPTIONS || "";
 const buildNodeOptions = nodeOptions.includes("--max-old-space-size")
   ? nodeOptions
-  : `${nodeOptions} --max-old-space-size=8192`.trim();
+  : `${nodeOptions} --max-old-space-size=4096`.trim();
 
 const buildEnv = {
   ...process.env,
   HOME: buildHome,
   USERPROFILE: buildHome,
   NODE_OPTIONS: buildNodeOptions,
+  // Bound native compiler pools too; these are independent of Next's workers.
+  RAYON_NUM_THREADS: process.env.RAYON_NUM_THREADS || "2",
+  TOKIO_WORKER_THREADS: process.env.TOKIO_WORKER_THREADS || "2",
 };
 
 // A build launched from the packaged standalone app can inherit these runtime-only

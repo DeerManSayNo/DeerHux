@@ -1858,7 +1858,13 @@ export class AgentSessionWrapper {
           messageCount: 0,
           pendingMessageCount: 0,
           contextUsage: contextUsage
-            ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
+            ? {
+                percent: contextUsage.percent,
+                contextWindow: contextUsage.contextWindow,
+                tokens: contextUsage.tokens,
+                recentCacheHitRate: contextUsage.recentCacheHitRate ?? null,
+                sessionCacheHitRate: contextUsage.sessionCacheHitRate ?? null,
+              }
             : null,
           systemPrompt: this.inner.systemPrompt,
           thinkingLevel: this.inner.thinkingLevel,

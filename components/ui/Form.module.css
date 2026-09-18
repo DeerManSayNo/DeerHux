@@ -230,7 +230,6 @@
 
 .statusRow {
   padding: 10px 12px;
-  border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   background: var(--bg-panel);
   color: var(--text);
@@ -238,11 +237,15 @@
 }
 
 .statusRowSuccess {
-  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  background: color-mix(in srgb, var(--success) 7%, var(--bg-panel));
 }
 
 .statusRowDanger {
-  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  background: color-mix(in srgb, var(--danger) 7%, var(--bg-panel));
+}
+
+.footerDanger {
+  margin-right: auto;
 }
 
 .statusHead {

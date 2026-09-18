@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
 import type { AgentEnginePort } from "../lib/engine/port";
 import type { DeerLoopOptions } from "../lib/engine/deer-loop";
 
@@ -137,6 +138,11 @@ try {
   const input = { projectId: catalog.projects[0].id, roleId: "default", provider: "test", modelId: "model" };
   for (const override of [{ projectId: "other" }, { provider: "other" }, { roleId: "other" }, { writable: true }, { cwd: project }, { toolNames: ["bash"] }]) assert.throws(() => service.createSession(guest, { ...input, ...override }));
   const session = service.createSession(guest, input);
+  assert.throws(() => service.subscribe(other, session.id, () => {}));
+  const subscriptions = Array.from({ length: 8 }, () => service.subscribe(guest, session.id, () => {}));
+  assert.throws(() => service.subscribe(guest, session.id, () => {}));
+  subscriptions.forEach(unsubscribe => unsubscribe());
+  service.subscribe(guest, session.id, () => {})();
   assert.deepEqual(options?.activeToolNames, ["share_list", "share_read"]);
   assert.throws(() => service.snapshot(other, session.id));
   assert.throws(() => service.guest(id, "forged"));
@@ -167,10 +173,16 @@ try {
   console.log("PASS: authentication, resource allowlists, guest isolation, command spoofing, revocation and rate limits; mock engine reply");
 
   const ownerHits: string[] = [];
-  owner = createServer((req, res) => { ownerHits.push(req.url ?? ""); res.setHeader("Content-Type", "text/html"); res.end("share fixture"); });
+  owner = createServer((req, res) => {
+    ownerHits.push(req.url ?? ""); res.setHeader("Content-Type", "text/html");
+    if (req.headers["accept-encoding"]?.includes("gzip")) {
+      res.setHeader("Content-Encoding", "gzip"); res.end(gzipSync("share fixture"));
+    } else res.end("share fixture");
+  });
   await new Promise<void>(resolve => owner!.listen(0, "127.0.0.1", resolve));
   const ownerPort = (owner.address() as { port: number }).port;
   gateway = new ShareGateway();
+  Object.defineProperty(gateway, "service", { value: service });
   await gateway.start(`http://127.0.0.1:${ownerPort}`);
   // Seed only the gateway's ephemeral policy; no real model request is made.
   const seeded = service.create(config);
@@ -178,7 +190,10 @@ try {
   const link = gateway.urls(seeded.share.id)[0];
   const origin = new URL(link).origin;
   const base = `${origin}/api/share/${seeded.share.id}`;
-  assert.equal((await fetch(link)).status, 200);
+  const pageResponse = await fetch(link);
+  assert.equal(pageResponse.status, 200);
+  assert.equal(pageResponse.headers.get("content-encoding"), "gzip");
+  assert.equal(await pageResponse.text(), "share fixture");
   const asset = "/_next/static/chunks/%5Broot%5D_%40next_abc~4..js";
   assert.equal((await fetch(`${origin}${asset}`)).status, 200);
   for (const route of ["/api/sessions", "/api/agent/new", "/api/shares", "/api/roles", "/", "/share/anything", "/_next/static/../server.js"]) assert.equal((await fetch(`${origin}${route}`)).status, 404, route);
@@ -190,7 +205,60 @@ try {
   const cookie = auth.headers.get("set-cookie")!.split(";")[0];
   const response = await fetch(`${base}/catalog`, { headers: { cookie } });
   assert.equal(response.status, 200); assert.ok(!(await response.text()).includes(project));
+  const streamGuest = service.guest(seeded.share.id, cookie.split("=")[1]);
+  const streamSession = service.createSession(streamGuest, { ...input, projectId: service.catalog(seeded.share.id).projects[0].id });
+  const eventsUrl = `${base}/sessions/${streamSession.id}/events`;
+  assert.equal((await fetch(eventsUrl)).status, 401);
+  const otherToken = service.login(seeded.share.id, seeded.code);
+  assert.equal((await fetch(eventsUrl, { headers: { cookie: `dh_share_${seeded.share.id}=${otherToken}` } })).status, 404);
+  async function openStream() {
+    const controller = new AbortController();
+    const response = await fetch(eventsUrl, { headers: { cookie }, signal: controller.signal });
+    assert.equal(response.headers.get("content-type"), "text/event-stream");
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    return {
+      close: () => controller.abort(),
+      next: async () => {
+        const timeout = setTimeout(() => controller.abort(), 3000);
+        try {
+          while (!buffer.includes("\n\n")) {
+            const chunk = await reader.read();
+            assert.equal(chunk.done, false);
+            buffer += decoder.decode(chunk.value, { stream: true });
+          }
+          const end = buffer.indexOf("\n\n");
+          const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+          return { event: /^event: (.+)$/m.exec(frame)![1], data: JSON.parse(/^data: (.+)$/m.exec(frame)![1]) };
+        } finally { clearTimeout(timeout); }
+      },
+    };
+  }
+  const stream = await openStream();
+  assert.equal((await stream.next()).data.reset, true);
+  listener?.({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "live" }] } });
+  const partial = await stream.next();
+  assert.equal(partial.data.partial.content[0].text, "live");
+  assert.deepEqual(partial.data.messages, []);
+  assert.equal(partial.data.reset, false);
+  const largeText = "x".repeat(256_000);
+  listener?.({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: largeText }] } });
+  assert.equal((await stream.next()).data.partial.content[0].text.length, largeText.length);
+  listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "finished" }] } });
+  // A drain can deliver the latest partial before the final message event.
+  let finalFrame = await stream.next();
+  while (!finalFrame.data.messages.length) finalFrame = await stream.next();
+  assert.equal(finalFrame.data.messages.length, 1);
+  stream.close();
+  const reconnect = await openStream();
+  const baseline = await reconnect.next();
+  assert.equal(baseline.data.reset, true);
+  assert.equal(baseline.data.messages.length, 1);
   await gateway.service.revoke(seeded.share.id);
+  assert.equal((await reconnect.next()).event, "expired");
+  reconnect.close();
+  console.log("PASS: SSE live partial, history append, reconnect snapshot, guest isolation, revocation and gzip proxy");
   assert.equal((await fetch(`${base}/catalog`, { headers: { cookie } })).status, 410);
   assert.deepEqual(ownerHits, [new URL(link).pathname, asset]);
   console.log("PASS: real HTTP gateway, cookie authentication, private API denial, server action denial and revocation");
@@ -201,18 +269,18 @@ try {
   await gateway.start(`http://127.0.0.1:${ownerPort}`);
   const publicShare = service.create(config);
   gateway.service.shares.set(publicShare.share.id, publicShare.share);
-  assert.deepEqual(gateway.urls(publicShare.share.id), [`${process.env.DEERHUX_SHARE_PUBLIC_ORIGIN}/share/${publicShare.share.id}`]);
+  assert.ok(gateway.urls(publicShare.share.id).every(url => new URL(url).protocol === "http:" && isLocalNetwork(new URL(url).hostname)));
   const relay = `http://127.0.0.1:${process.env.DEERHUX_SHARE_PORT}`;
   const endpoint = `${relay}/api/share/${publicShare.share.id}/auth`;
-  assert.equal((await fetch(endpoint)).status, 403);
+  assert.equal((await fetch(endpoint)).status, 401);
   const relayHeaders = { "X-Forwarded-Proto": "https", "X-DeerHux-Share": "1" };
   const secureAuth = await fetch(endpoint, { method: "POST", headers: relayHeaders, body: JSON.stringify({ code: publicShare.code }) });
-  assert.equal(secureAuth.status, 200);
-  assert.match(secureAuth.headers.get("set-cookie")!, /; Secure/);
-  assert.equal((await fetch(`${relay}/api/shares`, { headers: relayHeaders })).status, 404);
+  assert.equal(secureAuth.status, 403);
+  assert.equal(secureAuth.headers.get("set-cookie"), null);
+  assert.equal((await fetch(`${relay}/api/shares`, { headers: relayHeaders })).status, 403);
   await gateway.service.revoke(publicShare.share.id);
-  assert.equal((await fetch(endpoint, { method: "POST", headers: relayHeaders, body: JSON.stringify({ code: publicShare.code }) })).status, 410);
-  console.log("PASS: HTTPS relay origin, secure cookie, original API denial and revoked public share");
+  assert.equal((await fetch(endpoint, { method: "POST", headers: { "X-DeerHux-Share": "1" }, body: JSON.stringify({ code: publicShare.code }) })).status, 410);
+  console.log("PASS: legacy public origin ignored, relay rejected and LAN share revocation");
 } finally {
   delete process.env.DEERHUX_SHARE_PUBLIC_ORIGIN;
   delete process.env.DEERHUX_SHARE_PORT;

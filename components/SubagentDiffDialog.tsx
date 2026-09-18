@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import { diffDownloadUrl, fetchDiffPatch, fetchDiffSummary, runSelectionKey, type DiffSummary } from "@/lib/subagent-review-client";
+import { AppIcon } from "@/components/AppIcon";
 import styles from "./SubagentReview.module.css";
 
 export interface SubagentReviewSelection {
@@ -62,7 +63,7 @@ export function SubagentOperationDialog({ title, busy, onClose, children }: {
   >
     <header className={styles.dialogHeader}>
       <h3 id={titleId}>{title}</h3>
-      <button type="button" className={styles.iconButton} title="关闭对话框" aria-label="关闭对话框" disabled={busy} onClick={onClose}>×</button>
+      <button type="button" className={styles.iconButton} title="关闭对话框" aria-label="关闭对话框" disabled={busy} onClick={onClose}><AppIcon name="close" size="toolbar" /></button>
     </header>
     <div className={styles.dialogBody}>{children}</div>
   </dialog>;

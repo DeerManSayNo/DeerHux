@@ -346,10 +346,10 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
       <div
         className={styles.dialog}
         onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(1040px, calc(100vw - 40px))", height: "min(780px, calc(100vh - 40px))", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg)", boxShadow: "0 20px 70px rgba(0,0,0,0.2)", overflow: "hidden", display: "flex" }}
+        style={{ width: "min(920px, calc(100vw - 32px))", height: "min(720px, calc(100dvh - 32px))", border: "none", borderRadius: "var(--radius-window)", background: "var(--bg)", boxShadow: "var(--shadow-modal)", overflow: "hidden", display: "flex" }}
       >
-        <aside className={styles.sidebar} style={{ width: 248, borderRight: "1px solid var(--border)", background: "var(--bg-panel)", display: "flex", flexDirection: "column" }}>
-          <div style={{ padding: 16, borderBottom: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 10 }}>
+        <aside className={styles.sidebar} style={{ width: 240, borderRight: "none", background: "var(--bg-panel)", display: "flex", flexDirection: "column" }}>
+          <div style={{ padding: 16, borderBottom: "none", display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <div>
                 <div style={{ fontSize: 16, fontWeight: 650, color: "var(--text)" }}>角色管理</div>
@@ -432,7 +432,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
         </aside>
 
         <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-          <div className={styles.toolbar} style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 12 }}>
+          <div className={styles.toolbar} style={{ padding: "14px 18px", borderBottom: "none", display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <div style={{ fontSize: 15, fontWeight: 650, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{draft?.name ?? "角色设定库"}</div>

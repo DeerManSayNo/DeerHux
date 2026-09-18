@@ -58,6 +58,23 @@ export class ShareService {
   private readonly guests = new Map<string, Guest>();
   private readonly sessions = new Map<string, Session>();
   private readonly attempts = new Map<string, { count: number; until: number }>();
+  private readonly listeners = new Map<string, Set<() => void>>();
+
+  subscribe(guest: Guest, id: string, listener: () => void) {
+    this.session(guest, id);
+    const listeners = this.listeners.get(id) ?? new Set<() => void>();
+    if (listeners.size >= 8) throw new ShareError("此会话连接过多", 429);
+    listeners.add(listener);
+    this.listeners.set(id, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size) this.listeners.delete(id);
+    };
+  }
+
+  private notify(id: string) {
+    for (const listener of this.listeners.get(id) ?? []) listener();
+  }
 
   create(raw: unknown): { share: Share; code: string } {
     const body = exactObject(raw, ["name", "projects", "models", "roleIds", "writable", "hours"]);
@@ -190,6 +207,7 @@ export class ShareService {
         session.messages.push({ role: "toolResult", toolCallId: String(event.toolCallId), toolName: String(event.toolName), content: result.content, isError: Boolean(event.isError), timestamp: Date.now() });
       }
       if (event.type === "agent_end" && event.error) session.error = "本次回复未完成，请检查主人端模型配置后重试";
+      this.notify(id);
     });
     this.sessions.set(id, session);
     return { id };
@@ -211,9 +229,10 @@ export class ShareService {
     s.name = body.message.slice(0, 32);
     const message = body.message;
     s.messages.push({ role: "user", content: message, timestamp: Date.now() });
+    this.notify(id);
     // Set running synchronously before returning; never auto-replay a timed out POST.
     void s.engine.prompt(message).catch(() => { s.error = "模型请求失败，请检查主人端模型配置或新建窗口重试"; })
-      .finally(() => { s.running = false; s.partial = undefined; });
+      .finally(() => { s.running = false; s.partial = undefined; this.notify(id); });
     return { success: true };
   }
 
@@ -221,6 +240,7 @@ export class ShareService {
     const share = this.shares.get(id);
     if (!share) return;
     share.revoked = true;
+    for (const session of this.sessions.values()) if (session.shareId === id) this.notify(session.id);
     for (const [token, guest] of this.guests) if (guest.shareId === id) this.guests.delete(token);
     await Promise.all([...this.sessions.values()].filter(s => s.shareId === id).map(async s => {
       await s.engine.abort(); s.engine.dispose(); this.sessions.delete(s.id);

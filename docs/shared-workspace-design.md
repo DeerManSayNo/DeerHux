@@ -2,7 +2,7 @@
 
 ## 使用
 
-主人点击右上角设置菜单中的「分享窗口」，在创建页选择项目、模型、角色和有效期，右侧实时展示权限摘要；创建成功后可一键复制链接和匹配码，管理页可停止已有分享。默认只读；勾选「允许新增和修改项目文本文件」后允许写入。创建后将链接和匹配码分别复制给访客。同一设备多张网卡时会列出多个链接，使用对方可达的局域网地址。
+主人点击右上角设置菜单中的「分享窗口」，在创建页选择项目、模型、角色和有效期，右侧实时展示权限摘要；创建成功后可复制链接和匹配码，也可让访客扫描链接二维码，管理页可重新查看二维码或停止已有分享。默认只读；勾选「允许新增和修改项目文本文件」后允许写入。二维码仅包含分享链接，访客打开后仍需输入 6 位匹配码。同一设备多张网卡时会列出多个链接及对应二维码，使用对方可达的局域网地址。
 
 访客验证匹配码后选择授权的项目、角色、模型并新建窗口。每个访客最多 12 个会话，最多同时显示 3 个窗口。点击窗口标签可以隐藏或重新显示，历史在当前主人进程内保留。复用原生 ChatInput 与 MessageView，支持输入、实时回复、工具结果、停止、复制和回到底部。
 
@@ -16,7 +16,7 @@
 - 不提供终端、MCP、扩展、子 Agent、定时任务、附件上传、文件删除和自动修改角色记忆。
 - 运行中的 DeerHux 代码与配置目录不能启用写入分享，防止通过热更新代码扩大执行权限。文件访问拒绝绝对路径、路径穿越、隐藏路径、符号链接、硬链接、设备文件和常见密钥文件。只读分享不注册写入工具，实际文件写入仍重新鉴权。
 - 主人自己的工作目录操作、其他本机进程或操作系统被攻破不属于访客 API 的隔离边界；本实现不运行访客任意程序，不宣称提供通用进程沙箱。
-- 默认采用可信局域网 HTTP。配置公网入口后，使用 HTTPS 反向代理和 SSH 反向隧道，分享网关仅绑定回环地址；项目、模型密钥和引擎留在主人设备。
+- 仅支持可信局域网 HTTP 分享；项目、模型密钥和引擎留在主人设备。匹配码和文件权限仍由分享网关校验。
 
 ## 实现
 
@@ -24,7 +24,9 @@
 
 `lib/sharing/service.ts` 负责安全随机生成的 6 位数字匹配码（保留前导零）、带盐 scrypt 验证、每分享每分钟最多 10 次验证、访客 Cookie、资源白名单、会话归属、到期及撤销。接口拒绝未知字段，所有会话请求验证 shareId 与 guestId；最多 20 份分享、每分享 30 个访客、全局 100 个会话及 4 个并发回合，每会话最多 100 回合。
 
-分享会话通过生产工厂使用 DeerLoopEngine，模型凭据仅留在主人端。使用专用工具，不经过原生 Wrapper 的任意 RPC 命令接口。引擎运行目录与共享项目分离，项目操作统一经过 `lib/sharing/files.ts`。访客按会话读取约 700ms 一次的消息快照，不接入宿主全局 SSE；工具调用统一通过 normalizeToolCalls 转换。
+分享会话通过生产工厂使用 DeerLoopEngine，模型凭据仅留在主人端。使用专用工具，不经过原生 Wrapper 的任意 RPC 命令接口。引擎运行目录与共享项目分离，项目操作统一经过 `lib/sharing/files.ts`。访客通过独立的会话级 SSE 接收输出，不接入宿主全局 SSE；每次连接先发送完整快照，随后按 50ms 合并引擎事件，只发送新增历史消息和当前未完成消息的最新状态。EventSource 断线自动重连并重新接收快照，避免重复追加。撤销与过期会终止订阅；写入背压期间合并状态，断开时释放监听。工具调用统一通过 normalizeToolCalls 转换。
+
+页面和静态资源代理透传 Accept-Encoding 与 Content-Encoding，静态资源保留上游缓存策略；开发资源及分享 HTML 不缓存。SSE 不压缩、不缓存，使用心跳维持连接。
 
 主人管理入口是 `app/api/shares/route.ts` 与 `components/ShareManager.tsx`。访客入口是 `app/share/[id]/page.tsx` 与 `components/SharedWorkspace.tsx`。ChatInput 的 textOnly 接口关闭本机角色/技能发现与附件入口，其他调用保持原行为。
 
@@ -42,15 +44,15 @@ node --experimental-strip-types --disable-warning=DEP0205 --import ./scripts/reg
 
 真实浏览器与局域网 HTTP 联调的检查不等于第二台设备验证，也不等于 Tauri release 打包验证。开发期间禁止运行 next build。
 
-## 公网部署
+## 局域网部署
 
-主人开发环境的 `.env.local` 设置 `DEERHUX_SHARE_PUBLIC_ORIGIN`（不带尾斜杠的 HTTPS origin）和 `DEERHUX_SHARE_PORT`（固定端口），重启应用后生效。生产运行时向 Node 进程注入同名环境变量。配置公网入口后只生成 HTTPS 链接，登录 Cookie 启用 Secure，并要求代理传入匹配的 Host 与 `X-Forwarded-Proto: https`。这些代理头只在回环监听的网关上使用，不能代替匹配码和每次请求的权限校验。
+分享网关在创建分享时监听 IPv4 网络接口，只生成本机私有地址的 HTTP 链接，并拒绝公网来源和携带转发头的请求。主人原始 API 服务仍仅监听回环地址。`DEERHUX_SHARE_PORT` 可指定固定分享端口，未设置时使用随机可用端口。
 
-当前部署使用本机 127.0.0.1:30142 → SSH 反向隧道 → 服务器 127.0.0.1:43142 → Nginx HTTPS。SSH 启用传输压缩（`-C`），Nginx 对 HTML、JavaScript、CSS、SVG 启用 gzip，降低开发资源经过公网往返的体积。专用 SSH 用户只允许该远程转发端口，禁止会话和密码登录。macOS LaunchAgent `site.deerhux.share-relay` 在用户登录后运行、掉线自动重连；主人设备需联网且应用运行，休眠或退出期间无法交互。分享网关按需启动，因此首次创建分享前入口可能返回 502。
+访客需要与主人设备处于可互通的可信局域网。主机防火墙需允许分享端口，访客网络隔离可能导致连接失败。主人设备休眠或应用退出期间无法访问。
 
-服务器配置：`/etc/nginx/conf.d/deerhux-share.conf`、`/etc/ssh/sshd_config.d/60-deerhux-relay.conf`。证书由 Certbot 定时续期，deploy hook 校验并重载 Nginx。本机隧道配置位于 `~/Library/LaunchAgents/site.deerhux.share-relay.plist`，密钥在 `~/.ssh/deerhux_share_relay`，不进入仓库。切换域名需先配置 DNS 和证书，再同步代理 server_name 与主人环境变量；已有应用服务不迁移。
+旧的 `DEERHUX_SHARE_PUBLIC_ORIGIN` 不再生效。迁移时移除该配置、停用 SSH 中继，并重启应用重新创建分享。本机旧中继可通过 `launchctl disable gui/$(id -u)/site.deerhux.share-relay` 禁止自动启动，再通过 `launchctl bootout gui/$(id -u)/site.deerhux.share-relay` 停止当前进程。
 
-公网验证覆盖 HTTPS 证书校验、匹配码登录、Secure Cookie、创建窗口、未授权 API 拒绝、撤销失效；不开放宿主原始端口。停止中继可执行 `launchctl bootout gui/$(id -u)/site.deerhux.share-relay`；恢复局域网模式需移除上述环境变量并重启应用。
+私有来源检查无法识别主动隐藏来源的隧道，不应将分享端口配置到公网反向代理、端口映射或其他转发服务。
 
 界面样式统一于 `components/sharing/sharing.module.css`，共享图标、复制反馈与错误提示位于 `components/sharing/ShareUI.tsx`。主人弹窗采用原生 dialog，访客工作台采用资源侧栏与聊天画布，支持明暗主题与窄屏布局。
 

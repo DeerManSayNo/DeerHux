@@ -165,14 +165,15 @@ export function McpConfig({ cwd, onClose }: { cwd?: string; onClose: () => void 
               配置会保存到 ~/.deerhux/agent/mcp.json；启用的 stdio 服务会在 Agent 会话启动时注入为工具。
             </div>
           </div>
-          {selected ? (
-            <Button variant="danger" disabled={!canMutate} onClick={remove}>
-              删除
-            </Button>
-          ) : null}
           <Button variant="secondary" disabled={testing || !canMutate} onClick={testConnection}>
             {testing ? "测试中..." : "测试连接"}
           </Button>
+        </>
+      }
+      footer={
+        <>
+          {selected ? <Button variant="danger" className={styles.footerDanger} disabled={!canMutate} onClick={remove}>删除服务</Button> : null}
+          <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button variant="primary" disabled={saving || !canMutate} onClick={save}>
             {saving ? "保存中..." : "保存"}
           </Button>

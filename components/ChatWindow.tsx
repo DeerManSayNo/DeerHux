@@ -33,6 +33,7 @@ import { needsCompaction, type CompactionModelRef } from "@/lib/compaction-ui";
 import { subscribeSubagentRuns } from "@/lib/agent-event-client";
 import { getProjectDisplayName } from "@/lib/project-name";
 import { collaborationNeedsHydration, isCollaborationSnapshotOlder, mergeCollaborationMuxSnapshot } from "@/lib/collaboration-ui-state";
+import { calculateContextCacheMetrics } from "@/lib/context-metrics";
 
 import { ProjectHeaderSlot, ProjectPicker } from "./ProjectPicker";
 interface AgentRole {
@@ -344,7 +345,7 @@ function AgentStatusTicker(props: TickerProps) {
 
   // 6. 上下文使用率
   if (contextUsage?.percent != null) {
-    const pct = Math.round(contextUsage.percent);
+    const pct = Math.round(contextUsage.percent * 100);
     const tokensStr = contextUsage.tokens != null ? `${(contextUsage.tokens / 1000).toFixed(0)}k` : "?";
     items.push({
       label: "上下文",
@@ -1434,6 +1435,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
 
   const chatInputSaveStateRef = useRef<((state: ChatInputState) => void) | null>(null);
   chatInputSaveStateRef.current = saveInputState ?? null;
+  const contextCacheMetrics = useMemo(
+    () => calculateContextCacheMetrics(contextUsage, messages),
+    [contextUsage, messages],
+  );
 
   const chatInputElement = (
     <>
@@ -1471,6 +1476,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         onSteer={isRunning ? handleSteer : undefined}
         onFollowUp={isRunning ? handleFollowUp : undefined}
         isStreaming={isRunning}
+        contextMetrics={contextCacheMetrics}
         model={displayModelValue}
         modelNames={modelNames}
         modelList={modelList}

@@ -5,6 +5,8 @@ const eslintConfig = [
   {
     ignores: [
       ".codegraph/**",
+      ".next-measure/**",
+      ".next-build-check/**",
       ".deerhux/**",
       ".deerhux-build-home/**",
       "codeAgent/**",

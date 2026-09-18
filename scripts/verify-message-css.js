@@ -2,7 +2,7 @@
 // Fail before packaging when production CSS and MessageView have drifted.
 const fs = require("node:fs");
 const path = require("node:path");
-const root = path.resolve(__dirname, "../.next/static");
+const root = path.resolve(__dirname, "..", process.env.DEERHUX_BUILD_DIR || ".next", "static");
 function collect(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
     const file = path.join(dir, entry.name);

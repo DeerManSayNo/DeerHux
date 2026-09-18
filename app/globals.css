@@ -1,4 +1,10 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
+/* Limit webpack's directory snapshots to UI source. Automatic discovery can
+   register src-tauri itself and recursively snapshot its entire target tree. */
+@source "./";
+@source "../components";
+@source "../hooks";
+@source "../lib";
 
 @theme {
   --color-bg: var(--bg);

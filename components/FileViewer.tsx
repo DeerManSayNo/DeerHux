@@ -1,12 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState, useRef, useCallback, type ClipboardEvent, type FormEvent } from "react";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
+import { DeferredCodeBlock } from "./LazyCodeHighlighter";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useTheme } from "@/hooks/useTheme";
 import { encodeFilePathForApi, getFileName, getRelativeFilePath, joinFilePath, normalizeFilePathSlashes } from "@/lib/file-paths";
 
 interface Props {
@@ -1382,7 +1379,6 @@ export function FileViewer({ filePath, cwd, onOpenFile }: Props) {
 }
 
 function TextFileViewer({ filePath, cwd, onOpenFile }: Props) {
-  const { isDark } = useTheme();
   const [data, setData] = useState<FileData | null>(null);
   const [prevContent, setPrevContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2001,9 +1997,9 @@ function TextFileViewer({ filePath, cwd, onOpenFile }: Props) {
             previewRootRef={markdownPreviewRootRef}
           />
         ) : (
-          <SyntaxHighlighter
+          <DeferredCodeBlock
+            code={sourceContent}
             language={data.language === "text" ? "plaintext" : data.language}
-            style={isDark ? vscDarkPlus : vs}
             showLineNumbers
             lineNumberStyle={{
               color: "var(--text-dim)",
@@ -2038,9 +2034,7 @@ function TextFileViewer({ filePath, cwd, onOpenFile }: Props) {
               };
             }}
             wrapLongLines={false}
-          >
-            {sourceContent}
-          </SyntaxHighlighter>
+          />
         )}
       </div>
     </div>

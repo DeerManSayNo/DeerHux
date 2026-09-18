@@ -7,6 +7,8 @@ import { findEmptyModelId } from "@/lib/models-config-validation";
 import { parseProviderConfigJson, serializeProviderConfig } from "@/lib/models-config-transfer";
 import { Button } from "@/components/ui/Button";
 import { ModalShell } from "@/components/ui/Modal";
+import { AppIcon } from "@/components/AppIcon";
+import styles from "./ModelsConfig.module.css";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -43,6 +45,42 @@ type AutoRecoveryModel = RecoveryFallbackModel | null;
 interface ModelsJson {
   providers?: Record<string, ProviderEntry>;
   autoRecoveryModels?: AutoRecoveryModel[];
+}
+
+let cachedModelsConfig: ModelsJson | null = null;
+let modelsConfigRequest: Promise<ModelsJson> | null = null;
+let modelsConfigFetchedAt = 0;
+
+export function preloadModelsConfigData(forceRefresh = false): Promise<ModelsJson> {
+  if (cachedModelsConfig && (!forceRefresh || Date.now() - modelsConfigFetchedAt < 1_000)) {
+    return Promise.resolve(cachedModelsConfig);
+  }
+  if (!modelsConfigRequest) {
+    modelsConfigRequest = fetch("/api/models-config")
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<ModelsJson>;
+      })
+      .then((data) => {
+        const normalized = data.providers ? data : { ...data, providers: {} };
+        cachedModelsConfig = normalized;
+        modelsConfigFetchedAt = Date.now();
+        return normalized;
+      })
+      .catch((error) => {
+        modelsConfigRequest = null;
+        throw error;
+      })
+      .finally(() => {
+        modelsConfigRequest = null;
+      });
+  }
+  return modelsConfigRequest;
+}
+
+function firstProviderSelection(config: ModelsJson): Selection | null {
+  const name = Object.keys(config.providers ?? {})[0];
+  return name ? { type: "provider", name } : null;
 }
 
 async function copyText(text: string): Promise<void> {
@@ -89,29 +127,17 @@ const API_OPTIONS = ["openai-completions", "openai-responses", "anthropic-messag
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <label style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>{label}</label>
+    <div className={styles.field}>
+      <label className={styles.fieldLabel}>{label}</label>
       {children}
     </div>
   );
 }
 
-const inputStyle = {
-  padding: "6px 9px",
-  background: "var(--bg-panel)",
-  border: "1px solid var(--border)",
-  borderRadius: 5,
-  color: "var(--text)",
-  fontSize: 12,
-  outline: "none",
-  width: "100%",
-  boxSizing: "border-box" as const,
-};
-
 function TextInput({ value, onChange, placeholder, mono, autoFocus }: { value: string; onChange: (v: string) => void; placeholder?: string; mono?: boolean; autoFocus?: boolean }) {
   return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoFocus={autoFocus}
     onFocus={autoFocus ? (e) => e.currentTarget.select() : undefined}
-    style={{ ...inputStyle, fontFamily: mono ? "var(--font-mono)" : "inherit" }} />;
+    className={`${styles.input} ${mono ? styles.mono : ""}`} />;
 }
 
 function SecretTextInput({
@@ -147,7 +173,7 @@ function SecretTextInput({
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={onKeyDown}
         placeholder={placeholder}
-        style={{ ...inputStyle, paddingRight: 34, fontFamily: mono ? "var(--font-mono)" : "inherit" }}
+        className={`${styles.input} ${styles.secretInput} ${mono ? styles.mono : ""}`}
         autoComplete={autoComplete}
         spellCheck={spellCheck}
       />
@@ -192,13 +218,12 @@ function SecretTextInput({
 }
 
 function NumInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
-  return <input type="number" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={inputStyle} />;
+  return <input type="number" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className={styles.input} />;
 }
 
 function Select({ value, onChange, options, required }: { value: string; onChange: (v: string) => void; options: readonly string[]; required?: boolean }) {
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)}
-      style={{ ...inputStyle, color: value ? "var(--text)" : "var(--text-dim)" }}>
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={styles.input} data-empty={!value}>
       {!required && <option value="">— 继承 / 无 —</option>}
       {options.map((o) => <option key={o} value={o}>{o}</option>)}
     </select>
@@ -207,16 +232,16 @@ function Select({ value, onChange, options, required }: { value: string; onChang
 
 function Check({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: "var(--text-muted)" }}>
+    <label className={styles.checkLabel}>
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)}
-        style={{ width: 13, height: 13, accentColor: "var(--accent)", cursor: "pointer" }} />
+        className={styles.checkbox} />
       {label}
     </label>
   );
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>{children}</div>;
+  return <div className={styles.sectionTitle}>{children}</div>;
 }
 
 // ── Provider detail ───────────────────────────────────────────────────────────
@@ -236,22 +261,16 @@ function ProviderDetail({ name, provider, focusName, onChange, onRename, onDelet
   }, [provider.api]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+    <div className={styles.detailForm}>
+      <div className={styles.detailHeading}>
         <SectionTitle>服务商</SectionTitle>
-        <button onClick={onDelete}
-          style={{ padding: "3px 8px", background: "none", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 4, color: "#ef4444", cursor: "pointer", fontSize: 11 }}>
-          删除
-        </button>
+        <Button variant="danger" size="sm" onClick={onDelete}>删除</Button>
       </div>
 
       <Field label="服务商名称">
         <TextInput value={editingName} onChange={setEditingName} placeholder="provider-name" mono autoFocus={focusName} />
         {editingName !== name && editingName.trim() && (
-          <button onClick={() => onRename(editingName.trim())}
-            style={{ marginTop: 4, padding: "3px 10px", background: "var(--accent)", border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 11, alignSelf: "flex-start" }}>
-            重命名
-          </button>
+          <Button variant="secondary" size="sm" className={styles.inlineAction} onClick={() => onRename(editingName.trim())}>重命名</Button>
         )}
       </Field>
 
@@ -263,7 +282,7 @@ function ProviderDetail({ name, provider, focusName, onChange, onRename, onDelet
       <Field label="API 密钥 (API Key)">
         <SecretTextInput value={provider.apiKey ?? ""} onChange={(v) => set("apiKey", v || undefined)}
           placeholder="ENV_VAR_NAME, !shell-command, or literal key" mono />
-        <span style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
+        <span className={styles.fieldHint}>
           以 <code style={{ fontFamily: "var(--font-mono)" }}>!</code> 开头可运行 Shell 命令获取密钥，或直接使用环境变量名称
         </span>
       </Field>
@@ -279,15 +298,6 @@ function ProviderDetail({ name, provider, focusName, onChange, onRename, onDelet
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 type ThinkingLevel = typeof THINKING_LEVELS[number];
-
-const LEVEL_COLORS: Record<ThinkingLevel, string> = {
-  off:     "var(--text-dim)",
-  minimal: "#6b7280",
-  low:     "#60a5fa",
-  medium:  "#a78bfa",
-  high:    "#f472b6",
-  xhigh:   "#fb923c",
-};
 
 function ThinkingLevelMapEditor({
   value,
@@ -309,104 +319,29 @@ function ThinkingLevelMapEditor({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+    <div className={styles.thinkingMap}>
       {THINKING_LEVELS.map((level) => {
         const raw = map[level];
         const state: "omit" | "null" | "string" =
           !(level in map) ? "omit" : raw === null ? "null" : "string";
         const strVal = typeof raw === "string" ? raw : "";
-        const color = LEVEL_COLORS[level];
-
-        const btnBase: React.CSSProperties = {
-          padding: "4px 10px",
-          fontSize: 10,
-          border: "none",
-          cursor: "pointer",
-          fontWeight: 400,
-          transition: "background 0.1s, color 0.1s",
-          whiteSpace: "nowrap",
-          background: "var(--bg-panel)",
-          color: "var(--text-dim)",
-        };
-        const btnActive: React.CSSProperties = {
-          background: "var(--accent)",
-          color: "#fff",
-          fontWeight: 600,
-        };
-        const btnActiveDisabled: React.CSSProperties = {
-          background: "#ef4444",
-          color: "#fff",
-          fontWeight: 600,
-        };
 
         return (
-          <div
-            key={level}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "5px 4px",
-              borderRadius: 6,
-              background: "transparent",
-              border: "1px solid transparent",
-            }}
-          >
-            {/* Level badge */}
-            <div style={{ display: "flex", alignItems: "center", gap: 5, width: 68, flexShrink: 0 }}>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0, opacity: state === "null" ? 0.3 : 1 }} />
-              <span style={{
-                fontSize: 11,
-                fontFamily: "var(--font-mono)",
-                color: state === "null" ? "var(--text-dim)" : "var(--text-muted)",
-                textDecoration: state === "null" ? "line-through" : "none",
-              }}>
-                {level}
-              </span>
-            </div>
-
-            {/* Default + Disabled buttons */}
-            <div style={{ display: "flex", borderRadius: 5, border: "1px solid var(--border)", overflow: "hidden", flexShrink: 0 }}>
-              <button
-                onClick={() => setLevel(level, "omit")}
-                style={{ ...btnBase, ...(state === "omit" ? btnActive : {}) }}
-              >
-                默认
-              </button>
-              <button
-                onClick={() => setLevel(level, null)}
-                style={{ ...btnBase, borderLeft: "1px solid var(--border)", ...(state === "null" ? btnActiveDisabled : {}) }}
-              >
-                禁用
-              </button>
-            </div>
-
-            {/* Custom button + input fused */}
-            <div style={{ display: "flex", borderRadius: 5, border: `1px solid ${state === "string" ? "var(--accent)" : "var(--border)"}`, overflow: "hidden", transition: "border-color 0.1s" }}>
-              <button
-                onClick={() => setLevel(level, strVal || level)}
-                style={{ ...btnBase, ...(state === "string" ? btnActive : {}), borderRight: "1px solid var(--border)", flexShrink: 0 }}
-              >
-                自定义
-              </button>
+          <div key={level} className={styles.thinkingRow}>
+            <span className={styles.thinkingLevel} data-disabled={state === "null"}>{level}</span>
+            <div className={styles.thinkingOptions}>
+              <button type="button" aria-pressed={state === "omit"} onClick={() => setLevel(level, "omit")}>默认</button>
+              <button type="button" data-danger={state === "null"} aria-pressed={state === "null"} onClick={() => setLevel(level, null)}>禁用</button>
+              <div className={styles.thinkingCustom} data-active={state === "string"}>
+                <button type="button" aria-pressed={state === "string"} onClick={() => setLevel(level, strVal || level)}>自定义</button>
               <input
                 value={strVal}
                 onChange={(e) => setLevel(level, e.target.value)}
                 onFocus={() => { if (state !== "string") setLevel(level, strVal || level); }}
                 placeholder={level}
                 maxLength={10}
-                style={{
-                  width: "12ch",
-                  background: state === "string" ? "var(--bg)" : "var(--bg-panel)",
-                  border: "none",
-                  outline: "none",
-                  color: state === "string" ? "var(--text)" : "var(--text-dim)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 11,
-                  padding: "4px 7px",
-                  transition: "background 0.1s, color 0.1s",
-                }}
               />
+              </div>
             </div>
           </div>
         );
@@ -537,8 +472,8 @@ function ModelDetail({
   }, [model, provider, providerName, testState.phase, testMode]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+    <div className={styles.detailForm}>
+      <div className={styles.detailHeading}>
         <SectionTitle>Model</SectionTitle>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {testSummary && (
@@ -548,10 +483,10 @@ function ModelDetail({
                 maxWidth: 260,
                 height: 24,
                 padding: "0 8px",
-                border: `1px solid ${testState.phase === "error" ? "#fecaca" : testState.phase === "success" ? "#bbf7d0" : "var(--border)"}`,
+                border: "none",
                 borderRadius: 4,
-                background: testState.phase === "error" ? "#fee2e2" : testState.phase === "success" ? "#dcfce7" : "#e5e7eb",
-                color: "#111827",
+                background: testState.phase === "error" ? "var(--danger-bg)" : testState.phase === "success" ? "var(--success-bg)" : "var(--bg-panel)",
+                color: testState.phase === "error" ? "var(--danger)" : testState.phase === "success" ? "var(--success)" : "var(--text-muted)",
                 fontSize: 11,
                 display: "inline-flex",
                 alignItems: "center",
@@ -569,7 +504,10 @@ function ModelDetail({
             <div style={{
               display: "flex",
               borderRadius: 4,
-              border: "1px solid var(--border)",
+              border: "none",
+              padding: 2,
+              gap: 2,
+              background: "var(--bg-panel)",
               overflow: "hidden",
               flexShrink: 0,
               height: 24,
@@ -582,9 +520,9 @@ function ModelDetail({
                   style={{
                     padding: "0 8px",
                     height: "100%",
-                    background: testMode === mode ? "var(--accent)" : "transparent",
+                    background: testMode === mode ? "var(--bg-selected)" : "transparent",
                     border: "none",
-                    color: testMode === mode ? "#fff" : "var(--text-dim)",
+                    color: testMode === mode ? "var(--text)" : "var(--text-dim)",
                     cursor: "pointer",
                     fontSize: 11,
                     fontWeight: testMode === mode ? 600 : 400,
@@ -620,10 +558,10 @@ function ModelDetail({
             style={{
               height: 24,
               padding: "0 10px",
-              background: testState.phase === "success" ? "#16a34a" : "none",
-              border: `1px solid ${testState.phase === "success" ? "#16a34a" : "var(--border)"}`,
+              background: testState.phase === "success" ? "var(--success-bg)" : "var(--bg-panel)",
+              border: "none",
               borderRadius: 4,
-              color: testState.phase === "success" ? "#fff" : (!model.id.trim() || testState.phase === "testing") ? "var(--text-dim)" : "var(--text-muted)",
+              color: testState.phase === "success" ? "var(--success)" : (!model.id.trim() || testState.phase === "testing") ? "var(--text-dim)" : "var(--text-muted)",
               cursor: (!model.id.trim() || testState.phase === "testing") ? "not-allowed" : "pointer",
               fontSize: 11,
               display: "inline-flex",
@@ -650,7 +588,7 @@ function ModelDetail({
             {testState.phase === "testing" ? "测试中…" : testState.phase === "success" ? "正常" : "测试"}
           </button>
           <button onClick={onDelete}
-            style={{ height: 24, padding: "0 8px", background: "none", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 4, color: "#ef4444", cursor: "pointer", fontSize: 11, boxSizing: "border-box" }}>
+            style={{ height: 24, padding: "0 8px", background: "var(--danger-bg)", border: "none", borderRadius: 4, color: "var(--danger)", cursor: "pointer", fontSize: 11, boxSizing: "border-box" }}>
             移除
           </button>
         </div>
@@ -676,7 +614,7 @@ function ModelDetail({
           onChange={(v) => set("input", v ? ["text", "image"] : undefined)} />
         <label
           title={supportsFastMode ? "请求 Priority 服务等级；上游可能忽略或降级" : "开启后会自动切换为 openai-responses API 格式"}
-          style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: "var(--text-muted)" }}
+          className={styles.checkLabel}
         >
           <input
             type="checkbox"
@@ -705,7 +643,7 @@ function ModelDetail({
               {model.thinkingLevelMap && (
                 <button
                   onClick={() => set("thinkingLevelMap", undefined)}
-                  style={{ fontSize: 10, padding: "2px 7px", background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-dim)", cursor: "pointer" }}
+                  className={styles.textAction}
                 >
                   清空
                 </button>
@@ -772,7 +710,7 @@ function RecoveryFallbackEditor({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className={styles.detailForm}>
       <div>
         <SectionTitle>自动续跑兜底</SectionTitle>
         <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
@@ -787,7 +725,7 @@ function RecoveryFallbackEditor({
             <select
               value={selected}
               onChange={(e) => setLevel(index, e.target.value)}
-              style={inputStyle}
+              className={styles.input}
             >
               <option value="">沿用当前模型</option>
               {models.map((m) => (
@@ -806,32 +744,36 @@ function RecoveryFallbackEditor({
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSaved?: () => void }) {
-  const [config, setConfig] = useState<ModelsJson>({ providers: {} });
-  const [loading, setLoading] = useState(true);
+  const [config, setConfig] = useState<ModelsJson>(() => cachedModelsConfig ?? { providers: {} });
+  const [loading, setLoading] = useState(cachedModelsConfig === null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
-  const [selection, setSelection] = useState<Selection | null>(null);
+  const [selection, setSelection] = useState<Selection | null>(() => cachedModelsConfig ? firstProviderSelection(cachedModelsConfig) : null);
   const [newProviderName, setNewProviderName] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [transferNotice, setTransferNotice] = useState<string | null>(null);
-  const providerRowRefs = useRef(new Map<string, HTMLDivElement>());
+  const providerRowRefs = useRef(new Map<string, HTMLButtonElement>());
 
   useEscapeClose(onClose, !importOpen);
 
   useEffect(() => {
-    fetch("/api/models-config")
-      .then((r) => r.json())
-      .then((d: ModelsJson) => {
-        const normalized = d.providers ? d : { ...d, providers: {} };
+    let cancelled = false;
+    preloadModelsConfigData(true)
+      .then((normalized) => {
+        if (cancelled) return;
         setConfig(normalized);
-        const keys = Object.keys(normalized.providers ?? {});
-        if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
+        setSelection((current) => current ?? firstProviderSelection(normalized));
       })
-      .catch(() => setConfig({ providers: {} }))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        if (!cancelled && !cachedModelsConfig) setConfig({ providers: {} });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
   }, []);
 
   const addCustomProvider = useCallback(() => {
@@ -987,6 +929,8 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
       const d = await res.json() as { success?: boolean; error?: string };
       if (!res.ok || d.error) setSaveError(d.error ?? `HTTP ${res.status}`);
       else {
+        cachedModelsConfig = config;
+        modelsConfigFetchedAt = Date.now();
         setSavedOk(true);
         notifyApp("deerhux.models-updated");
         onSaved?.();
@@ -1054,191 +998,91 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
 
   return (
     <>
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center" }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{ width: 860, height: "78vh", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, display: "flex", flexDirection: "column", boxShadow: "0 8px 32px rgba(0,0,0,0.18)", overflow: "hidden" }}>
-
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>模型配置</span>
-            <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>~/.deerhux/agent/models.json</code>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <Button
-              variant="secondary"
-              size="sm"
-              leadingIcon="copy"
-              disabled={!selectedProviderName || loading}
-              onClick={() => void handleCopyProvider()}
-            >
-              复制供应商 JSON
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              leadingIcon="import"
-              disabled={loading}
-              onClick={() => {
-                setImportError(null);
-                setImportOpen(true);
-              }}
-            >
-              导入 JSON
-            </Button>
-            <Button variant="iconButton" size="sm" icon="close" aria-label="关闭" onClick={onClose} />
-          </div>
-        </div>
-
-        {/* Body */}
-        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-
-          {/* Left: tree */}
-          <div style={{ width: 210, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)" }}>
-            <div style={{ flex: 1, overflowY: "auto", padding: "8px 6px" }}>
-              <div
-                onClick={() => setSelection({ type: "recovery" })}
-                style={{ display: "flex", alignItems: "center", gap: 7, padding: "7px 8px", borderRadius: 5, cursor: "pointer", background: selection?.type === "recovery" ? "var(--bg-selected)" : "none", marginBottom: 4 }}
-                onMouseEnter={(e) => { if (selection?.type !== "recovery") e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { if (selection?.type !== "recovery") e.currentTarget.style.background = "none"; }}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)", flexShrink: 0 }}>
-                  <polyline points="23 4 23 10 17 10" />
-                  <polyline points="1 20 1 14 7 14" />
-                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10" />
-                  <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14" />
-                </svg>
-                <span style={{ fontSize: 12, fontWeight: selection?.type === "recovery" ? 600 : 400, color: "var(--text)" }}>自动续跑兜底</span>
-              </div>
-
-              {providers.length > 0 && (
-                <div style={{ margin: "4px 8px", borderTop: "1px solid var(--border)" }} />
-              )}
-
-              {/* Custom providers */}
-              {loading ? (
-                <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-muted)" }}>加载中…</div>
-              ) : providers.map(([pName, pData]) => {
-                const isProviderSelected = selection?.type === "provider" && selection.name === pName;
-                const models = pData.models ?? [];
-                return (
-                  <div
-                    key={pName}
-                    ref={(node) => {
-                      if (node) providerRowRefs.current.set(pName, node);
-                      else providerRowRefs.current.delete(pName);
-                    }}
-                    style={{ marginBottom: 2 }}
-                  >
-                    {/* Provider row */}
-                    <div
-                      onClick={() => setSelection({ type: "provider", name: pName })}
-                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 5, cursor: "pointer", background: isProviderSelected ? "var(--bg-selected)" : "none" }}
-                      onMouseEnter={(e) => { if (!isProviderSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                      onMouseLeave={(e) => { if (!isProviderSelected) e.currentTarget.style.background = "none"; }}
-                    >
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)", flexShrink: 0 }}>
-                        <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
-                        <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                        <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                        <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                        <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-                      </svg>
-                      <span style={{ fontSize: 12, fontWeight: isProviderSelected ? 600 : 400, color: "var(--text)", fontFamily: "var(--font-mono)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {pName}
-                      </span>
-                    </div>
-
-                    {/* Model rows */}
-                    {models.map((m, i) => {
-                      const isModelSelected = selection?.type === "model" && selection.providerName === pName && selection.index === i;
-                      return (
-                        <div
-                          key={i}
-                          onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
-                          style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 8px 5px 26px", borderRadius: 5, cursor: "pointer", background: isModelSelected ? "var(--bg-selected)" : "none" }}
-                          onMouseEnter={(e) => { if (!isModelSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                          onMouseLeave={(e) => { if (!isModelSelected) e.currentTarget.style.background = "none"; }}
-                        >
-                          <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: m.id ? "var(--text-muted)" : "var(--text-dim)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {m.id || "新模型"}
-                          </span>
-                          {m.reasoning && (
-                            <span style={{ fontSize: 9, padding: "1px 4px", background: "rgba(99,102,241,0.12)", color: "rgba(99,102,241,0.8)", borderRadius: 3, flexShrink: 0 }}>T</span>
-                          )}
-                        </div>
-                      );
-                    })}
-
-                    {/* Add model button */}
-                    <div
-                      onClick={(e) => { e.stopPropagation(); addModel(pName); }}
-                      style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px 4px 26px", borderRadius: 5, cursor: "pointer", color: "var(--text-dim)" }}
-                      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-                    >
-                      <span style={{ fontSize: 11 }}>+ 模型</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Add provider */}
-            <div style={{ borderTop: "1px solid var(--border)", padding: "8px 6px" }}>
-              <button onClick={addCustomProvider} disabled={loading} style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                width: "100%", padding: "6px 0", background: "none", border: "1px dashed var(--border)", borderRadius: 5,
-                color: "var(--text-muted)", cursor: loading ? "not-allowed" : "pointer", fontSize: 12,
-              }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.color = "var(--accent)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}
-              >
-                {loading ? "加载中…" : "+ 添加服务商"}
-              </button>
-            </div>
-          </div>
-
-          {/* Right: detail */}
-          <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-            {loading ? null : detailContent ?? (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
-                请在左侧选择服务商或模型进行配置
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
-          {saveError && <span style={{ fontSize: 12, color: "#f87171", flex: 1 }}>{saveError}</span>}
-          {!saveError && transferNotice && <span role="status" style={{ fontSize: 12, color: "var(--text-muted)", flex: 1 }}>{transferNotice}</span>}
-          <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
-            取消
+    <ModalShell
+      onClose={onClose}
+      title="模型配置"
+      subtitle={<code className={styles.configPath}>~/.deerhux/agent/models.json</code>}
+      className={styles.modelPanel}
+      bodyClassName={styles.detailBody}
+      sidebar={(
+        <nav className={styles.tree} aria-label="模型供应商">
+          <button
+            type="button"
+            className={`${styles.treeItem} ${selection?.type === "recovery" ? styles.treeItemActive : ""}`}
+            onClick={() => setSelection({ type: "recovery" })}
+          >
+            <AppIcon name="refresh" size="compact" />
+            <span>自动续跑兜底</span>
           </button>
-          <button onClick={handleSave} disabled={saving || savedOk} style={{
-            position: "relative",
-            padding: "6px 16px",
-            minWidth: 92,
-            background: savedOk ? "#16a34a" : saving ? "var(--bg-panel)" : "var(--accent)",
-            border: "none", borderRadius: 6,
-            color: savedOk ? "#fff" : saving ? "var(--text-muted)" : "#fff",
-            cursor: (saving || savedOk) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
-            display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
-            transition: "background-color 0.2s ease, color 0.2s ease",
-            animation: savedOk ? "saved-pop 0.45s ease" : undefined,
-          }}>
-            {savedOk && (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
-                style={{ strokeDasharray: 18, animation: "saved-check-draw 0.35s ease forwards", flexShrink: 0 }}>
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            )}
-            <span>{savedOk ? "已保存" : saving ? "保存中…" : "保存"}</span>
-          </button>
+          {providers.length > 0 && <div className={styles.treeLabel}>供应商</div>}
+          {loading ? <div className={styles.loadingText}>加载中…</div> : providers.map(([pName, pData]) => {
+            const isProviderSelected = selection?.type === "provider" && selection.name === pName;
+            const models = pData.models ?? [];
+            return (
+              <div key={pName} className={styles.providerGroup}>
+                <button
+                  ref={(node) => {
+                    if (node) providerRowRefs.current.set(pName, node);
+                    else providerRowRefs.current.delete(pName);
+                  }}
+                  type="button"
+                  className={`${styles.treeItem} ${isProviderSelected ? styles.treeItemActive : ""}`}
+                  onClick={() => setSelection({ type: "provider", name: pName })}
+                >
+                  <AppIcon name="model" size="compact" />
+                  <span className={styles.providerName}>{pName}</span>
+                </button>
+                {models.map((model, index) => {
+                  const isModelSelected = selection?.type === "model" && selection.providerName === pName && selection.index === index;
+                  return (
+                    <button
+                      type="button"
+                      key={`${model.id}-${index}`}
+                      className={`${styles.modelItem} ${isModelSelected ? styles.treeItemActive : ""}`}
+                      onClick={() => setSelection({ type: "model", providerName: pName, index })}
+                    >
+                      <span>{model.id || "新模型"}</span>
+                      {model.reasoning && <small>推理</small>}
+                    </button>
+                  );
+                })}
+                <button type="button" className={styles.addModel} onClick={() => addModel(pName)}>
+                  <AppIcon name="add" size="inline" />
+                  <span>添加模型</span>
+                </button>
+              </div>
+            );
+          })}
+        </nav>
+      )}
+      sidebarFooter={(
+        <Button variant="ghost" className={styles.fullWidth} leadingIcon="add" disabled={loading} onClick={addCustomProvider}>
+          {loading ? "加载中…" : "添加服务商"}
+        </Button>
+      )}
+      actions={(
+        <div className={styles.headerActions}>
+          <Button variant="ghost" size="sm" leadingIcon="copy" disabled={!selectedProviderName || loading} onClick={() => void handleCopyProvider()}>
+            复制 JSON
+          </Button>
+          <Button variant="ghost" size="sm" leadingIcon="import" disabled={loading} onClick={() => { setImportError(null); setImportOpen(true); }}>
+            导入 JSON
+          </Button>
         </div>
-      </div>
-    </div>
+      )}
+      footer={(
+        <>
+          {saveError ? <span role="alert" className={`${styles.footerStatus} ${styles.footerError}`}>{saveError}</span>
+            : <span role="status" className={styles.footerStatus}>{transferNotice}</span>}
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button variant="primary" leadingIcon={savedOk ? "check" : undefined} disabled={saving || savedOk} onClick={handleSave}>
+            {savedOk ? "已保存" : saving ? "保存中…" : "保存"}
+          </Button>
+        </>
+      )}
+    >
+      {loading ? null : detailContent ?? <div className={styles.emptyDetail}>请在左侧选择服务商或模型进行配置</div>}
+    </ModalShell>
     <ModalShell
       open={importOpen}
       onClose={() => {
@@ -1266,13 +1110,7 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
           placeholder={'{\n  "providers": {\n    "provider-name": { ... }\n  }\n}'}
           aria-label="供应商配置 JSON"
           spellCheck={false}
-          style={{
-            ...inputStyle,
-            minHeight: 220,
-            resize: "vertical",
-            fontFamily: "var(--font-mono)",
-            lineHeight: 1.5,
-          }}
+          className={`${styles.input} ${styles.importTextarea}`}
         />
         <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
           导入内容可包含 API Key。Key 将以明文进入当前配置，并在保存后写入本机 models.json。

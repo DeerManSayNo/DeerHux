@@ -23,37 +23,42 @@
   min-height: 0;
   overflow: hidden;
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius-window);
   box-shadow: var(--shadow-modal);
 }
 
 /* 两栏配置面板：外侧 16px 圆角，左栏与主区各自滚动。 */
 .split {
-  width: min(1040px, calc(100vw - 40px));
-  height: min(780px, calc(100vh - 40px));
+  width: min(920px, calc(100vw - 32px));
+  height: min(720px, calc(100dvh - 32px));
   flex-direction: row;
 }
 
 /* 居中窄弹窗：12px 圆角与更轻的阴影。 */
 .confirm {
   width: min(480px, calc(100vw - 40px));
-  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 32px);
   flex-direction: column;
-  background: var(--bg-panel);
+  background: var(--bg);
   border-radius: var(--radius-composer);
   box-shadow: var(--shadow-popover);
+}
+
+.content {
+  width: min(900px, calc(100vw - 32px));
+  height: min(720px, calc(100dvh - 32px));
+  flex-direction: column;
 }
 
 /* ---- split 左栏 ---- */
 .sidebar {
   display: flex;
   flex-direction: column;
-  width: 280px;
+  width: 240px;
   flex-shrink: 0;
   min-height: 0;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border);
 }
 
 .sidebarHeader {
@@ -62,7 +67,6 @@
   gap: 8px;
   flex-shrink: 0;
   padding: 16px;
-  border-bottom: 1px solid var(--border);
 }
 
 .sidebarBody {
@@ -75,7 +79,6 @@
 .sidebarFooter {
   flex-shrink: 0;
   padding: 12px;
-  border-top: 1px solid var(--border);
 }
 
 /* ---- split 主区 ---- */
@@ -94,7 +97,6 @@
   gap: 12px;
   flex-shrink: 0;
   padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
 }
 
 .headerMain {
@@ -129,7 +131,8 @@
   gap: 8px;
   flex-shrink: 0;
   flex-wrap: wrap;
-  padding: 12px 18px 18px;
+  padding: 10px 18px 14px;
+  background: var(--bg-panel);
 }
 
 @media (max-width: 640px) {

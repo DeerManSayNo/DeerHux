@@ -34,13 +34,115 @@ use windows_sys::Win32::System::JobObjects::{
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
+    Foundation::{
+        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, RECT,
+        WPARAM,
+    },
     System::Threading::CreateMutexW,
+    UI::{
+        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+        WindowsAndMessaging::{
+            FindWindowExW, GetClientRect, SetWindowPos, SIZE_MINIMIZED, SWP_NOACTIVATE,
+            SWP_NOZORDER, WM_NCDESTROY, WM_SIZE,
+        },
+    },
 };
 
 mod live_island;
 #[cfg(target_os = "macos")]
 mod live_island_macos;
+
+#[cfg(target_os = "windows")]
+const MAIN_WINDOW_RESIZE_SUBCLASS_ID: usize = 0xD33_0001;
+
+/// Wry 0.55 resizes the WebView2 container with SWP_ASYNCWINDOWPOS. During a
+/// live resize that child HWND can lag behind the top-level client area and
+/// expose the window background. Finish each WM_SIZE with a synchronous resize.
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn sync_main_webview_resize(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    _data: usize,
+) -> LRESULT {
+    if message == WM_NCDESTROY {
+        unsafe {
+            RemoveWindowSubclass(
+                hwnd,
+                Some(sync_main_webview_resize),
+                MAIN_WINDOW_RESIZE_SUBCLASS_ID,
+            );
+        }
+    }
+
+    let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+
+    if message == WM_SIZE && wparam != SIZE_MINIMIZED as usize {
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(hwnd, &mut client) } != 0 {
+            const WRY_WEBVIEW_CLASS: [u16; 12] = [
+                b'W' as u16,
+                b'R' as u16,
+                b'Y' as u16,
+                b'_' as u16,
+                b'W' as u16,
+                b'E' as u16,
+                b'B' as u16,
+                b'V' as u16,
+                b'I' as u16,
+                b'E' as u16,
+                b'W' as u16,
+                0,
+            ];
+            let child = unsafe {
+                FindWindowExW(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    WRY_WEBVIEW_CLASS.as_ptr(),
+                    std::ptr::null(),
+                )
+            };
+            if !child.is_null() {
+                unsafe {
+                    SetWindowPos(
+                        child,
+                        std::ptr::null_mut(),
+                        0,
+                        0,
+                        client.right - client.left,
+                        client.bottom - client.top,
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    );
+                }
+            }
+        }
+    }
+
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn install_main_webview_resize_sync(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?.0;
+    let installed = unsafe {
+        SetWindowSubclass(
+            hwnd,
+            Some(sync_main_webview_resize),
+            MAIN_WINDOW_RESIZE_SUBCLASS_ID,
+            0,
+        )
+    };
+    if installed == 0 {
+        Err(format!(
+            "failed to install main-window resize synchronization: {}",
+            unsafe { GetLastError() }
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 #[cfg(all(not(debug_assertions), target_os = "windows"))]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -1430,6 +1532,8 @@ pub fn run() {
             let builder = builder.decorations(false);
 
             let window = builder.build()?;
+            #[cfg(target_os = "windows")]
+            install_main_webview_resize_sync(&window)?;
             #[cfg(target_os = "macos")]
             if let Ok(pointer) = window.ns_window() {
                 // setup runs on the main thread. Position before the first UI sync.

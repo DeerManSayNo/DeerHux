@@ -46,11 +46,10 @@ export class ShareGateway {
   private starting?: Promise<void>;
   private port = 0;
   private ownerOrigin = "";
-  private publicOrigin = "";
   private expiry?: ReturnType<typeof setInterval>;
 
   urls(id: string) {
-    return this.publicOrigin ? [`${this.publicOrigin}/share/${id}`] : addresses().map(ip => `http://${ip}:${this.port}/share/${id}`);
+    return addresses().map(ip => `http://${ip}:${this.port}/share/${id}`);
   }
 
   async start(origin: string) {
@@ -61,17 +60,12 @@ export class ShareGateway {
   }
 
   private async open(origin: string) {
-    const publicOrigin = process.env.DEERHUX_SHARE_PUBLIC_ORIGIN ?? "";
     const listenPort = Number(process.env.DEERHUX_SHARE_PORT ?? 0);
     if (!Number.isInteger(listenPort) || listenPort < 0 || listenPort > 65535) throw new ShareError("分享端口配置无效");
-    if (publicOrigin) {
-      const external = new URL(publicOrigin);
-      if (external.protocol !== "https:" || external.origin !== publicOrigin || !listenPort) throw new ShareError("公网分享需要 HTTPS 来源和固定分享端口");
-    }
     const url = new URL(origin);
     if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) throw new ShareError("请从主人设备的本机地址打开 DeerHux");
     const ips = addresses();
-    if (!ips.length && !publicOrigin) throw new ShareError("未找到局域网地址，请先连接网络");
+    if (!ips.length) throw new ShareError("未找到局域网地址，请先连接网络");
     const port = Number(url.port || 80);
     // A public original API would bypass every gateway permission. Fail closed on
     // existing dev servers started before the loopback-only startup change.
@@ -83,10 +77,9 @@ export class ShareGateway {
     server.maxConnections = 80;
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(listenPort, publicOrigin ? "127.0.0.1" : "0.0.0.0", () => { server.removeListener("error", reject); resolve(); });
+      server.listen(listenPort, "0.0.0.0", () => { server.removeListener("error", reject); resolve(); });
     });
     this.server = server;
-    this.publicOrigin = publicOrigin;
     this.port = (server.address() as { port: number }).port;
     server.unref();
     this.expiry = setInterval(() => { void this.service.expire().catch(() => {}); }, 1000);
@@ -104,15 +97,16 @@ export class ShareGateway {
   private async handle(req: IncomingMessage, res: ServerResponse) {
     try {
       if (!isLocalNetwork(req.socket.remoteAddress ?? "")) throw new ShareError("仅允许局域网访问", 403);
-      if (this.publicOrigin && (req.headers.host !== new URL(this.publicOrigin).host || req.headers["x-forwarded-proto"] !== "https")) throw new ShareError("请通过 HTTPS 分享入口访问", 403);
+      if (req.headers.forwarded || req.headers["x-forwarded-for"] || req.headers["x-forwarded-proto"]) throw new ShareError("请直接通过局域网分享链接访问", 403);
       const raw = req.url ?? "";
       const url = new URL(raw, "http://share.invalid");
       const decodedPath = decodeURIComponent(url.pathname);
       if (/[\\%]/.test(decodedPath) || raw.startsWith("http") || raw.startsWith("//")) throw new ShareError("无效路径", 404);
-      const match = /^\/api\/share\/([a-f0-9-]{36})\/(auth|catalog|sessions)(?:\/([a-f0-9-]{36}))?$/.exec(url.pathname);
+      const match = /^\/api\/share\/([a-f0-9-]{36})\/(auth|catalog|sessions)(?:\/([a-f0-9-]{36}))?(\/events)?$/.exec(url.pathname);
       if (match) {
-        const [, id, action, sessionId] = match;
+        const [, id, action, sessionId, events] = match;
         if (url.search || (sessionId && action !== "sessions")) throw new ShareError("接口不存在", 404);
+        if (events && (!sessionId || action !== "sessions" || req.method !== "GET")) throw new ShareError("接口不存在", 404);
         if (!["GET", "POST"].includes(req.method ?? "")) throw new ShareError("不支持的操作", 405);
         // Require a custom header for mutations: browsers cannot send it cross-origin
         // without preflight, which this gateway never permits. No forwarded trust.
@@ -120,11 +114,58 @@ export class ShareGateway {
         if (action === "auth" && req.method === "POST") {
           const data = exactObject(await body(req), ["code"]);
           const token = this.service.login(id, data.code);
-          res.setHeader("Set-Cookie", `dh_share_${id}=${token}; HttpOnly; SameSite=Strict; Path=/api/share/${id}; Max-Age=604800${this.publicOrigin ? "; Secure" : ""}`);
+          res.setHeader("Set-Cookie", `dh_share_${id}=${token}; HttpOnly; SameSite=Strict; Path=/api/share/${id}; Max-Age=604800`);
           json(res, { success: true }); return;
         }
         const token = req.headers.cookie?.split(";").map(c => c.trim()).find(c => c.startsWith(`dh_share_${id}=`))?.split("=")[1];
         const guest = this.service.guest(id, token);
+        if (events && sessionId) {
+          this.service.snapshot(guest, sessionId);
+          let count = 0;
+          let initialized = false;
+          let dirty = true;
+          let closed = false;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const cleanup = () => {
+            closed = true;
+            clearTimeout(timer); clearInterval(heartbeat); unsubscribe();
+          };
+          const send = () => {
+            clearTimeout(timer);
+            timer = undefined;
+            if (closed) return;
+            try {
+              this.service.guest(id, token);
+              if (res.writableNeedDrain || !dirty) return;
+              const snapshot = this.service.snapshot(guest, sessionId);
+              const frame = { ...snapshot, messages: snapshot.messages.slice(count), reset: !initialized };
+              count = snapshot.messages.length;
+              initialized = true;
+              dirty = false;
+              // Coalesce updates while the socket drains; never queue every model event.
+              res.write(`event: state\ndata: ${JSON.stringify(frame)}\n\n`);
+            } catch {
+              res.write(`event: expired\ndata: {}\n\n`);
+              cleanup(); res.end();
+            }
+          };
+          const unsubscribe = this.service.subscribe(guest, sessionId, () => {
+            dirty = true;
+            if (!closed && !timer) timer = setTimeout(send, 50);
+          });
+          res.on("close", cleanup);
+          res.on("drain", send);
+          res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff" });
+          res.flushHeaders();
+          const heartbeat = setInterval(() => {
+            try {
+              this.service.guest(id, token);
+              if (!res.writableNeedDrain) res.write(": heartbeat\n\n");
+            } catch { send(); }
+          }, 15_000);
+          send();
+          return;
+        }
         if (action === "catalog" && req.method === "GET") { json(res, this.service.catalog(id)); return; }
         if (action === "sessions") {
           if (req.method === "GET") { json(res, sessionId ? this.service.snapshot(guest, sessionId) : this.service.list(guest)); return; }
@@ -142,10 +183,12 @@ export class ShareGateway {
       res.setHeader("Referrer-Policy", "no-referrer");
       res.setHeader("X-Frame-Options", "DENY");
       res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
-      const upstream = httpRequest(`${this.ownerOrigin}${url.pathname}`, { method: "GET", headers: { accept: page ? "text/html" : "*/*" }, timeout: 60_000 }, response => {
+      const upstream = httpRequest(`${this.ownerOrigin}${url.pathname}`, { method: "GET", headers: { accept: page ? "text/html" : "*/*", "accept-encoding": req.headers["accept-encoding"] ?? "identity" }, timeout: 60_000 }, response => {
         res.statusCode = response.statusCode ?? 502;
         res.setHeader("Content-Type", response.headers["content-type"] ?? "application/octet-stream");
-        res.setHeader("Cache-Control", page || process.env.NODE_ENV === "development" ? "no-store" : "public, max-age=3600");
+        res.setHeader("Cache-Control", page || process.env.NODE_ENV === "development" ? "no-store" : response.headers["cache-control"] ?? "public, max-age=3600");
+        res.setHeader("Vary", "Accept-Encoding");
+        if (response.headers["content-encoding"]) res.setHeader("Content-Encoding", response.headers["content-encoding"]);
         response.pipe(res);
       });
       upstream.once("timeout", () => upstream.destroy());

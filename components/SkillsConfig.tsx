@@ -28,6 +28,11 @@ interface ProjectOption {
   displayName: string;
 }
 
+const skillsCache = new Map<string, Skill[]>();
+let systemCliCache: SystemCli[] | null = null;
+let systemCliFetchedAt = 0;
+const SYSTEM_CLI_CACHE_TTL_MS = 30_000;
+
 function shortenPath(p: string): string {
   // Match common home dir patterns: /Users/xxx, /home/xxx
   return p.replace(/^\/(?:Users|home)\/[^/]+/, "~");
@@ -1188,22 +1193,28 @@ export function SkillsConfig({
   projects?: ProjectOption[];
   onClose: () => void;
 }) {
-  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skills, setSkills] = useState<Skill[]>(() => skillsCache.get("") ?? []);
   const [collapsedSkillGroups, setCollapsedSkillGroups] = useState<Set<string>>(() => new Set());
-  const [clis, setClis] = useState<SystemCli[]>([]);
+  const [clis, setClis] = useState<SystemCli[]>(() => systemCliCache ?? []);
   const [cliLoading, setCliLoading] = useState(false);
   const [cliError, setCliError] = useState<string | null>(null);
   const [selectedCli, setSelectedCli] = useState<SystemCli | null>(null);
   const cliRequest = useRef(0);
-  const loadClis = useCallback(async () => {
+  const loadClis = useCallback(async (force = false) => {
+    if (!force && systemCliCache && Date.now() - systemCliFetchedAt < SYSTEM_CLI_CACHE_TTL_MS) {
+      setClis(systemCliCache);
+      return;
+    }
     const request = ++cliRequest.current;
-    setCliLoading(true); setCliError(null);
+    setCliLoading(systemCliCache === null); setCliError(null);
     try {
       const response = await fetch("/api/system-clis", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "扫描失败");
       if (request !== cliRequest.current) return;
       const items: SystemCli[] = data.clis ?? [];
+      systemCliCache = items;
+      systemCliFetchedAt = Date.now();
       setClis(items);
       setSelectedCli((current) => current ? items.find((item) => item.path === current.path) ?? null : null);
     } catch (error) {
@@ -1211,7 +1222,7 @@ export function SkillsConfig({
     } finally { if (request === cliRequest.current) setCliLoading(false); }
   }, []);
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!skillsCache.has(""));
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedProjectCwd, setSelectedProjectCwd] = useState("");
@@ -1226,6 +1237,7 @@ export function SkillsConfig({
     x: number;
     y: number;
   } | null>(null);
+  const skillRequest = useRef(0);
 
   useEscapeClose(() => setAddMode(false), addMode);
   useEscapeClose(onClose, !addMode && !contextMenu);
@@ -1271,16 +1283,26 @@ export function SkillsConfig({
 
   const loadSkills = useCallback((preferredSelected?: string, overrideCwd?: string) => {
     const targetCwd = overrideCwd ?? selectedProjectCwd;
-    setLoading(true);
+    const cacheKey = targetCwd || "";
+    const cached = skillsCache.get(cacheKey);
+    const request = ++skillRequest.current;
+    if (cached) {
+      setSkills(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     fetch(skillsApiUrl(targetCwd || undefined))
       .then((r) => r.json())
       .then((d: { skills?: Skill[]; error?: string }) => {
+        if (request !== skillRequest.current) return;
         if (d.error) {
-          setError(d.error);
+          if (!cached) setError(d.error);
           return;
         }
         const list = d.skills ?? [];
+        skillsCache.set(cacheKey, list);
         setSkills(list);
         setSelected((current) => {
           if (preferredSelected && list.some((s) => s.filePath === preferredSelected)) {
@@ -1290,13 +1312,19 @@ export function SkillsConfig({
           return list[0]?.filePath ?? null;
         });
       })
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (request === skillRequest.current && !cached) setError(String(e));
+      })
+      .finally(() => {
+        if (request === skillRequest.current) setLoading(false);
+      });
   }, [selectedProjectCwd]);
 
   useEffect(() => {
     setSelectedCli(null);
-    if (!selectedProjectCwd) void loadClis();
+    if (selectedProjectCwd) return;
+    const timer = window.setTimeout(() => void loadClis(), 100);
+    return () => window.clearTimeout(timer);
   }, [selectedProjectCwd, loadClis]);
 
   useEffect(() => {
@@ -1439,11 +1467,11 @@ export function SkillsConfig({
     >
       <div
         style={{
-          width: 860,
-          height: "78vh",
+          width: "min(860px, calc(100vw - 32px))",
+          height: "min(720px, calc(100dvh - 32px))",
           background: "var(--bg)",
-          border: "1px solid var(--border)",
-          borderRadius: 10,
+          border: "none",
+          borderRadius: "var(--radius-window)",
           display: "flex",
           flexDirection: "column",
           boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
@@ -1457,7 +1485,7 @@ export function SkillsConfig({
             alignItems: "center",
             justifyContent: "space-between",
             padding: "12px 18px",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "none",
             flexShrink: 0,
           }}
         >
@@ -1549,7 +1577,7 @@ export function SkillsConfig({
           <div
             style={{
               width: 210,
-              borderRight: "1px solid var(--border)",
+              borderRight: "none",
               display: "flex",
               flexDirection: "column",
               flexShrink: 0,
@@ -1772,7 +1800,7 @@ export function SkillsConfig({
                   ));
                 })()
               )}
-              {!selectedProjectCwd && <SystemCliList items={clis} selected={selectedCli?.path ?? null} loading={cliLoading} error={cliError} onRefresh={() => void loadClis()} onSelect={(cli) => { setSelectedCli(cli); setAddMode(false); }} />}
+              {!selectedProjectCwd && <SystemCliList items={clis} selected={selectedCli?.path ?? null} loading={cliLoading} error={cliError} onRefresh={() => void loadClis(true)} onSelect={(cli) => { setSelectedCli(cli); setAddMode(false); }} />}
             </div>
             {/* Add skill button */}
             <div
@@ -1831,7 +1859,7 @@ export function SkillsConfig({
                 }}
               />
             ) : selectedCli ? (
-              <SystemCliDetail key={selectedCli.path} cli={selectedCli} onDeleted={() => { setSelectedCli(null); void loadClis(); loadSkills(); }} />
+              <SystemCliDetail key={selectedCli.path} cli={selectedCli} onDeleted={() => { setSelectedCli(null); void loadClis(true); loadSkills(); }} />
             ) : loading ? null : selectedSkill ? (
               <>
                 <SkillDetail
@@ -1872,32 +1900,6 @@ export function SkillsConfig({
           </div>
         </div>
 
-        {/* Footer */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "flex-end",
-            padding: "10px 18px",
-            borderTop: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
-          <button
-            onClick={onClose}
-            style={{
-              padding: "6px 14px",
-              background: "none",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 13,
-            }}
-          >
-            关闭
-          </button>
-        </div>
       </div>
 
       {contextMenu && (

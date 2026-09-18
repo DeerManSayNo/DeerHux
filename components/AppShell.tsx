@@ -10,7 +10,6 @@ import { AiLinkWorkspace } from "./AiOutputLink";
 
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { PointerEvent as PointerEventType, MouseEvent as MouseEventType, ReactNode } from "react";
-import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { ShareManager } from "./ShareManager";
 import { SessionSidebar } from "./SessionSidebar";
@@ -53,6 +52,7 @@ import { ChatDraftStore, clearCwdScopedDraftResources, promoteNewSessionDraft } 
 import { getChatRenderKey, promoteChatRenderKey } from "@/lib/chat-render-keys";
 import { restoreQuickSessionVisibility } from "@/lib/quick-session-visibility";
 import { subscribeToAppNotification } from "@/lib/app-notifications";
+import { ConfigurationPanelHost, type ConfigurationPanelHostHandle } from "./ConfigurationPanelHost";
 
 type SidebarMode = "open" | "closed";
 
@@ -60,79 +60,6 @@ declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
   }
-}
-
-function ConfigurationPanelLoading() {
-  return (
-    <div
-      aria-label="正在打开配置窗口"
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 999,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "rgba(0,0,0,0.28)",
-      }}
-    >
-      <div
-        style={{
-          padding: "12px 18px",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--radius-panel)",
-          background: "var(--bg-panel)",
-          color: "var(--text-muted)",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
-          fontSize: 13,
-        }}
-      >
-        正在打开…
-      </div>
-    </div>
-  );
-}
-
-// Keep configuration panels split from the initial shell. AppShell preloads these
-// chunks after its first paint, while the themed fallback prevents a white flash if
-// a panel is opened before its chunk has arrived. Next.js requires each dynamic()
-// options argument to be an inline object literal so it can be statically analyzed.
-const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), {
-  loading: ConfigurationPanelLoading,
-});
-const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig), {
-  loading: ConfigurationPanelLoading,
-});
-const SchedulerPanel = dynamic(() => import("./SchedulerPanel").then((module) => module.SchedulerPanel), {
-  loading: ConfigurationPanelLoading,
-});
-const RoleConfig = dynamic(() => import("./RoleConfig").then((module) => module.RoleConfig), {
-  loading: ConfigurationPanelLoading,
-});
-const MemoryConfig = dynamic(() => import("./MemoryConfig").then((module) => module.MemoryConfig), {
-  loading: ConfigurationPanelLoading,
-});
-const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), {
-  loading: ConfigurationPanelLoading,
-});
-const ExtensionsConfig = dynamic(() => import("./ExtensionsConfig").then((module) => module.ExtensionsConfig), {
-  loading: ConfigurationPanelLoading,
-});
-const WeChatConfig = dynamic(() => import("./WeChatConfig").then((module) => module.WeChatConfig), {
-  loading: ConfigurationPanelLoading,
-});
-
-function preloadConfigurationPanels() {
-  void Promise.allSettled([
-    import("./ModelsConfig"),
-    import("./SkillsConfig"),
-    import("./SchedulerPanel"),
-    import("./RoleConfig"),
-    import("./MemoryConfig"),
-    import("./McpConfig"),
-    import("./ExtensionsConfig"),
-    import("./WeChatConfig"),
-  ]);
 }
 
 const WINDOW_DRAG_HEIGHT = 32;
@@ -253,13 +180,8 @@ export function AppShell() {
   useEffect(() => subscribeToAppNotification("deerhux.project-files-updated", () => {
     setExplorerRefreshKey((key) => key + 1);
   }), []);
-  const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
-  const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
-  const [extensionsConfigOpen, setExtensionsConfigOpen] = useState(false);
-  const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "mcp" | "role" | null>(null);
-  const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
-  const [wechatConfigOpen, setWechatConfigOpen] = useState(false);
+  const configurationPanelHostRef = useRef<ConfigurationPanelHostHandle | null>(null);
   const [liveIslandEnabled, setLiveIslandEnabledState] = useState(false);
   const [shareManagerOpen, setShareManagerOpen] = useState(false);
   const [wechatStatus, setWechatStatus] = useState<{ connected: boolean; polling: boolean; accountId?: string; activeUserCount?: number } | null>(null);
@@ -298,11 +220,6 @@ export function AppShell() {
   const wechatAutoStartAttemptedRef = useRef(false);
   const [chatWindowLimitNotice, setChatWindowLimitNotice] = useState<string | null>(null);
   const chatWindowLimitNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    const timer = window.setTimeout(preloadConfigurationPanels, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
 
   const replaceUrl = useCallback((url: string) => {
     window.history.replaceState(null, "", url);
@@ -1650,12 +1567,12 @@ export function AppShell() {
   }, []);
 
   const configurationEntries: { label: string; icon: AppIconName; onClick: () => void }[] = [
-    { label: "模型配置", icon: "model", onClick: () => setModelsConfigOpen(true) },
-    { label: "记忆", icon: "memory", onClick: () => setQuickConfigOpen("memory") },
-    { label: "MCP", icon: "mcp", onClick: () => setQuickConfigOpen("mcp") },
-    { label: "角色", icon: "role", onClick: () => setQuickConfigOpen("role") },
-    { label: "技能配置", icon: "skills", onClick: () => setSkillsConfigOpen(true) },
-    { label: "定时任务", icon: "schedule", onClick: () => setSchedulerPanelOpen(true) },
+    { label: "模型配置", icon: "model", onClick: () => configurationPanelHostRef.current?.open("models") },
+    { label: "记忆", icon: "memory", onClick: () => configurationPanelHostRef.current?.open("memory") },
+    { label: "MCP", icon: "mcp", onClick: () => configurationPanelHostRef.current?.open("mcp") },
+    { label: "角色", icon: "role", onClick: () => configurationPanelHostRef.current?.open("role") },
+    { label: "技能配置", icon: "skills", onClick: () => configurationPanelHostRef.current?.open("skills") },
+    { label: "定时任务", icon: "schedule", onClick: () => configurationPanelHostRef.current?.open("scheduler") },
   ];
 
   const sidebarContent = (
@@ -1913,8 +1830,8 @@ export function AppShell() {
               <div role="separator" style={{ height: 1, margin: "5px 4px", background: "var(--border)" }} />
               {([
                 { label: "分享窗口", disabled: false, onClick: () => { setSettingsMenuOpen(false); setShareManagerOpen(true); } },
-                { label: "扩展总览", disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd, onClick: () => { setSettingsMenuOpen(false); setExtensionsConfigOpen(true); } },
-                { label: "微信 Bot", disabled: false, onClick: () => { setSettingsMenuOpen(false); setWechatConfigOpen(true); } },
+                { label: "扩展总览", disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd, onClick: () => { setSettingsMenuOpen(false); configurationPanelHostRef.current?.open("extensions"); } },
+                { label: "微信 Bot", disabled: false, onClick: () => { setSettingsMenuOpen(false); configurationPanelHostRef.current?.open("wechat"); } },
               ] as { label: string; disabled?: boolean; onClick: () => void }[]).map((item) => (
                 <button
                   key={item.label}
@@ -2134,7 +2051,7 @@ export function AppShell() {
                   setRightPanelView("explorer");
                   setRightPanelOpen(true);
                 }}
-                onOpenRoleConfig={() => setQuickConfigOpen("role")}
+                onOpenRoleConfig={() => configurationPanelHostRef.current?.open("role")}
                 projectOptions={headerProjectOptions}
                 onNewSessionCwdChange={handleNewSessionProjectChange}
                 onOpenSession={handleOpenSessionById}
@@ -2288,21 +2205,14 @@ export function AppShell() {
       </div>
       </div>
     </div>
-    {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} onSaved={() => setModelsRefreshKey((k) => k + 1)} />}
-    {skillsConfigOpen && (
-      <SkillsConfig projects={headerProjectOptions} onClose={() => setSkillsConfigOpen(false)} />
-    )}
-    {extensionsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
-      <ExtensionsConfig cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!} onClose={() => setExtensionsConfigOpen(false)} />
-    )}
-    {schedulerPanelOpen && (
-      <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />
-    )}
-    {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} projects={projectOptions} />}
-    {quickConfigOpen === "memory" && <MemoryConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
-    {quickConfigOpen === "mcp" && <McpConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
+    <ConfigurationPanelHost
+      ref={configurationPanelHostRef}
+      cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined}
+      projects={headerProjectOptions}
+      roleProjects={projectOptions}
+      onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
+    />
     <ShareManager open={shareManagerOpen} onClose={() => setShareManagerOpen(false)} projects={projectOptions} />
-    {wechatConfigOpen && <WeChatConfig onClose={() => setWechatConfigOpen(false)} />}
     </AiLinkWorkspace.Provider>
   );
 }

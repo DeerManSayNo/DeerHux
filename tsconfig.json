@@ -41,6 +41,8 @@
   "exclude": [
     "node_modules",
     ".next",
+    ".next-measure",
+    ".next-build-check",
     "src-tauri/target",
     "codeAgent"
   ]

@@ -4,7 +4,7 @@ import { AppIcon } from "./AppIcon";
 import { SendIconButton } from "./SendIconButton";
 import { MessageImagePreview } from "./MessageImagePreview";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useId, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import type { AutoRecoveryMode, RetryInfo, StallLevel } from "@/hooks/useAgentSession";
@@ -16,6 +16,7 @@ import { useTransientNotice } from "@/hooks/useTransientNotice";
 import { subscribeToAppNotification } from "@/lib/app-notifications";
 import { clipboardFilePaths } from "@/lib/clipboard-file-paths";
 import { fetchJsonWithRetry, readCachedJson, writeCachedJson } from "@/lib/client-resilience";
+import type { ContextCacheMetrics } from "@/lib/context-metrics";
 
 export interface AttachedImage {
   uploadId?: string;
@@ -94,6 +95,7 @@ interface Props {
   onSteer?: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
   onFollowUp?: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
   isStreaming: boolean;
+  contextMetrics?: ContextCacheMetrics | null;
   /** Saved input state to restore when the component mounts */
   initialInputState?: ChatInputState | null;
   /** Ref-based callback to persist input state (avoids parent re-renders on every keystroke) */
@@ -174,7 +176,7 @@ function skillScope(skill: SkillOption): "global" | "project" | "path" {
 
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onBeforeSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, modelCatalogError, onModelChange,
+  onSend, onBeforeSend, onAbort, onSteer, onFollowUp, isStreaming, contextMetrics, model, modelNames, modelList, modelCatalogError, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, lastModelError, onClearModelError,
   terminalNotice, onClearTerminalNotice,
   textOnly = false,
@@ -197,6 +199,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   initialInputState,
   saveInputStateRef,
 }: Props, ref) {
+  const contextUsageDetailsId = useId();
   const [value, setValue] = useState(initialInputState?.value ?? "");
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
@@ -988,6 +991,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const showTerminalNotice = useTransientNotice(terminalNoticeKey);
   const showRecoveryNotice = useTransientNotice(recoveryNoticeKey);
   const showImageUploadError = useTransientNotice(imageUploadError);
+  const contextProgress = contextMetrics
+    ? Math.min(1, contextMetrics.usedTokens / contextMetrics.contextWindow)
+    : 0;
+  const safeContextCapacity = contextMetrics
+    ? contextMetrics.usedTokens + contextMetrics.safeRemainingTokens
+    : 0;
+  const contextPressure = contextMetrics && safeContextCapacity > 0
+    ? contextMetrics.usedTokens / safeContextCapacity
+    : 0;
+  const contextPressureLevel = contextPressure >= 1
+    ? "critical"
+    : contextPressure >= 0.85 ? "warning" : "normal";
 
   useEffect(() => {
     if (previewImageSrc && !attachedImages.some((image) => attachedImagePreviewSource(image) === previewImageSrc)) {
@@ -1508,6 +1523,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         <div
           data-chat-composer
           style={{
+            position: "relative",
             display: "flex",
             flexDirection: "column",
             gap: compact ? 7 : 8,
@@ -1520,6 +1536,36 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             transition: "background 0.15s, box-shadow 0.15s",
           } as React.CSSProperties}
         >
+          {contextMetrics && (
+            <div className="context-usage-summary">
+              <button
+                type="button"
+                className="context-usage-trigger"
+                aria-describedby={contextUsageDetailsId}
+                aria-label={`上下文已使用 ${contextMetrics.usedTokens.toLocaleString()}，窗口 ${contextMetrics.contextWindow.toLocaleString()}`}
+                data-pressure={contextPressureLevel}
+                style={{
+                  "--context-progress": `${contextProgress * 100}%`,
+                } as React.CSSProperties}
+              >
+                <span
+                  className="context-progress-track"
+                  role="progressbar"
+                  aria-label="上下文使用进度"
+                  aria-valuemin={0}
+                  aria-valuemax={contextMetrics.contextWindow}
+                  aria-valuenow={Math.min(contextMetrics.usedTokens, contextMetrics.contextWindow)}
+                >
+                </span>
+              </button>
+              <div id={contextUsageDetailsId} className="context-usage-popover" role="tooltip">
+                <div><span>上下文</span><strong>{contextMetrics.usedTokens.toLocaleString()} / {contextMetrics.contextWindow.toLocaleString()}</strong></div>
+                <div><span>安全可用余额</span><strong>{contextMetrics.safeRemainingTokens.toLocaleString()}</strong></div>
+                <div><span>最近缓存命中</span><strong>{contextMetrics.recentCacheHitRate == null ? "—" : `${Math.round(contextMetrics.recentCacheHitRate * 100)}%`}</strong></div>
+                <div><span>会话缓存命中</span><strong>{contextMetrics.sessionCacheHitRate == null ? "—" : `${Math.round(contextMetrics.sessionCacheHitRate * 100)}%`}</strong></div>
+              </div>
+            </div>
+          )}
           <div
             style={{
               position: "relative",

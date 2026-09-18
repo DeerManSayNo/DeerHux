@@ -176,6 +176,11 @@ export function MemoryConfig({ onClose, cwd }: { onClose: () => void; cwd?: stri
           >
             新增记忆
           </Button>
+        </>
+      }
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button variant="primary" disabled={saving || !canEdit} onClick={save}>
             {saving ? "保存中..." : "保存"}
           </Button>

@@ -285,8 +285,8 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
         style={{
           width: "min(900px, calc(100vw - 40px))",
           height: "min(780px, calc(100vh - 40px))",
-          border: "1px solid var(--border)",
-          borderRadius: 16,
+          border: "none",
+          borderRadius: "var(--radius-window)",
           background: "var(--bg)",
           boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
           overflow: "hidden",
@@ -297,7 +297,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
         <aside
           style={{
             width: 230,
-            borderRight: "1px solid var(--border)",
+            borderRight: "none",
             background: "var(--bg-panel)",
             display: "flex",
             flexDirection: "column",
@@ -308,7 +308,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
           <div
             style={{
               padding: "14px 14px 10px",
-              borderBottom: "1px solid var(--border)",
+              borderBottom: "none",
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
@@ -329,7 +329,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
           <div
             style={{
               padding: "10px 14px",
-              borderBottom: "1px solid var(--border)",
+              borderBottom: "none",
               fontSize: 11,
               color: "var(--text-muted)",
             }}
@@ -429,7 +429,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
           <div
             style={{
               padding: 8,
-              borderTop: "1px solid var(--border)",
+              borderTop: "none",
               display: "flex",
               gap: 6,
             }}
@@ -510,7 +510,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
           <div
             style={{
               padding: "14px 18px",
-              borderBottom: "1px solid var(--border)",
+              borderBottom: "none",
               display: "flex",
               alignItems: "center",
               gap: 10,
@@ -578,10 +578,10 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
                   <div
                     key={section.id}
                     style={{
-                      border: "1px solid var(--border)",
+                      border: "none",
                       borderRadius: 10,
                       marginBottom: 10,
-                      background: section.enabled ? "var(--bg)" : "var(--bg-panel)",
+                      background: "var(--bg-panel)",
                       opacity: section.enabled ? 1 : 0.55,
                       transition: "opacity 0.15s, background 0.15s",
                     }}

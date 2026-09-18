@@ -328,9 +328,9 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
           maxWidth: "calc(100vw - 32px)",
           minHeight: 500,
           maxHeight: "calc(100vh - 64px)",
-          border: "1px solid var(--border)",
-          borderRadius: 14,
-          background: "var(--bg-panel)",
+          border: "none",
+          borderRadius: "var(--radius-window)",
+          background: "var(--bg)",
           boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
           display: "flex",
           flexDirection: "column",
@@ -341,7 +341,7 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
         {/* Header */}
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "16px 20px", borderBottom: "1px solid var(--border)", flexShrink: 0,
+          padding: "16px 20px", borderBottom: "none", flexShrink: 0,
         }}>
           <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>定时任务</div>
           <button
@@ -364,18 +364,18 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
           {/* Task list sidebar */}
           <div style={{
             width: 220, flexShrink: 0,
-            borderRight: "1px solid var(--border)",
+            borderRight: "none", background: "var(--bg-panel)",
             display: "flex", flexDirection: "column",
             overflow: "hidden",
           }}>
             <div style={{
-              padding: "10px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0,
+              padding: "10px 12px 4px", borderBottom: "none", flexShrink: 0,
             }}>
               <button
                 onClick={handleNew}
                 style={{
                   width: "100%", padding: "6px 0", borderRadius: 8,
-                  border: "1px dashed var(--border)", background: "transparent",
+                  border: "none", background: "var(--bg-hover)",
                   color: "var(--text-muted)", cursor: "pointer",
                   fontSize: 13, fontWeight: 600,
                 }}

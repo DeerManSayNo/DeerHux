@@ -192,7 +192,13 @@ export interface AgentStatePayload {
     isCompacting?: boolean;
     isRunning?: boolean;
     stopRequested?: boolean;
-    contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
+    contextUsage?: {
+      percent: number | null;
+      contextWindow: number;
+      tokens: number | null;
+      recentCacheHitRate?: number | null;
+      sessionCacheHitRate?: number | null;
+    } | null;
     systemPrompt?: string;
     thinkingLevel?: string;
     agentMode?: AgentMode;
@@ -686,7 +692,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
   const retryInfoRef = useRef<RetryInfo | null>(null);
-  const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
+  const [contextUsage, setContextUsage] = useState<{
+    percent: number | null;
+    contextWindow: number;
+    tokens: number | null;
+    recentCacheHitRate?: number | null;
+    sessionCacheHitRate?: number | null;
+  } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const lastSystemPromptRef = useRef<string | null>(null);
   // Keep a persistent copy so systemPrompt is still available after the agent dies

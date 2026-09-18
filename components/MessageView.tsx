@@ -12,10 +12,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AiOutputLink, aiOutputUrlTransform } from "./AiOutputLink";
 import { AiOutputImage } from "./AiOutputImage";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { useTheme } from "@/hooks/useTheme";
+import { DeferredCodeBlock } from "./LazyCodeHighlighter";
 import { formatMessageUsage } from "@/lib/message-usage";
 import { normalizeLegacyFileApiReadUrl } from "@/lib/file-paths";
 import type {
@@ -1700,16 +1697,7 @@ function formatCompactDuration(seconds: number): string {
 }
 
 function CodeBlock({ code, lang }: { code: string; lang: string }) {
-  const { isDark } = useTheme();
   const [copied, setCopied] = useState(false);
-  const highlightStyle = useMemo(() => {
-    const theme = isDark ? vscDarkPlus : vs;
-    const preStyle = { ...theme['pre[class*="language-"]'] };
-    // The bundled themes use different background properties. Normalize before
-    // SyntaxHighlighter merges customStyle so theme changes never mix them.
-    delete preStyle.background;
-    return { ...theme, 'pre[class*="language-"]': preStyle };
-  }, [isDark]);
 
   const copy = () => {
     copyText(code).then(() => {
@@ -1757,9 +1745,9 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <SyntaxHighlighter
+      <DeferredCodeBlock
+        code={code}
         language={lang || "text"}
-        style={highlightStyle}
         showLineNumbers
         wrapLines
         lineProps={{ className: "chat-code-line", style: { display: "block", width: "fit-content", minWidth: "1ch" } }}
@@ -1773,9 +1761,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
           backgroundColor: "var(--bg)",
         }}
         codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-      >
-        {code}
-      </SyntaxHighlighter>
+      />
     </div>
   );
 }

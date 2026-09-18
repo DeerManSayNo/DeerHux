@@ -1,7 +1,9 @@
 "use client";
 
+import { QRCodeSVG } from "@rc-component/qrcode";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { Button } from "./ui/Button";
 import styles from "./sharing/sharing.module.css";
 import { CopyField, ShareIcon, ShareNotice, expiryLabel } from "./sharing/ShareUI";
 
@@ -13,6 +15,18 @@ async function api(url: string, init?: RequestInit) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? "请求失败");
   return data;
+}
+
+function ShareLink({ value, label }: { value: string; label: string }) {
+  return <div className={styles.shareLink}>
+    <div className={styles.qrCode}>
+      <QRCodeSVG value={value} size={132} level="M" marginSize={4} title={`${label}二维码`} />
+    </div>
+    <div className={styles.shareLinkDetails}>
+      <CopyField value={value} label={label} />
+      <p className={styles.muted}>扫描二维码打开链接，再输入 6 位匹配码。</p>
+    </div>
+  </div>;
 }
 
 export function ShareManager({ open, onClose, projects }: { open: boolean; onClose: () => void; projects: { cwd: string; displayName: string }[] }) {
@@ -96,12 +110,14 @@ export function ShareManager({ open, onClose, projects }: { open: boolean; onClo
   const query = projectQuery.trim().toLowerCase();
   const filteredProjects = projects.filter(project => [project.displayName, project.cwd].some(value => value.toLowerCase().includes(query)));
   const valid = !!name.trim() && chosenProjects.length > 0 && chosenModels.length > 0 && chosenRoles.length > 0 && (hours === null || (hours >= 1 && hours <= 168));
+  const validityHint = !name.trim() ? "填写分享名称" : chosenProjects.length === 0 ? "至少选择一个项目" : chosenModels.length === 0 ? "至少选择一个模型" : chosenRoles.length === 0 ? "至少选择一个角色" : "有效期需为 1 至 168 小时";
+  const selectionSummary = `${chosenProjects.length} 个项目 · ${chosenModels.length} 个模型 · ${chosenRoles.length} 个角色 · ${hours === null ? "永久有效" : `${hours || "—"} 小时`}`;
   return <>
     <dialog ref={dialog} className={`${styles.scope} ${styles.dialog}`} aria-label="分享窗口" onCancel={() => onClose()} onClose={() => onClose()} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <section className={styles.modalShell}>
         <header className={styles.modalHeader}>
-          <div className={styles.modalHeading}><span className={styles.brandMark}><ShareIcon name="share" /></span><div><h2>分享窗口</h2><p className={styles.muted}>邀请他人，在你设定的范围内协作</p></div></div>
-          <button type="button" className={styles.iconButton} aria-label="关闭分享窗口" onClick={() => onClose()}><ShareIcon name="close" /></button>
+          <div className={styles.modalHeading}><h2>分享窗口</h2></div>
+          <Button variant="iconButton" icon="close" aria-label="关闭分享窗口" onClick={() => onClose()} />
         </header>
         <div className={styles.tabs} role="tablist" aria-label="分享管理" onKeyDown={event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? "create" : event.key === "End" ? "manage" : tab === "create" ? "manage" : "create"; setTab(next); dialog.current?.querySelector<HTMLButtonElement>(`#share-tab-${next}`)?.focus(); } }}>
           <button id="share-tab-create" role="tab" aria-controls="share-panel" tabIndex={tab === "create" ? 0 : -1} aria-selected={tab === "create"} className={styles.tab} onClick={() => setTab("create")}>创建分享</button>
@@ -110,55 +126,68 @@ export function ShareManager({ open, onClose, projects }: { open: boolean; onClo
         <div ref={content} id="share-panel" className={styles.modalScroll} role="tabpanel" aria-labelledby={`share-tab-${tab}`}>
           {error && <div className={styles.workspaceNotice}><ShareNotice>{error}</ShareNotice></div>}
           {tab === "create" && (result ? <div className={styles.success}>
-            <div className={styles.successHeading}><span className={styles.successMark}><ShareIcon name="check" size={26} /></span><h3>分享已准备好</h3><p className={styles.muted}>将链接和匹配码发送给访客，即可开始协作。</p></div>
-            {result.urls.map(url => <CopyField key={url} value={url} label={url.startsWith("https:") ? "公网分享链接" : "局域网分享链接"} />)}
-            <CopyField value={result.code} label="6 位匹配码" code />
-            <p className={styles.muted}>保持主人设备联网、DeerHux 运行。应用重启或分享停止后，此链接将失效。</p>
-            <div className={styles.successActions}><button className={styles.secondary} onClick={() => setResult(null)}>再创建一个</button><button className={styles.primary} onClick={() => setTab("manage")}>管理分享<ShareIcon name="arrow" size={16} /></button></div>
-          </div> : <div className={styles.ownerGrid}>
+            <div className={styles.successHeading}>
+              <div className={styles.successTitle}><span className={styles.successMark}><ShareIcon name="check" size={15} /></span><div><h3>分享已创建</h3><p className={styles.muted}>发送链接和匹配码即可加入</p></div></div>
+              <span className={styles.successStatus}>正在分享</span>
+            </div>
+            <div className={styles.successBody}>
+              {result.urls.map(url => <ShareLink key={url} value={url} label="局域网分享链接" />)}
+              <div className={styles.accessCode}><CopyField value={result.code} label="6 位匹配码" code /></div>
+            </div>
+            <div className={styles.successFooter}>
+              <p className={styles.successNote}><ShareIcon name="clock" size={15} />主人设备需保持联网和运行；应用重启或停止分享后失效。</p>
+              <div className={styles.successActions}><button className={styles.secondary} onClick={() => setResult(null)}>新建分享</button><button className={styles.primary} onClick={() => setTab("manage")}>查看正在分享</button></div>
+            </div>
+          </div> : <div className={styles.ownerCreate}>
             <div className={styles.ownerForm}>
-              <label className={styles.fieldLabel}>分享名称<input className={styles.input} placeholder="例如：产品设计协作" value={name} maxLength={80} onChange={e => setName(e.target.value)} /></label>
-              <section className={styles.section} aria-label="选择项目">
+              <section className={`${styles.section} ${styles.settingRow}`} aria-label="分享名称">
+                <div className={styles.sectionTitle}><h3>分享名称</h3><span>访客进入后可见</span></div>
+                <input aria-label="分享名称" className={styles.input} placeholder="例如：产品设计协作" value={name} maxLength={80} onChange={e => setName(e.target.value)} />
+              </section>
+              <section className={`${styles.section} ${styles.settingRow}`} aria-label="选择项目">
                 <div className={styles.sectionTitle}><h3><ShareIcon name="folder" size={16} />项目</h3><span className={styles.selectionCount}>已选 {chosenProjects.length}</span></div>
-                <input type="search" aria-label="搜索项目" className={styles.input} placeholder="搜索项目名称或路径" value={projectQuery} onChange={event => setProjectQuery(event.target.value)} />
-                <div className={styles.choiceList}>{projects.length === 0 && <p className={styles.emptySmall}>{busy ? "正在加载项目…" : "请先在左侧添加项目"}</p>}
-                  {filteredProjects.map(project => <label key={project.cwd} className={styles.choice}><input type="checkbox" checked={chosenProjects.includes(project.cwd)} onChange={() => setChosenProjects(toggle(chosenProjects, project.cwd))} /><span className={styles.choiceText}><strong>{project.displayName}</strong><small title={project.cwd}>{project.cwd}</small></span></label>)}
-                  {projects.length > 0 && filteredProjects.length === 0 && <p className={styles.emptySmall}>没有匹配的项目，试试其他关键词</p>}
+                <div className={styles.settingControl}>
+                  <input type="search" aria-label="搜索项目" className={styles.input} placeholder="搜索项目名称或路径" value={projectQuery} onChange={event => setProjectQuery(event.target.value)} />
+                  <div className={styles.choiceList}>{projects.length === 0 && <p className={styles.emptySmall}>{busy ? "正在加载项目…" : "请先在左侧添加项目"}</p>}
+                    {filteredProjects.map(project => <label key={project.cwd} className={styles.choice}><input type="checkbox" checked={chosenProjects.includes(project.cwd)} onChange={() => setChosenProjects(toggle(chosenProjects, project.cwd))} /><span className={styles.choiceText}><strong>{project.displayName}</strong><small title={project.cwd}>{project.cwd}</small></span></label>)}
+                    {projects.length > 0 && filteredProjects.length === 0 && <p className={styles.emptySmall}>没有匹配的项目，试试其他关键词</p>}
+                  </div>
                 </div>
               </section>
-              <section className={styles.section} aria-label="选择模型">
+              <section className={`${styles.section} ${styles.settingRow}`} aria-label="选择模型">
                 <div className={styles.sectionTitle}><h3><ShareIcon name="model" size={16} />模型</h3><span className={styles.selectionCount}>已选 {chosenModels.length}</span></div>
                 <div className={`${styles.choiceList} ${styles.modelChoices}`}>{models.map(m => { const key = JSON.stringify([m.provider, m.id]); return <label key={key} className={styles.choice}><input type="checkbox" checked={chosenModels.includes(key)} onChange={() => setChosenModels(toggle(chosenModels, key))} /><span className={styles.choiceText}><strong>{m.name}</strong><small>{m.provider}</small></span></label>; })}</div>
                 {!models.length && <p className={styles.emptySmall}>{busy ? "正在加载模型…" : "暂未配置可用模型"}</p>}
               </section>
-              <section className={styles.section} aria-label="选择角色">
+              <section className={`${styles.section} ${styles.settingRow}`} aria-label="选择角色">
                 <div className={styles.sectionTitle}><h3><ShareIcon name="role" size={16} />角色</h3><span className={styles.selectionCount}>已选 {chosenRoles.length}</span></div>
-                <div className={styles.roleChoices}>{roles.map(r => <label key={r.id} className={styles.choice}><input type="checkbox" checked={chosenRoles.includes(r.id)} onChange={() => setChosenRoles(toggle(chosenRoles, r.id))} />{r.name}</label>)}</div>
-                <p className={styles.muted}>{roles.length ? "仅展示所选项目共有的角色" : "所选项目暂无共同角色，请调整项目选择"}</p>
-              </section>
-              <section className={styles.section} aria-label="文件权限"><div className={styles.sectionTitle}><h3><ShareIcon name="lock" size={16} />文件权限</h3></div>
-                <div className={styles.permissions}>
-                  <button className={styles.permission} aria-pressed={!writable} onClick={() => setWritable(false)}><ShareIcon name="lock" /><strong>只读访问</strong><small>查看与分析，不修改项目文件</small></button>
-                  <button className={styles.permission} aria-pressed={writable} onClick={() => setWritable(true)}><ShareIcon name="edit" /><strong>允许读写</strong><small>可新增和修改项目文本文件</small></button>
+                <div className={styles.settingControl}>
+                  <div className={styles.roleChoices}>{roles.map(r => <label key={r.id} className={styles.choice}><input type="checkbox" checked={chosenRoles.includes(r.id)} onChange={() => setChosenRoles(toggle(chosenRoles, r.id))} />{r.name}</label>)}</div>
+                  <p className={styles.muted}>{roles.length ? "仅展示所选项目共有的角色" : "所选项目暂无共同角色，请调整项目选择"}</p>
                 </div>
               </section>
-              <section className={styles.section}><div className={styles.sectionTitle}><h3><ShareIcon name="clock" size={16} />有效期</h3></div><div className={styles.durationRow}>
-                {[1, 8, 24, null].map(n => <button key={n ?? "permanent"} className={styles.durationChip} aria-pressed={hours === n} onClick={() => setHours(n)}>{n === null ? "永久" : `${n} 小时`}</button>)}
-                <input aria-label="自定义有效期（小时）" className={styles.input} type="number" min={1} max={168} placeholder="自定义" value={hours ?? ""} onChange={e => setHours(Number(e.target.value))} /><span className={styles.muted}>小时</span>
-              </div>{hours === null && <p className={styles.muted}>不按时间过期；应用重启或手动停止分享后失效。</p>}</section>
+              <section className={`${styles.section} ${styles.settingRow}`} aria-label="文件权限"><div className={styles.sectionTitle}><h3><ShareIcon name="lock" size={16} />文件权限</h3><span>默认只读</span></div>
+                <div className={styles.permissions} role="group" aria-label="文件权限">
+                  <button type="button" className={styles.permission} aria-pressed={!writable} onClick={() => setWritable(false)}><ShareIcon name="lock" /><span><strong>只读访问</strong><small>可查看和分析文件</small></span></button>
+                  <button type="button" className={styles.permission} aria-pressed={writable} onClick={() => setWritable(true)}><ShareIcon name="edit" /><span><strong>允许读写</strong><small>可新增和修改文本文件</small></span></button>
+                </div>
+              </section>
+              <section className={`${styles.section} ${styles.settingRow}`}><div className={styles.sectionTitle}><h3><ShareIcon name="clock" size={16} />有效期</h3><span>最长 168 小时</span></div><div className={styles.settingControl}>
+                <div className={styles.durationRow}>
+                  <div className={styles.durationOptions}>{[1, 8, 24, null].map(n => <button type="button" key={n ?? "permanent"} className={styles.durationChip} aria-pressed={hours === n} onClick={() => setHours(n)}>{n === null ? "永久" : `${n} 小时`}</button>)}</div>
+                  <label className={styles.customDuration}><input aria-label="自定义有效期（小时）" className={styles.input} type="number" min={1} max={168} placeholder="自定义" value={hours !== null && ![1, 8, 24].includes(hours) ? hours : ""} onChange={e => setHours(e.target.value === "" ? 8 : Number(e.target.value))} /><span>小时</span></label>
+                </div>
+                {hours === null && <p className={styles.muted}>应用重启或手动停止后仍会失效。</p>}
+              </div></section>
             </div>
-            <aside className={styles.ownerSummary}><div className={styles.summarySticky}>
-              <span className={styles.summaryEyebrow}>分享预览</span><h3 className={styles.summaryTitle}>{name.trim() || "未命名分享"}</h3>
-              <span className={`${styles.badge} ${styles.accentBadge}`}><ShareIcon name={writable ? "edit" : "lock"} size={13} />{writable ? "允许读写" : "只读访问"}</span>
-              <div className={styles.summaryRows}>{[["项目", `${chosenProjects.length} 个`], ["模型", `${chosenModels.length} 个`], ["角色", `${chosenRoles.length} 个`], ["有效期", hours === null ? "永久" : `${hours || "—"} 小时`]].map(([label, value]) => <div key={label} className={styles.summaryRow}><span>{label}</span><strong>{value}</strong></div>)}</div>
-              <button disabled={busy || !valid} className={`${styles.primary} ${styles.full}`} onClick={() => void create()}>{busy ? "处理中…" : "创建分享链接"}<ShareIcon name="arrow" size={16} /></button>
-              {!valid && <p className={styles.muted}>填写名称，并至少选择一个项目、模型和角色。</p>}
-              <p className={styles.summaryNote}>访客通过链接和 6 位匹配码进入。<br />HTTPS 链接支持公网访问，HTTP 链接仅限可信局域网。<br /><br />使用期间保持主人设备在线。文件权限由服务端校验，终端、MCP 与子 Agent 不开放。</p>
-            </div></aside>
+            <footer className={styles.ownerFooter}>
+              <div className={styles.ownerFooterInfo}><strong>{selectionSummary} · {writable ? "允许读写" : "只读访问"}</strong><span>{valid ? "仅限可信局域网；访客还需输入 6 位匹配码。" : validityHint}</span></div>
+              <Button variant="primary" disabled={busy || !valid} onClick={() => void create()}>{busy ? "正在创建…" : "创建分享链接"}</Button>
+            </footer>
           </div>)}
           {tab === "manage" && <div className={styles.manageList}>{shares.length === 0 ? <div className={styles.emptyWorkspace}><span className={styles.emptyIcon}><ShareIcon name="share" size={28} /></span><h2>还没有正在进行的分享</h2><p>创建一个分享，邀请他人进入你的工作空间。</p><button className={styles.primary} onClick={() => { setResult(null); setTab("create"); }}>创建分享<ShareIcon name="plus" size={16} /></button></div> : shares.map(s => <article key={s.id} className={styles.manageCard}>
             <div className={styles.manageHead}><div><div className={styles.manageTitle}><ShareIcon name="window" /><h3>{s.name}</h3></div><div className={styles.manageMeta}><span className={`${styles.badge} ${styles.accentBadge}`}>{s.writable ? "允许读写" : "只读访问"}</span><span className={styles.muted}>{expiryLabel(s.expiresAt)}</span></div></div><button disabled={busy} className={styles.danger} onClick={() => void revoke(s.id)}>停止分享</button></div>
-            {s.urls.map(url => <CopyField key={url} value={url} label="分享链接" />)}
+            {s.urls.map(url => <ShareLink key={url} value={url} label="分享链接" />)}
             {s.code ? <CopyField value={s.code} label="6 位匹配码" code /> : <div className={styles.section}><p className={styles.muted}>此分享创建于旧版本，原匹配码未保留。生成新码后旧码失效，已登录访客不受影响。</p><button disabled={busy} className={styles.secondary} onClick={() => void generateCode(s.id)}>生成新匹配码</button></div>}
           </article>)}</div>}
         </div>

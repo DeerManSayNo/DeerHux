@@ -32,22 +32,30 @@ function SharedChat({ base, session, catalog, onHide }: { base: string; session:
   const [follow, setFollow] = useState(true);
   const scroll = useRef<HTMLDivElement>(null);
   const reading = useRef<HTMLDivElement>(null);
-  const load = useCallback(async () => {
-    const data = await request<Snapshot>(`${base}/sessions/${session.id}`);
-    setSnapshot(data); setError("");
-  }, [base, session.id]);
   useEffect(() => {
-    let alive = true; let timer: ReturnType<typeof setTimeout>;
-    const tick = async () => {
-      try { await load(); } catch (err) {
-        if (alive) setError(err instanceof Error ? err.message : "连接中断");
-        if (err instanceof ShareHttpError && [401, 404, 410].includes(err.status)) { if (alive) setBlocked(true); return; }
-      }
-      if (alive) timer = setTimeout(() => void tick(), 700);
+    let alive = true;
+    const source = new EventSource(`${base}/sessions/${session.id}/events`);
+    const expire = () => {
+      source.close();
+      if (alive) { setBlocked(true); setError("分享已失效，请重新进入分享窗口"); }
     };
-    void tick();
-    return () => { alive = false; clearTimeout(timer); };
-  }, [load]);
+    source.addEventListener("state", event => {
+      if (!alive) return;
+      const data = JSON.parse((event as MessageEvent).data) as Snapshot & { reset: boolean };
+      setSnapshot(previous => ({ ...data, messages: data.reset ? data.messages : [...previous.messages, ...data.messages] }));
+      setBlocked(false); setError("");
+    });
+    source.addEventListener("expired", expire);
+    source.onerror = () => {
+      if (!alive) return;
+      setError("连接中断，正在重连…");
+      // EventSource hides HTTP status. Check authorization only after failure.
+      void request<Snapshot>(`${base}/sessions/${session.id}`).catch(err => {
+        if (alive && err instanceof ShareHttpError && [401, 404, 410].includes(err.status)) expire();
+      });
+    };
+    return () => { alive = false; source.close(); };
+  }, [base, session.id]);
   useEffect(() => { if (follow && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [snapshot, follow]);
   useEffect(() => {
     if (!reading.current) return;
@@ -60,7 +68,7 @@ function SharedChat({ base, session, catalog, onHide }: { base: string; session:
   async function send(text: string) {
     if (!text.trim() || pending || snapshot.running || blocked) return;
     setPending(true); setError("");
-    try { await request(`${base}/sessions/${session.id}`, { type: "prompt", message: text }); setFollow(true); await load(); }
+    try { await request(`${base}/sessions/${session.id}`, { type: "prompt", message: text }); setFollow(true); }
     catch (err) { setError(err instanceof Error ? err.message : "发送失败，请检查会话后重试"); input.current?.insertText(text); }
     finally { setPending(false); }
   }

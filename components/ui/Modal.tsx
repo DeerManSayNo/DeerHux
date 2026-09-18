@@ -14,6 +14,7 @@ import styles from "./Modal.module.css";
  *
  * 两种布局：
  * - split：左列表栏（sidebar）+ 右主区（children），用于设置类面板。
+ * - content：单一内容区窗口，适合总览与单对象配置。
  * - confirm：居中窄弹窗（children），标题与操作同栏。
  */
 
@@ -28,10 +29,10 @@ type ModalShellProps = {
   sidebarFooter?: ReactNode;
   /** 主区标题行右侧操作。 */
   actions?: ReactNode;
-  /** confirm 布局的操作行；split 布局请用 actions。 */
+  /** 底部操作行；split 布局中位于右侧主区底部。 */
   footer?: ReactNode;
   children: ReactNode;
-  layout?: "split" | "confirm";
+  layout?: "split" | "content" | "confirm";
   /** 用于已打开窗口之上的嵌套弹窗。 */
   raised?: boolean;
   ariaLabel?: string;
@@ -148,6 +149,7 @@ export function ModalShell({
               <div className={[styles.body, "app-scrollbar", bodyClassName ?? ""].filter(Boolean).join(" ")}>
                 {children}
               </div>
+              {footer ? <div className={styles.footer}>{footer}</div> : null}
             </main>
           </>
         ) : (
@@ -159,6 +161,7 @@ export function ModalShell({
                 </div>
                 {subtitle ? <div className={styles.subtitle}>{subtitle}</div> : null}
               </div>
+              {actions}
               <Button variant="iconButton" size="sm" icon="close" aria-label="关闭" onClick={onClose} />
             </div>
             <div className={[styles.body, "app-scrollbar", bodyClassName ?? ""].filter(Boolean).join(" ")}>

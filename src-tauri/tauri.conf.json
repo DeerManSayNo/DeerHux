@@ -4,7 +4,7 @@
   "version": "0.6.12",
   "identifier": "com.deermansayno.deerhux",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "node scripts/prepare-tauri-dev.mjs && npm run dev",
     "devUrl": "http://localhost:30141",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "placeholder-dist"

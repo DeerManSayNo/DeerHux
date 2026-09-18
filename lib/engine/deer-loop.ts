@@ -2741,15 +2741,46 @@ export class DeerLoopEngine implements AgentEnginePort {
         percent: number | null;
         contextWindow: number;
         tokens: number | null;
+        recentCacheHitRate: number | null;
+        sessionCacheHitRate: number | null;
       }
     | undefined {
     const contextWindow = this._model.contextWindow ?? 8192;
-    const tokens = estimateTokens([
-      ...this._messages,
-      { role: "system", content: this._baseSystemPrompt } as unknown as AgentMessage,
-    ]);
+    let lastReportedUsageIndex = -1;
+    let reportedTokens = 0;
+    let recentCacheHitRate: number | null = null;
+    let sessionPromptTokens = 0;
+    let sessionCacheReadTokens = 0;
+    for (let index = 0; index < this._messages.length; index++) {
+      const message = this._messages[index];
+      if (message.role !== "assistant" || message.stopReason === "aborted" || message.stopReason === "error") continue;
+      const usage = message.usage;
+      if (!usage) continue;
+      const total = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+      if (total > 0) {
+        lastReportedUsageIndex = index;
+        reportedTokens = total;
+      }
+      const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+      if (promptTokens <= 0) continue;
+      sessionPromptTokens += promptTokens;
+      sessionCacheReadTokens += usage.cacheRead;
+      recentCacheHitRate = usage.cacheRead / promptTokens;
+    }
+    const tokens = lastReportedUsageIndex >= 0
+      ? reportedTokens + estimateTokens(this._messages.slice(lastReportedUsageIndex + 1))
+      : estimateTokens([
+          ...this._messages,
+          { role: "system", content: this._baseSystemPrompt } as unknown as AgentMessage,
+        ]);
     const percent = tokens > 0 ? tokens / contextWindow : null;
-    return { percent, contextWindow, tokens };
+    return {
+      percent,
+      contextWindow,
+      tokens,
+      recentCacheHitRate,
+      sessionCacheHitRate: sessionPromptTokens > 0 ? sessionCacheReadTokens / sessionPromptTokens : null,
+    };
   }
 
   // -------------------------------------------------------------------------

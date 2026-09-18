@@ -1,0 +1,4 @@
+# Keep desktop release compilation from occupying every CPU core.
+# Override with CARGO_BUILD_JOBS when building on a dedicated machine.
+[build]
+jobs = 2

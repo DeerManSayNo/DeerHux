@@ -3,7 +3,7 @@ const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "..");
 // An explicit directory allows measuring/validating a copy without touching dev output.
-const standaloneDir = process.argv[2] ? path.resolve(process.argv[2]) : path.join(repoRoot, ".next", "standalone");
+const standaloneDir = process.argv[2] ? path.resolve(process.argv[2]) : path.join(repoRoot, process.env.DEERHUX_BUILD_DIR || ".next", "standalone");
 
 let removedBytes = 0;
 let removedCount = 0;
@@ -110,7 +110,7 @@ console.log(
 );
 
 // Built-in skills are read on demand; import tracing does not include Markdown.
-for (const name of ["create-role", "create-skill", "webcmd-browser"]) {
+for (const name of ["create-role", "create-skill", "webcmd-browser", "tavily-search", "create-scheduler"]) {
   const skillDir = path.join("lib", "builtin-skills", name);
   fs.cpSync(path.join(repoRoot, skillDir), path.join(standaloneDir, skillDir), { recursive: true });
 }

@@ -12,6 +12,7 @@ const selectors = [
 function verify(theme) {
   vm.runInNewContext(script, {
     __dirname,
+    process: { env: {} },
     console: { log() {} },
     require(name) {
       if (name === 'node:fs') return {

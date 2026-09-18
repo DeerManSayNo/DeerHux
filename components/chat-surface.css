@@ -30,6 +30,117 @@ html.dark :is(.chat-window-surface, .chat-session-frame) {
 
 .chat-window-surface [data-composer-toolbar] button { border-radius: var(--radius-control); }
 
+.chat-window-surface .context-usage-summary {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 100%;
+  margin-left: 2px;
+  z-index: 5;
+  display: flex;
+  width: 10px;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 140ms ease, visibility 140ms ease;
+}
+
+/* 仅在输入框（光标）获得焦点时显示，失焦后隐藏。 */
+.chat-window-surface [data-chat-composer]:focus-within .context-usage-summary {
+  opacity: 1;
+  visibility: visible;
+}
+
+.chat-window-surface .context-usage-trigger {
+  --context-progress-color: var(--accent);
+  display: grid;
+  place-items: center;
+  width: 10px;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: default;
+}
+
+.chat-window-surface .context-usage-trigger:focus-visible {
+  outline: none;
+}
+
+.chat-window-surface .context-usage-trigger:focus-visible .context-progress-track {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.chat-window-surface .context-progress-track {
+  /* 胶囊端头半径取自身宽度一半；用 --radius-circle（50%）会因窄高比被压成椭圆。 */
+  --context-track-width: 7px;
+  display: block;
+  width: var(--context-track-width);
+  height: 26px;
+  border-radius: calc(var(--context-track-width) / 2);
+  background: linear-gradient(
+    to top,
+    var(--context-progress-color) 0 max(2px, var(--context-progress)),
+    color-mix(in srgb, var(--text-dim) 20%, var(--composer-bg, var(--bg))) max(2px, var(--context-progress)) 100%
+  );
+  transition: background 180ms ease;
+}
+
+.chat-window-surface .context-usage-trigger[data-pressure="warning"] {
+  --context-progress-color: var(--warning);
+}
+
+.chat-window-surface .context-usage-trigger[data-pressure="critical"] {
+  --context-progress-color: var(--danger);
+}
+
+.chat-window-surface .context-usage-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 9px);
+  display: grid;
+  gap: 7px;
+  width: max-content;
+  min-width: 224px;
+  max-width: min(280px, calc(100cqw - 24px));
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  box-shadow: var(--shadow-popover, 0 8px 24px rgba(0, 0, 0, 0.16));
+  font-size: 12px;
+  line-height: 1.35;
+  letter-spacing: 0;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(3px);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+}
+
+.chat-window-surface .context-usage-popover > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: baseline;
+}
+
+.chat-window-surface .context-usage-popover strong {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chat-window-surface .context-usage-summary:hover .context-usage-popover,
+.chat-window-surface .context-usage-summary:focus-within .context-usage-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
 .chat-window-surface [data-chat-context-reveal] {
   display: grid;
   overflow: hidden;
@@ -93,7 +204,10 @@ html.dark :is(.chat-window-surface, .chat-session-frame) {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .chat-window-surface .context-usage-summary,
+  .chat-window-surface .context-usage-popover,
   .chat-window-surface [data-chat-context-reveal] {
     animation: none;
+    transition: none;
   }
 }

@@ -7,6 +7,8 @@ export interface ContextUsage {
   percent: number | null;
   contextWindow: number;
   tokens: number | null;
+  recentCacheHitRate?: number | null;
+  sessionCacheHitRate?: number | null;
 }
 
 export interface ToolInfo {
