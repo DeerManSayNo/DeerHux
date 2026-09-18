@@ -13,6 +13,10 @@
   padding: 20px;
 }
 
+.raised {
+  z-index: var(--z-window-raised);
+}
+
 .panel {
   display: flex;
   min-width: 0;

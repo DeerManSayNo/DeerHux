@@ -6,7 +6,7 @@ import {
   Pin, Plus, RotateCcw, Search, Settings2, ShieldCheck, Square, Sun,
   Terminal, UserRound, X, CircleAlert, CircleX, File, Lightbulb, Wrench,
   Volume2, VolumeX, ArrowUpFromLine, FolderPlus, Trash2, Pencil, MessageSquare, MessageCircle, Eye, Image as ImageIcon,
-  Download, Minus,
+  Copy, Download, Minus, Upload,
 } from "lucide-react";
 
 const icons = {
@@ -24,7 +24,7 @@ const icons = {
   tools: Wrench, "sound-on": Volume2, "sound-off": VolumeX,
   steer: ArrowUpFromLine, "add-folder": FolderPlus, delete: Trash2, edit: Pencil,
   prompt: MessageSquare, wechat: MessageCircle, preview: Eye, image: ImageIcon,
-  download: Download, minus: Minus,
+  copy: Copy, download: Download, import: Upload, minus: Minus,
 } as const;
 
 export type AppIconName = keyof typeof icons;

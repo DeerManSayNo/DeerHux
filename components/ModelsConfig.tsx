@@ -4,6 +4,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { notifyApp } from "@/lib/app-notifications";
 import { findEmptyModelId } from "@/lib/models-config-validation";
+import { parseProviderConfigJson, serializeProviderConfig } from "@/lib/models-config-transfer";
+import { Button } from "@/components/ui/Button";
+import { ModalShell } from "@/components/ui/Modal";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -40,6 +43,33 @@ type AutoRecoveryModel = RecoveryFallbackModel | null;
 interface ModelsJson {
   providers?: Record<string, ProviderEntry>;
   autoRecoveryModels?: AutoRecoveryModel[];
+}
+
+async function copyText(text: string): Promise<void> {
+  if (window.__TAURI_INTERNALS__) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("plugin:clipboard-manager|write_text", { text });
+      return;
+    } catch { /* use the browser fallback */ }
+  }
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch { /* use the selection fallback */ }
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  try {
+    textarea.select();
+    if (!document.execCommand("copy")) throw new Error("浏览器拒绝了剪贴板写入");
+  } finally {
+    textarea.remove();
+  }
 }
 
 type ModelTestState =
@@ -783,9 +813,13 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
   const [savedOk, setSavedOk] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [newProviderName, setNewProviderName] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [transferNotice, setTransferNotice] = useState<string | null>(null);
   const providerRowRefs = useRef(new Map<string, HTMLDivElement>());
 
-  useEscapeClose(onClose);
+  useEscapeClose(onClose, !importOpen);
 
   useEffect(() => {
     fetch("/api/models-config")
@@ -887,6 +921,52 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
     setConfig((prev) => ({ ...prev, autoRecoveryModels: models }));
   }, []);
 
+  const selectedProviderName = selection?.type === "provider"
+    ? selection.name
+    : selection?.type === "model"
+      ? selection.providerName
+      : null;
+
+  const handleCopyProvider = useCallback(async () => {
+    if (!selectedProviderName) return;
+    const provider = config.providers?.[selectedProviderName];
+    if (!provider) return;
+    setTransferNotice(null);
+    try {
+      await copyText(serializeProviderConfig(
+        selectedProviderName,
+        provider as unknown as Record<string, unknown>,
+      ));
+      setTransferNotice(`已复制 ${selectedProviderName} 的完整配置（包含 API Key）`);
+    } catch (error) {
+      setTransferNotice(error instanceof Error ? error.message : "复制失败");
+    }
+  }, [config.providers, selectedProviderName]);
+
+  const handleImport = useCallback(() => {
+    try {
+      const imported = parseProviderConfigJson(importText);
+      const names = Object.keys(imported);
+      setConfig((prev) => ({
+        ...prev,
+        providers: {
+          ...(prev.providers ?? {}),
+          ...(imported as unknown as Record<string, ProviderEntry>),
+        },
+      }));
+      setSelection({ type: "provider", name: names[0] });
+      setNewProviderName(null);
+      setSaveError(null);
+      setSavedOk(false);
+      setTransferNotice(`已导入 ${names.length} 个服务商，请保存配置`);
+      setImportOpen(false);
+      setImportText("");
+      setImportError(null);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "导入失败");
+    }
+  }, [importText]);
+
   const handleSave = useCallback(async () => {
     const invalidModel = findEmptyModelId(config);
     if (invalidModel) {
@@ -984,7 +1064,30 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
             <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>模型配置</span>
             <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>~/.deerhux/agent/models.json</code>
           </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "2px 6px" }}>×</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Button
+              variant="secondary"
+              size="sm"
+              leadingIcon="copy"
+              disabled={!selectedProviderName || loading}
+              onClick={() => void handleCopyProvider()}
+            >
+              复制供应商 JSON
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              leadingIcon="import"
+              disabled={loading}
+              onClick={() => {
+                setImportError(null);
+                setImportOpen(true);
+              }}
+            >
+              导入 JSON
+            </Button>
+            <Button variant="iconButton" size="sm" icon="close" aria-label="关闭" onClick={onClose} />
+          </div>
         </div>
 
         {/* Body */}
@@ -1109,6 +1212,7 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
         {/* Footer */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
           {saveError && <span style={{ fontSize: 12, color: "#f87171", flex: 1 }}>{saveError}</span>}
+          {!saveError && transferNotice && <span role="status" style={{ fontSize: 12, color: "var(--text-muted)", flex: 1 }}>{transferNotice}</span>}
           <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
             取消
           </button>
@@ -1135,6 +1239,47 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
         </div>
       </div>
     </div>
+    <ModalShell
+      open={importOpen}
+      onClose={() => {
+        setImportOpen(false);
+        setImportError(null);
+      }}
+      title="导入模型供应商 JSON"
+      subtitle="同名服务商会被导入内容替换"
+      layout="confirm"
+      raised
+      footer={(
+        <>
+          <Button variant="ghost" onClick={() => setImportOpen(false)}>取消</Button>
+          <Button variant="primary" disabled={!importText.trim()} onClick={handleImport}>导入到编辑器</Button>
+        </>
+      )}
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <textarea
+          value={importText}
+          onChange={(event) => {
+            setImportText(event.target.value);
+            setImportError(null);
+          }}
+          placeholder={'{\n  "providers": {\n    "provider-name": { ... }\n  }\n}'}
+          aria-label="供应商配置 JSON"
+          spellCheck={false}
+          style={{
+            ...inputStyle,
+            minHeight: 220,
+            resize: "vertical",
+            fontFamily: "var(--font-mono)",
+            lineHeight: 1.5,
+          }}
+        />
+        <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
+          导入内容可包含 API Key。Key 将以明文进入当前配置，并在保存后写入本机 models.json。
+        </div>
+        {importError && <div role="alert" style={{ fontSize: 12, color: "var(--danger)" }}>{importError}</div>}
+      </div>
+    </ModalShell>
     </>
   );
 }

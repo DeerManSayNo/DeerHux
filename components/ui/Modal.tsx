@@ -32,6 +32,8 @@ type ModalShellProps = {
   footer?: ReactNode;
   children: ReactNode;
   layout?: "split" | "confirm";
+  /** 用于已打开窗口之上的嵌套弹窗。 */
+  raised?: boolean;
   ariaLabel?: string;
   className?: string;
   bodyClassName?: string;
@@ -48,6 +50,7 @@ export function ModalShell({
   footer,
   children,
   layout = "split",
+  raised = false,
   ariaLabel,
   className,
   bodyClassName,
@@ -103,7 +106,7 @@ export function ModalShell({
 
   return (
     <div
-      className={styles.overlay}
+      className={[styles.overlay, raised ? styles.raised : ""].filter(Boolean).join(" ")}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
