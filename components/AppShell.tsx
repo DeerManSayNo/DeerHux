@@ -54,6 +54,7 @@ import { getChatRenderKey, promoteChatRenderKey } from "@/lib/chat-render-keys";
 import { restoreQuickSessionVisibility } from "@/lib/quick-session-visibility";
 import { subscribeToAppNotification } from "@/lib/app-notifications";
 import { ConfigurationPanelHost, type ConfigurationPanelHostHandle } from "./ConfigurationPanelHost";
+import { TerminalPanel } from "./TerminalPanel";
 
 type SidebarMode = "open" | "closed";
 
@@ -186,6 +187,7 @@ export function AppShell() {
   const [liveIslandEnabled, setLiveIslandEnabledState] = useState(false);
   const [toolTerminalEnabled, setToolTerminalEnabled] = useToolTerminalPreference();
   const [shareManagerOpen, setShareManagerOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [wechatStatus, setWechatStatus] = useState<{ connected: boolean; polling: boolean; accountId?: string; activeUserCount?: number } | null>(null);
   const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
   const runningSessionIdsRef = useRef<Set<string>>(new Set());
@@ -1742,6 +1744,15 @@ export function AppShell() {
                 ),
               },
               {
+                label: terminalOpen ? "隐藏终端" : "打开终端",
+                onClick: () => setTerminalOpen((value) => !value),
+                disabled: false,
+                active: terminalOpen,
+                icon: (
+                  <AppIcon name="terminal" size="toolbar" />
+                ),
+              },
+              {
                 label: rightPanelOpen ? "隐藏右侧扩展栏" : "显示资源管理器与预览",
                 onClick: () => setRightPanelOpen((v) => !v),
                 disabled: false,
@@ -2023,6 +2034,7 @@ export function AppShell() {
       )}
 
       <div className="workbench-content-layout">
+      <div className="workbench-upper-layout">
       {/* Center: chat */}
       <div className={`workbench-main${!hasSessionTabs ? " workbench-idle-surface" : ""}`} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Chat content */}
@@ -2254,6 +2266,13 @@ export function AppShell() {
           )}
         </div>
       </div>
+      </div>
+      <TerminalPanel
+        open={terminalOpen}
+        cwd={effectiveProjectCwd ?? null}
+        isDark={isDark}
+        onClose={() => setTerminalOpen(false)}
+      />
       </div>
     </div>
     <ConfigurationPanelHost

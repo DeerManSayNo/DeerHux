@@ -25,6 +25,8 @@ export interface SessionEntryBase {
 export interface TextContent {
   type: "text";
   text: string;
+  /** Provider metadata used to preserve Responses API text item identity and phase. */
+  textSignature?: string;
 }
 
 export interface ImageContent {
@@ -210,6 +212,7 @@ export interface SessionInfo {
   path: string;
   id: string;
   cwd: string;
+  projectCwd?: string; // display project cwd when a subagent runs in an isolated worktree
   name?: string;
   created: string;
   modified: string;

@@ -39,7 +39,7 @@ declare global {
   } | undefined;
 }
 
-function isLikelySubagentSession(s: PiSessionInfo): boolean {
+export function isLikelySubagentSession(s: { firstMessage?: unknown; cwd?: unknown }): boolean {
   const firstMessage = String(s.firstMessage ?? "").trim();
   const isWorkerPrompt = firstMessage.includes("## 用户总体问题") && (
     firstMessage.startsWith("你是一个专业代码分析专家") ||
@@ -53,7 +53,9 @@ function isLikelySubagentSession(s: PiSessionInfo): boolean {
 async function listAllSessionsUncached(): Promise<SessionInfo[]> {
   const piSessions: PiSessionInfo[] = await SessionManager.listAll();
   const pathToId = new Map<string, string>();
+  const sessionById = new Map<string, PiSessionInfo>();
   for (const s of piSessions) pathToId.set(s.path, s.id);
+  for (const s of piSessions) sessionById.set(s.id, s);
 
   const workerOrigins = await getWorkerOrigins();
   // Housekeeping: drop registry entries whose sessions no longer exist on disk.
@@ -65,17 +67,20 @@ async function listAllSessionsUncached(): Promise<SessionInfo[]> {
     cache.set(s.id, s.path);
     const origin = workerOrigins.get(s.id);
     const isSubagent = Boolean(origin) || isLikelySubagentSession(s);
+    const parentSessionId = origin?.parentSessionId ?? (s.parentSessionPath ? pathToId.get(s.parentSessionPath) : undefined);
+    const projectCwd = isSubagent && parentSessionId ? sessionById.get(parentSessionId)?.cwd : undefined;
     return {
       path: s.path,
       id: s.id,
       cwd: s.cwd,
+      ...(projectCwd ? { projectCwd } : {}),
       name: s.name,
       created: s.created instanceof Date ? s.created.toISOString() : String(s.created),
       modified: s.modified instanceof Date ? s.modified.toISOString() : String(s.modified),
       messageCount: s.messageCount,
       firstMessage: s.firstMessage || "(no messages)",
       isSubagent: isSubagent ? true : undefined,
-      parentSessionId: origin?.parentSessionId ?? (s.parentSessionPath ? pathToId.get(s.parentSessionPath) : undefined),
+      parentSessionId,
     };
   });
 }

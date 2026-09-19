@@ -6,7 +6,9 @@
 
 左侧项目与会话导航提供上下文，中部聊天区承担主任务，右侧资源管理器或文件预览按需出现。各区域独立滚动，可调整面板遵循尺寸系统的 min/max。一个到六个聊天窗口由稳定槽位布局承载，焦点窗口和运行状态必须可辨识。
 
-代表性实现：`components/AppShell.tsx`、`components/ChatWorkspace.tsx`、`components/workbench.css`。
+终端作为工作台底部的按需工具区，由全局工具栏控制展开与收起；终端高度可调整，折叠时保留进程和输出上下文，并将上方聊天与资源区作为一个整体缩放。多个终端使用页签切换，每个页签保持独立进程、工作目录和输出，关闭页签时结束对应进程。
+
+代表性实现：`components/AppShell.tsx`、`components/ChatWorkspace.tsx`、`components/TerminalPanel.tsx`、`components/workbench.css`。
 
 ## 空工作台
 

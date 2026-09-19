@@ -23,6 +23,7 @@ import {
   saveSessionHistorySnapshot,
 } from "@/lib/session-history-snapshots";
 import { mergeFullSessionHistory } from "@/lib/session-history-merge";
+import { hasExplicitFinalAnswerStarted } from "@/lib/text-content-phase";
 
 type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
@@ -350,6 +351,7 @@ export type AgentPhase =
   | { kind: "waiting_model"; reason: "initial" | "after_message" | "restored" | "recovery" }
   | { kind: "waiting_model"; reason: "after_tool"; tools: AgentPhaseTool[] }
   | { kind: "thinking_after_tool"; tools: AgentPhaseTool[] }
+  | { kind: "final_response"; tools: AgentPhaseTool[] }
   | { kind: "running_tools"; tools: AgentPhaseTool[]; batchTools: AgentPhaseTool[] }
   | { kind: "stopping" }
   | null;
@@ -1811,6 +1813,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const msg = event.message as Partial<AgentMessage> | undefined;
         if (msg?.role === "assistant") {
           const normalizedMsg = normalizeToolCalls(msg as AgentMessage);
+          const finalResponseStarted = normalizedMsg.role === "assistant"
+            && Array.isArray(normalizedMsg.content)
+            && hasExplicitFinalAnswerStarted(normalizedMsg.content);
           const nextLen = getStreamingContentLength(normalizedMsg);
           if (nextLen !== lastContentLengthRef.current) {
             watchdogStaleRecoveriesRef.current = 0;
@@ -1818,6 +1823,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             lastContentChangedAtRef.current = Date.now();
           }
           dispatch({ type: "update", message: normalizedMsg });
+          setAgentPhase((prev) => {
+            if (prev?.kind === "waiting_model" && prev.reason === "after_tool") {
+              return finalResponseStarted
+                ? { kind: "final_response", tools: prev.tools }
+                : { kind: "thinking_after_tool", tools: prev.tools };
+            }
+            if (prev?.kind === "thinking_after_tool" && finalResponseStarted) {
+              return { kind: "final_response", tools: prev.tools };
+            }
+            return prev;
+          });
+          break;
         }
         setAgentPhase((prev) => {
           if (prev?.kind === "waiting_model" && prev.reason === "after_tool") {

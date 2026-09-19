@@ -183,6 +183,10 @@ body {
 
 .adaptive-glass-surface {
   min-width: 180px;
+  /* Keep assistant windows visually stable across transparent WebView repaints. */
+  background: color-mix(in srgb, rgb(248 248 250) 82%, var(--bg));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 html.dark .context-menu-glass,
@@ -199,6 +203,10 @@ html.dark .adaptive-glass-surface {
     0 16px 36px rgb(0 0 0 / 0.48),
     0 3px 10px rgb(0 0 0 / 0.3),
     inset 0 1px 0 rgb(255 255 255 / 0.12);
+}
+
+html.dark .adaptive-glass-surface {
+  background: color-mix(in srgb, rgb(38 38 40) 78%, var(--bg));
 }
 
 .context-menu-glass button:not(.context-menu-danger) {

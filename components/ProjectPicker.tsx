@@ -22,11 +22,12 @@ type ProjectPickerProps = {
   onSelect?: (cwd: string) => void;
   compact?: boolean;
   sessionName?: string;
+  projectDisplayName?: string;
   isHighlighted?: boolean;
 };
 
 // Project switcher shared by session headers and the idle start surface.
-export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compact = false, sessionName, isHighlighted = false }: ProjectPickerProps) {
+export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compact = false, sessionName, projectDisplayName, isHighlighted = false }: ProjectPickerProps) {
   const [open, setOpen] = useState(false);
   const options = useMemo(() => {
     const byCwd = new Map<string, string>();
@@ -50,9 +51,9 @@ export function ProjectPicker({ currentCwd, projectOptions = [], onSelect, compa
   }, [open]);
 
   const canSwitch = Boolean(onSelect) && options.length > 1;
-  const label = currentCwd
+  const label = projectDisplayName || (currentCwd
     ? options.find((project) => project.cwd === currentCwd)?.displayName ?? getProjectDisplayName(currentCwd)
-    : "";
+    : "");
 
   if (!currentCwd || !label) return null;
 

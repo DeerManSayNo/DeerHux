@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
+import "@xterm/xterm/css/xterm.css";
 import { DisableNativeContextMenu } from "@/components/DisableNativeContextMenu";
 import { DisableTabNavigation } from "@/components/DisableTabNavigation";
 import "./globals.css";

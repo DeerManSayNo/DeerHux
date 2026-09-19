@@ -12,6 +12,10 @@
   "permissions": [
     "allow-read-clipboard-file-paths",
     "allow-set-startup-theme",
+    "allow-terminal-create",
+    "allow-terminal-write",
+    "allow-terminal-resize",
+    "allow-terminal-close",
     "core:default",
     "core:window:allow-set-theme",
     "core:window:allow-start-dragging",

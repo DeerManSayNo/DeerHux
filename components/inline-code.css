@@ -16,3 +16,20 @@ html.dark {
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
+
+.markdown-body .ai-color-literal {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+
+.markdown-body .ai-color-swatch {
+  width: 1.15em;
+  height: 1.15em;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+}

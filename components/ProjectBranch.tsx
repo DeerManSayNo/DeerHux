@@ -105,6 +105,8 @@ export function ProjectBranch({ cwd, refreshKey }: { cwd: string; refreshKey: st
     };
   }, [cwd, refreshKey, switching]);
 
+  if (!branch) return null;
+
   return (
     <>
     <button

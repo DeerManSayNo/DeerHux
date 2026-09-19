@@ -108,7 +108,8 @@ function formatSessionHeaderName(session: SessionInfo | null): string | undefine
   const raw = session?.name?.trim() || session?.firstMessage?.trim();
   if (!raw) return undefined;
   const characters = Array.from(raw);
-  return characters.length > 10 ? `${characters.slice(0, 10).join("")}...` : raw;
+  const title = characters.length > 10 ? `${characters.slice(0, 10).join("")}...` : raw;
+  return session?.isSubagent ? `sub · ${title}` : title;
 }
 
 function parseMessageTimestamp(message: AgentMessage | undefined): number | undefined {
@@ -138,6 +139,8 @@ function formatTurnDuration(seconds: number): string {
   const mins = minutes % 60;
   return mins ? `${hours}h ${mins}m` : `${hours}h`;
 }
+
+const FINAL_RESPONSE_PHASE_LABEL = "正在生成最终回复…";
 
 function phaseLabel(
   phase: AgentPhase,
@@ -170,6 +173,8 @@ function phaseLabel(
       ? `正在分析工具调用结果（${activities}）…`
       : "正在分析工具调用结果…";
   }
+
+  if (phase?.kind === "final_response") return FINAL_RESPONSE_PHASE_LABEL;
 
   if (phase?.kind === "waiting_model") {
     switch (phase.reason) {
@@ -574,10 +579,8 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const phaseLabelText = useMinDisplayValue(rawPhaseLabel, PHASE_LABEL_MIN_DISPLAY_MS);
   const streamTextLength = getStreamTextLength(streamState.streamingMessage);
   const showStreamIdleStatus = useStreamIdleStatus(isRunning, streamTextLength);
-  const finalResponseStarted = agentPhase?.kind === "thinking_after_tool"
-    && streamState.streamingMessage?.role === "assistant"
-    && Array.isArray(streamState.streamingMessage.content)
-    && streamState.streamingMessage.content.some((block) => block.type === "text" && Boolean(block.text.trim()));
+  const finalResponseStarted = agentPhase?.kind === "final_response"
+    && phaseLabelText === FINAL_RESPONSE_PHASE_LABEL;
 
   const commitLiveCollaborationRuns = useCallback((
     updater: (current: Map<string, CollaborationRunSnapshot>) => Map<string, CollaborationRunSnapshot>,
@@ -1305,8 +1308,9 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const contentSidePadding = 16;
   const messagePaddingClass = compact ? "px-3" : "px-4";
   const canSwitchEmptyProject = isNew && isEmptyConversation && Boolean(onNewSessionCwdChange) && selectableProjectOptions.length > 1;
-  const currentProjectLabel = currentCwd
-    ? selectableProjectOptions.find((project) => project.cwd === currentCwd)?.displayName ?? getProjectDisplayName(currentCwd)
+  const displayProjectCwd = session?.isSubagent && session.projectCwd ? session.projectCwd : currentCwd;
+  const currentProjectLabel = displayProjectCwd
+    ? selectableProjectOptions.find((project) => project.cwd === displayProjectCwd)?.displayName ?? getProjectDisplayName(displayProjectCwd)
     : "";
   const sessionHeaderName = formatSessionHeaderName(session);
 
@@ -1608,6 +1612,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
             <ProjectPicker
               currentCwd={currentCwd}
               projectOptions={selectableProjectOptions}
+              projectDisplayName={currentProjectLabel}
               sessionName={sessionHeaderName}
               compact={compact}
               isHighlighted={isFocused}

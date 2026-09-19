@@ -51,6 +51,7 @@ use windows_sys::Win32::{
 mod live_island;
 #[cfg(target_os = "macos")]
 mod live_island_macos;
+mod terminal;
 
 #[cfg(target_os = "windows")]
 const MAIN_WINDOW_RESIZE_SUBCLASS_ID: usize = 0xD33_0001;
@@ -1448,6 +1449,7 @@ pub fn run() {
     let process_started = Instant::now();
 
     let app = tauri::Builder::default()
+        .manage(terminal::TerminalState::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -1494,6 +1496,10 @@ pub fn run() {
             hide_quick_session_window,
             mark_quick_session_ready,
             resize_quick_session_window,
+            terminal::terminal_create,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
             live_island::live_island_push_events,
             live_island::live_island_clear,
             live_island::mark_live_island_ready,

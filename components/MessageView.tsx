@@ -12,6 +12,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AiOutputLink, aiOutputUrlTransform } from "./AiOutputLink";
 import { AiOutputImage } from "./AiOutputImage";
+import { AiColorSwatch, parseCssHexColor } from "./AiColorSwatch";
 import { DeferredCodeBlock } from "./LazyCodeHighlighter";
 import { formatMessageUsage } from "@/lib/message-usage";
 import { normalizeLegacyFileApiReadUrl } from "@/lib/file-paths";
@@ -1450,7 +1451,7 @@ function createMarkdownComponents(isStreaming: boolean): Components {
         );
       }
       if (isBlock) return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} />;
-      return (
+      const inlineCode = (
         <code
           className="inline-code"
           {...props}
@@ -1458,6 +1459,8 @@ function createMarkdownComponents(isStreaming: boolean): Components {
           {children}
         </code>
       );
+      const color = parseCssHexColor(raw);
+      return color ? <AiColorSwatch color={color}>{inlineCode}</AiColorSwatch> : inlineCode;
     },
     pre({ children }) {
       // CodeBlock 和流式轻量代码块都管理自己的容器。
