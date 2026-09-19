@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { AuthStorage, createAgentSession, getAgentDir, ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent";
+import { withProviderProxy } from "@/lib/provider-proxy";
 
 export const dynamic = "force-dynamic";
 
@@ -206,11 +207,11 @@ export async function POST(req: Request) {
         : undefined;
 
       const run = await runWithTimeout(
-        session.prompt(prompt, {
+        withProviderProxy(providerName, () => result.session.prompt(prompt, {
           images,
           expandPromptTemplates: false,
           source: "interactive",
-        }),
+        })),
         TEST_TIMEOUT_MS
       );
       const latencyMs = Date.now() - startedAt;

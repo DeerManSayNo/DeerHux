@@ -6,6 +6,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AnyToolDefinition } from "./tool-registry.ts";
 import { ensureContextDir, getContextDir, previewForExistingSpill, spillLargeText } from "./context-archive.ts";
+import { backgroundProcessMonitor } from "./background-process-monitor.ts";
 
 export const STANDARD_CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 
@@ -208,12 +209,19 @@ function runProcess(
     spillId?: string;
     processEnv?: Readonly<NodeJS.ProcessEnv>;
     onOutput?: (output: { stdout: string; stderr: string }) => void;
+    onBackgroundProcess?: (process: {
+      pid: number;
+      startedAt: number;
+      stdout: string;
+      stderr: string;
+    }) => void;
   },
 ): Promise<ProcessRunResult> {
   if (opts.signal.aborted) {
     return Promise.reject(new DOMException("Process aborted", "AbortError"));
   }
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const timeoutMs = Math.min(Math.max(opts.timeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS, 1_000), MAX_PROCESS_TIMEOUT_MS);
     const child = spawn(command, args, {
       cwd: opts.cwd,
@@ -255,7 +263,7 @@ function runProcess(
       return combinedFile;
     };
 
-    const finish = (fn: () => void) => {
+    const finish = (fn: () => void, inspectBackgroundProcess = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -265,6 +273,9 @@ function runProcess(
         emitOutput();
       }
       opts.signal.removeEventListener("abort", onAbort);
+      if (inspectBackgroundProcess && !terminationError && child.pid) {
+        opts.onBackgroundProcess?.({ pid: child.pid, startedAt, stdout, stderr });
+      }
       child.stdout.destroy();
       child.stderr.destroy();
       fn();
@@ -319,12 +330,12 @@ function runProcess(
       postExitTimer = setTimeout(() => {
         finish(() => terminationError
           ? reject(terminationError)
-          : resolve({ stdout, stderr, code, signal, fullOutputPath: combinedFile }));
+          : resolve({ stdout, stderr, code, signal, fullOutputPath: combinedFile }), true);
       }, 100);
     });
     child.on("close", (code, signal) => finish(() => terminationError
       ? reject(terminationError)
-      : resolve({ stdout, stderr, code, signal, fullOutputPath: combinedFile })));
+      : resolve({ stdout, stderr, code, signal, fullOutputPath: combinedFile }), true));
   });
 }
 
@@ -450,6 +461,18 @@ export function createStandardCodingTools(
           onOutput: ({ stdout, stderr }) => {
             onUpdate?.(textResult(liveProcessOutput(stdout, stderr), { command, running: true }));
           },
+          onBackgroundProcess: sessionId ? ({ pid, startedAt, stdout, stderr }) => {
+            backgroundProcessMonitor.track({
+              processId: `${sessionId}:${toolCallId}`,
+              sessionId,
+              toolCallId,
+              command,
+              cwd,
+              pid,
+              startedAt,
+              output: liveProcessOutput(stdout, stderr),
+            });
+          } : undefined,
         });
         const text = [
           `exit_code: ${result.code ?? "null"}${result.signal ? ` signal: ${result.signal}` : ""}`,

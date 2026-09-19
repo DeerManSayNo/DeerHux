@@ -61,6 +61,7 @@ export function AiFileLinkMenu({ cwd, children }: { cwd?: string | null; childre
     if (!path) return;
     event.preventDefault();
     event.stopPropagation();
+    window.getSelection()?.removeAllRanges();
     revision.current += 1;
     setError("");
     setBusy(false);

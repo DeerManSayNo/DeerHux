@@ -44,6 +44,7 @@ type AutoRecoveryModel = RecoveryFallbackModel | null;
 
 interface ModelsJson {
   providers?: Record<string, ProviderEntry>;
+  providerProxies?: Record<string, string>;
   autoRecoveryModels?: AutoRecoveryModel[];
   /** 全局唯一的 Flash 模型，用于解释选中文字等轻量快速任务。 */
   flashModel?: RecoveryFallbackModel | null;
@@ -137,8 +138,9 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function TextInput({ value, onChange, placeholder, mono, autoFocus }: { value: string; onChange: (v: string) => void; placeholder?: string; mono?: boolean; autoFocus?: boolean }) {
+function TextInput({ value, onChange, placeholder, mono, autoFocus, spellCheck, disabled }: { value: string; onChange: (v: string) => void; placeholder?: string; mono?: boolean; autoFocus?: boolean; spellCheck?: boolean; disabled?: boolean }) {
   return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoFocus={autoFocus}
+    spellCheck={spellCheck} disabled={disabled}
     onFocus={autoFocus ? (e) => e.currentTarget.select() : undefined}
     className={`${styles.input} ${mono ? styles.mono : ""}`} />;
 }
@@ -247,14 +249,45 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <div className={styles.sectionTitle}>{children}</div>;
 }
 
+function Switch({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      title={label}
+      className={styles.switchControl}
+      onClick={() => onChange(!checked)}
+    >
+      <span aria-hidden="true" className={styles.switchTrack} data-checked={checked}>
+        <span className={styles.switchThumb} />
+      </span>
+    </button>
+  );
+}
+
 // ── Provider detail ───────────────────────────────────────────────────────────
 
-function ProviderDetail({ name, provider, focusName, onChange, onRename, onDelete }: {
+type ProxyStatus =
+  | { phase: "idle" }
+  | { phase: "testing" }
+  | { phase: "success"; ip: string; country: string; countryCode: string }
+  | { phase: "error"; message: string };
+
+function ProviderDetail({ name, provider, proxyUrl, focusName, onChange, onProxyChange, onRename, onDelete }: {
   name: string; provider: ProviderEntry;
+  proxyUrl: string;
   focusName?: boolean;
-  onChange: (p: ProviderEntry) => void; onRename: (n: string) => void; onDelete: () => void;
+  onChange: (p: ProviderEntry) => void;
+  onProxyChange: (value: string) => void;
+  onRename: (n: string) => void;
+  onDelete: () => void;
 }) {
   const [editingName, setEditingName] = useState(name);
+  const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ phase: "idle" });
+  const proxyProbeId = useRef(0);
+  const proxyEnabled = Boolean(proxyUrl.trim());
   useEffect(() => setEditingName(name), [name]);
   const set = <K extends keyof ProviderEntry>(k: K, v: ProviderEntry[K]) => onChange({ ...provider, [k]: v });
 
@@ -262,6 +295,33 @@ function ProviderDetail({ name, provider, focusName, onChange, onRename, onDelet
     if (!provider.api) onChange({ ...provider, api: "openai-completions" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider.api]);
+
+  const probeProxy = useCallback(async (url: string) => {
+    const probeId = ++proxyProbeId.current;
+    setProxyStatus({ phase: "testing" });
+    try {
+      const response = await fetch("/api/models-config/proxy-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proxyUrl: url }),
+      });
+      const data = await response.json() as {
+        node?: { ip?: string; country?: string; countryCode?: string };
+        error?: string;
+      };
+      if (!response.ok || !data.node?.ip) throw new Error(data.error || `HTTP ${response.status}`);
+      if (probeId !== proxyProbeId.current) return;
+      setProxyStatus({
+        phase: "success",
+        ip: data.node.ip,
+        country: data.node.country || "未知地区",
+        countryCode: data.node.countryCode || "",
+      });
+    } catch (error) {
+      if (probeId !== proxyProbeId.current) return;
+      setProxyStatus({ phase: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }, []);
 
   return (
     <div className={styles.detailForm}>
@@ -292,6 +352,46 @@ function ProviderDetail({ name, provider, focusName, onChange, onRename, onDelet
 
       <Field label="API 格式">
         <Select value={provider.api ?? "openai-completions"} onChange={(v) => set("api", v)} options={API_OPTIONS} required />
+      </Field>
+
+      <Field label="本地代理">
+        <div className={styles.proxyInputRow}>
+          <TextInput
+            value={proxyUrl}
+            onChange={(value) => {
+              proxyProbeId.current += 1;
+              onProxyChange(value);
+              setProxyStatus({ phase: "idle" });
+            }}
+            placeholder="http://127.0.0.1:7897"
+            mono
+            spellCheck={false}
+            disabled={!proxyEnabled}
+          />
+          <Switch
+            checked={proxyEnabled}
+            label={proxyEnabled ? "关闭代理" : "启用代理"}
+            onChange={(enabled) => {
+              const nextProxyUrl = enabled ? proxyUrl.trim() || "http://127.0.0.1:7897" : "";
+              onProxyChange(nextProxyUrl);
+              if (enabled) void probeProxy(nextProxyUrl);
+              else {
+                proxyProbeId.current += 1;
+                setProxyStatus({ phase: "idle" });
+              }
+            }}
+          />
+        </div>
+        {proxyStatus.phase === "testing" && <span role="status" className={styles.proxyStatus}>正在探测代理出口...</span>}
+        {proxyStatus.phase === "success" && (
+          <span role="status" className={styles.proxyStatus}>
+            接入节点 <strong>{proxyStatus.ip}</strong>
+            <span className={styles.proxyDivider}>·</span>
+            {proxyStatus.countryCode && <span className={styles.countryCode}>{proxyStatus.countryCode}</span>}
+            <span>{proxyStatus.country}</span>
+          </span>
+        )}
+        {proxyStatus.phase === "error" && <span role="alert" className={`${styles.proxyStatus} ${styles.proxyError}`}>代理连接失败：{proxyStatus.message}</span>}
       </Field>
     </div>
   );
@@ -852,6 +952,14 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
       entries[idx] = [newName, entries[idx][1]];
       return { ...prev, providers: Object.fromEntries(entries) };
     });
+    setConfig((prev) => {
+      const proxies = { ...(prev.providerProxies ?? {}) };
+      if (oldName in proxies) {
+        proxies[newName] = proxies[oldName];
+        delete proxies[oldName];
+      }
+      return { ...prev, providerProxies: proxies };
+    });
     setSelection((prev) => {
       if (!prev) return prev;
       if (prev.type === "provider" && prev.name === oldName) return { type: "provider", name: newName };
@@ -864,7 +972,9 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
     setConfig((prev) => {
       const providers = { ...(prev.providers ?? {}) };
       delete providers[name];
-      return { ...prev, providers };
+      const providerProxies = { ...(prev.providerProxies ?? {}) };
+      delete providerProxies[name];
+      return { ...prev, providers, providerProxies };
     });
     setConfig((prev) => {
       const remaining = Object.keys(prev.providers ?? {});
@@ -1033,8 +1143,15 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
           key={selection.name}
           name={selection.name}
           provider={provider}
+          proxyUrl={config.providerProxies?.[selection.name] ?? ""}
           focusName={selection.name === newProviderName}
           onChange={(p) => updateProvider(selection.name, p)}
+          onProxyChange={(value) => setConfig((prev) => {
+            const providerProxies = { ...(prev.providerProxies ?? {}) };
+            if (value) providerProxies[selection.name] = value;
+            else delete providerProxies[selection.name];
+            return { ...prev, providerProxies };
+          })}
           onRename={(n) => renameProvider(selection.name, n)}
           onDelete={() => deleteProvider(selection.name)}
         />

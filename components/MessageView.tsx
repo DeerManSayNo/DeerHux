@@ -12,6 +12,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AiOutputLink, aiOutputUrlTransform } from "./AiOutputLink";
 import { AiOutputImage } from "./AiOutputImage";
+import { isLocalPathCandidate, remarkLocalFileLinks } from "@/lib/remark-local-file-links";
 import { AiColorSwatch, parseCssHexColor } from "./AiColorSwatch";
 import { DeferredCodeBlock } from "./LazyCodeHighlighter";
 import { formatMessageUsage } from "@/lib/message-usage";
@@ -1480,7 +1481,7 @@ export function MessageMarkdown({ text, isStreaming }: { text: string; isStreami
   return (
     <div className="markdown-body" data-ai-output data-message-body>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkLocalFileLinks]}
         urlTransform={aiOutputUrlTransform}
         components={isStreaming ? STREAMING_MARKDOWN_COMPONENTS : COMPLETED_MARKDOWN_COMPONENTS}
       >
@@ -1703,6 +1704,8 @@ function formatCompactDuration(seconds: number): string {
 
 function CodeBlock({ code, lang }: { code: string; lang: string }) {
   const [copied, setCopied] = useState(false);
+  const path = code.trim();
+  const isPath = !path.includes("\n") && isLocalPathCandidate(path);
 
   const copy = () => {
     copyText(code).then(() => {
@@ -1750,7 +1753,16 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <DeferredCodeBlock
+      {isPath ? (
+        <pre style={{ margin: 0, padding: "10px 12px", overflowX: "auto", fontSize: 12.5, lineHeight: 1.6, backgroundColor: "var(--bg)" }}>
+          <code style={{ fontFamily: "var(--font-mono)" }}>
+            <span className="chat-code-line" style={{ display: "block", width: "fit-content", minWidth: "1ch" }}>
+              <span aria-hidden="true" style={{ display: "inline-block", minWidth: "2em", paddingRight: "1em", color: "var(--text-dim)", userSelect: "none" }}>1</span>
+              <AiOutputLink href={path}>{path}</AiOutputLink>
+            </span>
+          </code>
+        </pre>
+      ) : <DeferredCodeBlock
         code={code}
         language={lang || "text"}
         showLineNumbers
@@ -1766,7 +1778,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
           backgroundColor: "var(--bg)",
         }}
         codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-      />
+      />}
     </div>
   );
 }

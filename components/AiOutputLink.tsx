@@ -16,9 +16,10 @@ export function aiOutputUrlTransform(url: string, key: string): string {
   return "";
 }
 
-const pending = new Map<string, Array<(valid: boolean) => void>>();
+type ValidatedPath = { valid: boolean; directory: boolean };
+const pending = new Map<string, Array<(result: ValidatedPath) => void>>();
 let scheduled = false;
-function validateFile(filePath: string): Promise<boolean> {
+function validatePath(filePath: string): Promise<ValidatedPath> {
   return new Promise((resolve) => {
     pending.set(filePath, [...(pending.get(filePath) ?? []), resolve]);
     if (scheduled) return;
@@ -36,10 +37,14 @@ function validateFile(filePath: string): Promise<boolean> {
           signal: AbortSignal.timeout(5000),
         }).then(async (response) => {
           if (!response.ok) throw new Error("File validation failed");
-          const body = await response.json() as { valid?: unknown };
+          const body = await response.json() as { valid?: unknown; directories?: unknown };
           const valid = body.valid;
-          batch.forEach(([, callbacks], index) => callbacks.forEach((done) => done(Array.isArray(valid) && valid[index] === true)));
-        }).catch(() => batch.forEach(([, callbacks]) => callbacks.forEach((done) => done(false))));
+          const directories = body.directories;
+          batch.forEach(([, callbacks], index) => callbacks.forEach((done) => done({
+            valid: Array.isArray(valid) && valid[index] === true,
+            directory: Array.isArray(directories) && directories[index] === true,
+          })));
+        }).catch(() => batch.forEach(([, callbacks]) => callbacks.forEach((done) => done({ valid: false, directory: false }))));
       }
     }, 0);
   });
@@ -49,15 +54,16 @@ export function AiOutputLink({ href, children, title }: { href?: string; childre
   const cwd = useContext(AiLinkWorkspace);
   const external = href ? normalizeExternalHref(href) : null;
   const filePath = href && !external ? resolveLocalFileHref(href.replace(/#.*$/, "").replace(/:\d+(?::\d+)?$/, ""), cwd) : null;
-  const [checkedPath, setCheckedPath] = useState<string | null>(null);
+  const [checkedPath, setCheckedPath] = useState<{ path: string; directory: boolean } | null>(null);
   useEffect(() => {
     if (!filePath) return;
     let cancelled = false;
-    void validateFile(filePath).then((valid) => {
-      if (!cancelled) setCheckedPath(valid ? filePath : null);
+    void validatePath(filePath).then((result) => {
+      if (!cancelled) setCheckedPath(result.valid ? { path: filePath, directory: result.directory } : null);
     });
     return () => { cancelled = true; };
   }, [filePath]);
-  if (!external && (!filePath || checkedPath !== filePath)) return <span>{children}</span>;
-  return <a href={external ?? href} data-local-file-path={external ? undefined : filePath!} title={title}>{children}</a>;
+  if (!external && (!filePath || checkedPath?.path !== filePath)) return <span>{children}</span>;
+  return <a href={external ?? href} data-local-file-path={external ? undefined : filePath!}
+    data-local-directory={!external && checkedPath?.directory ? "true" : undefined} title={title}>{children}</a>;
 }

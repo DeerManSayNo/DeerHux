@@ -4,6 +4,7 @@ import { businessRecoveryDelayMs, eligibleRecoveryEvents } from "@/lib/agent-run
 import { SessionEventBuffer, type SessionBufferDiagnostics } from "@/lib/agent-runtime/session-event-buffer";
 import { isCollaborationSnapshotOlder } from "@/lib/collaboration-ui-state";
 import type {
+  AiBackgroundProcessesSnapshot,
   HostControlFrame,
   HostRunningSnapshot,
   LiveIslandEventsFrame,
@@ -32,6 +33,11 @@ type ControlEvent =
 
 type SessionListener = (event: MultiplexAgentEvent["event"] & { turnId?: string }) => void;
 type SnapshotListener = (reason: string) => void | Promise<void>;
+export type GlobalAgentEventListener = (envelope: {
+  sessionId: string;
+  event: MultiplexAgentEvent["event"] & { turnId?: string };
+}) => void;
+export type AiBackgroundProcessesListener = (frame: AiBackgroundProcessesSnapshot) => void;
 export type HostEventListener = (frame: HostRunningSnapshot) => void;
 export type LiveIslandEventListener = (frame: LiveIslandEventsFrame) => void;
 export type SessionTransientListener = (frame: SessionTransientSnapshot | null) => void;
@@ -164,6 +170,8 @@ function persistCursor(epoch: string, globalSeq: number): void {
 class AgentEventClient {
   private source: EventSource | null = null;
   private readonly listeners = new Map<string, Set<SessionListener>>();
+  private readonly globalEventListeners = new Set<GlobalAgentEventListener>();
+  private readonly aiBackgroundProcessesListeners = new Set<AiBackgroundProcessesListener>();
   private readonly snapshotListeners = new Map<string, Set<SnapshotListener>>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
@@ -190,6 +198,7 @@ class AgentEventClient {
   private readonly transientListeners = new Map<string, Set<SessionTransientListener>>();
   private readonly subagentListeners = new Map<string, Set<SubagentRunsListener>>();
   private hostMirror: HostRunningSnapshot | null = null;
+  private aiBackgroundProcessesMirror: AiBackgroundProcessesSnapshot | null = null;
   private readonly transientMirror = new Map<string, SessionTransientSnapshot>();
   private readonly subagentMirror = new Map<string, SubagentRunsSnapshot>();
   private readonly diagnosticsState = initialClientDiagnostics();
@@ -249,11 +258,30 @@ class AgentEventClient {
     };
   }
 
+  subscribeAllEvents(listener: GlobalAgentEventListener): () => void {
+    this.globalEventListeners.add(listener);
+    this.ensureConnected();
+    return () => {
+      this.globalEventListeners.delete(listener);
+      this.disconnectIfUnused();
+    };
+  }
+
   subscribeHost(listener: HostEventListener): () => void {
     this.hostListeners.add(listener);
     this.ensureConnected();
     if (this.hostMirror) listener(this.hostMirror);
     return () => { this.hostListeners.delete(listener); this.disconnectIfUnused(); };
+  }
+
+  subscribeAiBackgroundProcesses(listener: AiBackgroundProcessesListener): () => void {
+    this.aiBackgroundProcessesListeners.add(listener);
+    this.ensureConnected();
+    if (this.aiBackgroundProcessesMirror) listener(this.aiBackgroundProcessesMirror);
+    return () => {
+      this.aiBackgroundProcessesListeners.delete(listener);
+      this.disconnectIfUnused();
+    };
   }
 
   subscribeLiveIsland(listener: LiveIslandEventListener): () => void {
@@ -413,6 +441,12 @@ class AgentEventClient {
       for (const listener of [...this.liveIslandListeners]) listener(frame);
       return;
     }
+    if (frame.type === "ai_background_processes_snapshot") {
+      if (this.aiBackgroundProcessesMirror && this.aiBackgroundProcessesMirror.updatedAt > frame.updatedAt) return;
+      this.aiBackgroundProcessesMirror = frame;
+      for (const listener of [...this.aiBackgroundProcessesListeners]) listener(frame);
+      return;
+    }
     if (frame.type === "session_transient_snapshot") {
       const previous = this.transientMirror.get(frame.sessionId);
       if (previous && previous.updatedAt > frame.updatedAt) return;
@@ -440,6 +474,7 @@ class AgentEventClient {
 
   private clearMirrors(): void {
     this.hostMirror = null;
+    this.aiBackgroundProcessesMirror = null;
     this.liveIslandMirror = null;
     this.transientMirror.clear();
     this.subagentMirror.clear();
@@ -542,6 +577,14 @@ class AgentEventClient {
     if (this.cursor && this.cursor.epoch !== data.epoch) {
       this.diagnosticsState.epochMismatchEventsDroppedTotal += 1;
       return;
+    }
+    const globalEvent = data.turnId ? { ...data.event, turnId: data.turnId } : data.event;
+    for (const listener of [...this.globalEventListeners]) {
+      try {
+        listener({ sessionId: data.sessionId, event: globalEvent });
+      } catch (error) {
+        console.error("[agent-events] global listener failed:", error);
+      }
     }
     const listeners = this.listeners.get(data.sessionId);
     if (!listeners) {
@@ -738,7 +781,11 @@ declare global {
 // pre-diagnostics singleton cannot satisfy the new public API, so close its
 // transport before replacing it; React refresh will recreate subscriptions.
 const existingClient = globalThis.__deerhuxAgentEventClient;
-if (existingClient && typeof existingClient.diagnostics !== "function") {
+if (existingClient && (
+  typeof existingClient.diagnostics !== "function"
+  || typeof (existingClient as unknown as { subscribeAllEvents?: unknown }).subscribeAllEvents !== "function"
+  || typeof (existingClient as unknown as { subscribeAiBackgroundProcesses?: unknown }).subscribeAiBackgroundProcesses !== "function"
+)) {
   const legacy = existingClient as unknown as {
     source?: EventSource | null;
     reconnectTimer?: ReturnType<typeof setTimeout> | null;
@@ -755,6 +802,14 @@ export function subscribeAgentEvents(
   onSnapshotRequired?: SnapshotListener,
 ): () => void {
   return client.subscribe(sessionId, listener, onSnapshotRequired);
+}
+
+export function subscribeAllAgentEvents(listener: GlobalAgentEventListener): () => void {
+  return client.subscribeAllEvents(listener);
+}
+
+export function subscribeAiBackgroundProcesses(listener: AiBackgroundProcessesListener): () => void {
+  return client.subscribeAiBackgroundProcesses(listener);
 }
 
 export function subscribeHostEvents(listener: HostEventListener): () => void {

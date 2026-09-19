@@ -8,6 +8,7 @@ import { getAgentDir as getCodingAgentDir } from "@earendil-works/pi-coding-agen
 import type { ScheduledTask, PromptTaskConfig, TaskLog } from "./types";
 import { updateTask, appendTaskLog, getTask } from "./store";
 import { cacheSessionPath, forceRefreshSessionList } from "../session-reader";
+import { withProviderProxy } from "../provider-proxy";
 
 const TASK_RUN_LOCK_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -186,7 +187,8 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
       });
 
       // Send the prompt
-      session.prompt(config.message).catch((err: unknown) => {
+      const provider = config.model?.provider ?? session.model?.provider ?? "";
+      withProviderProxy(provider, () => session.prompt(config.message)).catch((err: unknown) => {
         if (!finished) {
           finished = true;
           unsubscribe();

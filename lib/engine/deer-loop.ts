@@ -26,6 +26,7 @@ import type {
   UserMessage,
 } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, streamSimple } from "@earendil-works/pi-ai";
+import { withProviderProxy } from "../provider-proxy";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   buildSessionContext,
@@ -3148,5 +3149,5 @@ function defaultStreamFn(
   context: Context,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-  return streamSimple(model, context, options);
+  return withProviderProxy(model.provider, () => streamSimple(model, context, options));
 }

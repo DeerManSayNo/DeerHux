@@ -262,6 +262,8 @@ export async function GET(req: Request) {
       sendBaseline({ type: "host_running_snapshot", sessions: runningSessions, authoritative: true });
       const liveIslandFrame = hostEventBus.getLiveIslandFrame();
       if (liveIslandFrame) sendBaseline(liveIslandFrame);
+      const aiBackgroundProcessesFrame = hostEventBus.getAiBackgroundProcessesFrame();
+      if (aiBackgroundProcessesFrame) sendBaseline(aiBackgroundProcessesFrame);
       for (const snapshot of transientSnapshots) sendBaseline(snapshot);
       const runsByParent = new Map<string, ReturnType<typeof toCollaborationMuxSnapshot>[] >();
       for (const run of listCollaborationRuns()) {

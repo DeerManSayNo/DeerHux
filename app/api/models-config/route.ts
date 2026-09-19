@@ -4,6 +4,7 @@ import { join, dirname } from "path";
 import { AuthStorage, ModelRegistry, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { findEmptyModelId } from "@/lib/models-config-validation";
 import { extractFastModePreferences, mergeFastModePreferences, writeFastModePreferences } from "@/lib/model-fast-mode";
+import { normalizeProviderProxies, ProviderProxyConfigError, readProviderProxies, writeProviderProxies } from "@/lib/provider-proxy";
 
 export const dynamic = "force-dynamic";
 
@@ -53,7 +54,10 @@ function writeModelsJson(data: Record<string, unknown>): void {
 }
 
 export async function GET() {
-  return NextResponse.json(mergeFastModePreferences(readModelsJson()));
+  return NextResponse.json({
+    ...mergeFastModePreferences(readModelsJson()),
+    providerProxies: readProviderProxies(),
+  });
 }
 
 export async function PUT(req: Request) {
@@ -64,13 +68,19 @@ export async function PUT(req: Request) {
     }
     const invalidModel = findEmptyModelId(body);
     if (invalidModel) return NextResponse.json({ error: invalidModel.message }, { status: 400 });
-    const { config, preferences } = extractFastModePreferences(body);
+    const { providerProxies, ...modelsBody } = body;
+    const normalizedProxies = normalizeProviderProxies(providerProxies);
+    const { config, preferences } = extractFastModePreferences(modelsBody);
     writeModelsJson(config);
+    writeProviderProxies(normalizedProxies);
     writeFastModePreferences(preferences);
     // Model registry refreshes on each /api/models request (no local cache to invalidate)
     return NextResponse.json({ success: true });
   } catch (_error) {
     if (_error instanceof ModelsConfigValidationError) {
+      return NextResponse.json({ error: _error.message }, { status: 400 });
+    }
+    if (_error instanceof ProviderProxyConfigError) {
       return NextResponse.json({ error: _error.message }, { status: 400 });
     }
     if (_error instanceof SyntaxError) {

@@ -210,6 +210,13 @@
   outline-offset: -1px;
 }
 
+.input:disabled {
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
 .secretInput {
   padding-right: 34px;
 }
@@ -246,6 +253,109 @@
   color: var(--text-dim);
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
+}
+
+.proxyInputRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.switchControl {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--radius-control);
+  outline: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.switchControl:hover {
+  background: var(--bg-hover);
+}
+
+.switchControl:focus-visible .switchTrack {
+  outline: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  outline-offset: 2px;
+}
+
+.switchTrack {
+  position: relative;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 150ms ease;
+}
+
+.switchTrack[data-checked="true"] {
+  background: var(--accent);
+}
+
+.switchThumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-control);
+  transition: transform 150ms ease;
+}
+
+.switchTrack[data-checked="true"] .switchThumb {
+  transform: translateX(12px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switchTrack,
+  .switchThumb {
+    transition: none;
+  }
+}
+
+.proxyStatus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.proxyStatus strong {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium);
+}
+
+.proxyDivider {
+  color: var(--text-dim);
+}
+
+.countryCode {
+  padding: 1px 5px;
+  border-radius: var(--radius-small);
+  background: var(--bg-selected);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+}
+
+.proxyError {
+  color: var(--danger);
 }
 
 .checkLabel {

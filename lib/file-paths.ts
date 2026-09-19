@@ -39,6 +39,7 @@ export function getRelativeFilePath(filePath: string, cwd?: string): string {
 
   const normalizedFile = normalizeFilePathSlashes(filePath);
   const normalizedCwd = normalizeFilePathSlashes(cwd).replace(/\/$/, "");
+  if (normalizedFile === normalizedCwd) return ".";
   if (normalizedFile.startsWith(normalizedCwd + "/")) {
     return normalizedFile.slice(normalizedCwd.length + 1);
   }

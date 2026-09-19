@@ -1251,6 +1251,12 @@ export function AppShell() {
       const filePath = anchor.dataset.localFilePath ?? resolveLocalFileHref(href, effectiveProjectCwd);
       if (filePath) {
         event.preventDefault();
+        if (anchor.dataset.localDirectory === "true") {
+          void openLocalFileLink(filePath).then((opened) => {
+            if (!opened) window.alert("无法打开此文件夹，请检查路径是否存在及访问权限。");
+          });
+          return;
+        }
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
           void openLocalFileLink(filePath).then((opened) => {
             if (!opened) window.alert("无法使用系统默认应用打开此文件，请检查文件是否存在及访问权限。");
