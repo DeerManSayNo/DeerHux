@@ -200,7 +200,7 @@ function syncNativeTheme(theme: Theme) {
 
 type ToggleOrigin = { x: number; y: number };
 
-export function useTheme() {
+export function useTheme({ syncNative = true }: { syncNative?: boolean } = {}) {
   const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
   useEffect(() => {
@@ -208,9 +208,10 @@ export function useTheme() {
   }, []);
 
   useEffect(() => {
-    // One native update per webview/theme value, even with many CodeBlock users.
-    syncNativeTheme(theme);
-  }, [theme]);
+    // Transparent utility windows can opt out: changing the native theme causes
+    // the webview surface to flash while the OS backing layer is recreated.
+    if (syncNative) syncNativeTheme(theme);
+  }, [syncNative, theme]);
 
   const toggleTheme = useCallback((origin?: ToggleOrigin) => {
     const next: Theme = getSnapshot() === "dark" ? "light" : "dark";

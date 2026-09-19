@@ -1844,35 +1844,18 @@ export function SkillsConfig({
 
       {contextMenu && (
         <div
+          className="context-menu-glass"
           role="menu"
           style={{
             position: "fixed",
             left: contextMenu.x,
             top: contextMenu.y,
             zIndex: 1100,
-            width: 200,
             padding: 6,
-            background: "var(--bg-panel)",
-            border: "1px solid var(--border)",
-            borderRadius: 10,
-            boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
           }}
           onClick={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
         >
-          <div
-            style={{
-              padding: "5px 8px 7px",
-              color: "var(--text-dim)",
-              fontSize: 10,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-            title={contextMenu.skill.baseDir}
-          >
-            {contextMenu.skill.name}
-          </div>
           <button
             type="button"
             role="menuitem"

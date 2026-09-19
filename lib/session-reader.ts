@@ -702,6 +702,13 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   };
 }
 
+/** Build the model-facing branch context without the UI normalization applied above. */
+export function buildSessionModelMessages(entries: SessionEntry[], leafId?: string | null) {
+  const byId = new Map<string, PiSessionEntry>();
+  for (const entry of entries as unknown as PiSessionEntry[]) byId.set(entry.id, entry);
+  return piBuildSessionContext(entries as unknown as PiSessionEntry[], leafId, byId).messages;
+}
+
 export function getLeafId(entries: SessionEntry[]): string | null {
   if (entries.length === 0) return null;
   return entries[entries.length - 1].id;

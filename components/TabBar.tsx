@@ -310,34 +310,17 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
     {/* Context Menu */}
     {contextMenu && contextTab && (
       <div
+        className="context-menu-glass"
         style={{
           position: "fixed",
           left: contextMenu.x,
           top: contextMenu.y,
           zIndex: 1000,
-          width: 200,
           padding: 6,
-          background: "var(--bg-panel)",
-          border: "1px solid var(--border)",
-          borderRadius: 10,
-          boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
         }}
         onClick={(e) => e.stopPropagation()}
         onContextMenu={(e) => e.preventDefault()}
       >
-        <div
-          style={{
-            padding: "5px 8px 7px",
-            color: "var(--text-dim)",
-            fontSize: 10,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-          title={contextMenu.filePath}
-        >
-          {contextTab.label}
-        </div>
         <ContextMenuButton icon="close" onClick={() => closeTabs([contextTab.id])}>关闭此页</ContextMenuButton>
         <ContextMenuButton icon="right" disabled={rightTabIds.length === 0} onClick={() => closeTabs(rightTabIds)}>关闭右侧标签</ContextMenuButton>
         <ContextMenuButton icon="others" disabled={otherTabIds.length === 0} onClick={() => closeTabs(otherTabIds)}>关闭其他页签</ContextMenuButton>

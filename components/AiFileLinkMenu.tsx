@@ -98,7 +98,7 @@ export function AiFileLinkMenu({ cwd, children }: { cwd?: string | null; childre
     <div style={{ display: "contents" }} onContextMenu={openMenu}>
       <AiLinkWorkspace.Provider value={cwd ?? null}>{children}</AiLinkWorkspace.Provider>
       {menu && createPortal(
-        <div ref={menuRef} className={styles.menu} role="menu" aria-label="文件链接操作"
+        <div ref={menuRef} className={`${styles.menu} context-menu-glass`} role="menu" aria-label="文件链接操作"
           style={{ left: menu.x, top: menu.y }}
           onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}
           onKeyDown={(event) => {

@@ -1240,24 +1240,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         };
         return (
           <div
+            className="context-menu-glass"
             style={{
               position: "fixed",
               left: projectMenu.x,
               top: projectMenu.y,
               zIndex: 1000,
-              width: 178,
               padding: 6,
-              background: "var(--bg-panel)",
-              border: "1px solid var(--border)",
-              borderRadius: "var(--radius-panel)",
-              boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
             }}
             onClick={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
           >
-            <div style={{ padding: "5px 8px 7px", color: "var(--text-dim)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={project.cwd}>
-              {project.displayName ?? getProjectDisplayName(project.cwd)}
-            </div>
             <button style={itemStyle} onClick={() => { setProjectMenu(null); void handleReselectProjectPath(project.cwd); }}>
               重新选定路径
             </button>
@@ -1272,14 +1265,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             </button>
             <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
             <button
-              style={{ ...itemStyle, color: isDefault ? "var(--text-dim)" : "#ef4444", cursor: isDefault ? "default" : "pointer", opacity: isDefault ? 0.45 : 1 }}
+              className="context-menu-danger"
+              style={{ ...itemStyle, color: isDefault ? "var(--text-dim)" : "var(--danger)", cursor: isDefault ? "default" : "pointer", opacity: isDefault ? 0.45 : 1 }}
               disabled={isDefault}
               onClick={() => { setProjectMenu(null); handleRemoveProjectReference(project.cwd); }}
             >
               删除项目引入
             </button>
             <button
-              style={{ ...itemStyle, color: isDefault ? "var(--text-dim)" : "#b91c1c", cursor: isDefault || purging ? "default" : "pointer", opacity: isDefault || purging ? 0.45 : 1 }}
+              className="context-menu-danger"
+              style={{ ...itemStyle, color: isDefault ? "var(--text-dim)" : "var(--danger)", cursor: isDefault || purging ? "default" : "pointer", opacity: isDefault || purging ? 0.45 : 1 }}
               disabled={isDefault || purging}
               title={isDefault ? "默认项目不支持彻底删除" : "永久删除该项目下的全部会话文件"}
               onClick={() => { setProjectMenu(null); handlePurgeProjectSessions(project.cwd); }}
@@ -1835,7 +1830,7 @@ function SessionItem({
         event.stopPropagation();
         cancelPendingSelect();
         const menuWidth = 220;
-        const menuHeight = 72;
+        const menuHeight = 52;
         setContextMenu({
           x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
           y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -2147,6 +2142,7 @@ function SessionItem({
       )}
       {contextMenu && createPortal(
         <div
+          className="context-menu-glass"
           role="menu"
           aria-label="Session 操作"
           onClick={(event) => event.stopPropagation()}
@@ -2156,28 +2152,9 @@ function SessionItem({
             left: contextMenu.x,
             top: contextMenu.y,
             zIndex: 1100,
-            width: 220,
             padding: 6,
-            background: "var(--bg-panel)",
-            border: "1px solid var(--border)",
-            borderRadius: "var(--radius-panel)",
-            boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
           }}
         >
-          <div
-            title={session.id}
-            style={{
-              padding: "5px 8px 7px",
-              color: "var(--text-dim)",
-              fontSize: 10,
-              fontFamily: "var(--font-mono)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {session.id}
-          </div>
           <button
             type="button"
             role="menuitem"
@@ -2190,7 +2167,7 @@ function SessionItem({
               background: "transparent",
               border: "none",
               borderRadius: "var(--radius-control)",
-              color: contextMenu.copied ? "var(--accent)" : "var(--text-muted)",
+              color: contextMenu.copied ? "var(--text)" : "var(--text-muted)",
               cursor: "pointer",
               textAlign: "left",
               fontSize: 12,

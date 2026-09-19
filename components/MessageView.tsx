@@ -106,7 +106,7 @@ function formatTime(ts?: number): string | null {
   return `${date} ${time}`;
 }
 
-async function copyText(text: string): Promise<void> {
+export async function copyText(text: string): Promise<void> {
   if (window.__TAURI_INTERNALS__) {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -1470,6 +1470,10 @@ const STREAMING_MARKDOWN_COMPONENTS = createMarkdownComponents(true);
 const COMPLETED_MARKDOWN_COMPONENTS = createMarkdownComponents(false);
 
 function TextBlock({ block, isStreaming }: { block: TextContent; isStreaming?: boolean }) {
+  return <MessageMarkdown text={block.text} isStreaming={isStreaming} />;
+}
+
+export function MessageMarkdown({ text, isStreaming }: { text: string; isStreaming?: boolean }) {
   return (
     <div className="markdown-body" data-ai-output data-message-body>
       <ReactMarkdown
@@ -1477,7 +1481,7 @@ function TextBlock({ block, isStreaming }: { block: TextContent; isStreaming?: b
         urlTransform={aiOutputUrlTransform}
         components={isStreaming ? STREAMING_MARKDOWN_COMPONENTS : COMPLETED_MARKDOWN_COMPONENTS}
       >
-        {block.text}
+        {text}
       </ReactMarkdown>
     </div>
   );

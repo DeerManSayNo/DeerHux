@@ -152,10 +152,86 @@ body {
   height: 100dvh;
 }
 
+/* macOS-style translucent material shared by context menus and assistant surfaces. */
+.context-menu-glass,
+.adaptive-glass-surface {
+  min-width: 180px;
+  max-width: calc(100vw - 16px);
+  --context-menu-text: #242426;
+  --context-menu-muted: #5f6065;
+  --context-menu-highlight: var(--accent);
+  --context-menu-highlight-foreground: var(--accent-foreground);
+  --context-menu-danger: #a51d43;
+  --context-menu-danger-bg: rgb(165 29 67 / 0.1);
+  overflow: hidden;
+  isolation: isolate;
+  border: 1px solid rgb(0 0 0 / 0.18);
+  border-radius: var(--radius-composer);
+  background: rgb(248 248 250 / 0.82);
+  color: var(--context-menu-text);
+  box-shadow:
+    0 14px 32px rgb(0 0 0 / 0.24),
+    0 3px 10px rgb(0 0 0 / 0.12),
+    inset 0 1px 0 rgb(255 255 255 / 0.72);
+  text-shadow: none;
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+}
+
+html.dark .context-menu-glass,
+html.dark .adaptive-glass-surface {
+  --context-menu-text: #f4f4f5;
+  --context-menu-muted: #c7c7cc;
+  --context-menu-highlight: var(--accent);
+  --context-menu-highlight-foreground: var(--accent-foreground);
+  --context-menu-danger: #ff91aa;
+  --context-menu-danger-bg: rgb(255 145 170 / 0.12);
+  border-color: rgb(255 255 255 / 0.18);
+  background: rgb(38 38 40 / 0.78);
+  box-shadow:
+    0 16px 36px rgb(0 0 0 / 0.48),
+    0 3px 10px rgb(0 0 0 / 0.3),
+    inset 0 1px 0 rgb(255 255 255 / 0.12);
+}
+
+.context-menu-glass button:not(.context-menu-danger) {
+  color: var(--context-menu-text) !important;
+}
+
+.context-menu-glass button {
+  min-height: 28px;
+  border-radius: var(--radius-control);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  letter-spacing: 0;
+  text-shadow: none;
+}
+
+.context-menu-glass button:not(:disabled):hover,
+.context-menu-glass button:not(:disabled):focus-visible {
+  background: var(--context-menu-highlight) !important;
+  color: var(--context-menu-highlight-foreground) !important;
+}
+
+.context-menu-glass .context-menu-danger {
+  color: var(--context-menu-danger) !important;
+}
+
+.context-menu-glass .context-menu-danger:not(:disabled):hover,
+.context-menu-glass .context-menu-danger:not(:disabled):focus-visible {
+  background: var(--context-menu-danger-bg) !important;
+  color: var(--context-menu-danger) !important;
+}
+
 /* The live-island webview is a transparent native overlay. Keep the app theme
    background everywhere else, but let the rounded island edges reveal macOS. */
 html:has([data-live-island-root]),
 body:has([data-live-island-root]) {
+  background: transparent;
+}
+
+html:has([data-selection-assistant-root]),
+body:has([data-selection-assistant-root]) {
   background: transparent;
 }
 

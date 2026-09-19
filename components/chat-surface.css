@@ -142,9 +142,42 @@ html.dark :is(.chat-window-surface, .chat-session-frame) {
 }
 
 .chat-window-surface [data-chat-context-reveal] {
+  position: relative;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
+  pointer-events: none;
   animation: chat-context-reveal 180ms ease-out both;
+}
+
+.chat-window-surface [data-chat-context-reveal]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--session-bg) 55%, transparent) 65%,
+    var(--session-bg)
+  );
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 75%);
+  mask-image: linear-gradient(to bottom, transparent, #000 75%);
+}
+
+.chat-window-surface [data-chat-skill-row] {
+  position: relative;
+  min-width: 0;
+}
+
+.chat-window-surface [data-chat-context-reveal] :is(button, [data-chat-file-references]) {
+  pointer-events: auto;
+}
+
+.chat-window-surface [data-chat-input] {
+  pointer-events: auto;
 }
 
 @keyframes chat-context-reveal {
@@ -160,47 +193,14 @@ html.dark :is(.chat-window-surface, .chat-session-frame) {
   }
 }
 
-@container chat-input (max-width: 620px) {
-  .chat-window-surface [data-chat-skill-row] {
-    flex-direction: column !important;
-    align-items: stretch !important;
-    justify-content: flex-start !important;
-  }
+.chat-window-surface [data-chat-file-reference-primary],
+.chat-window-surface [data-chat-context-chip] {
+  flex: 0 0 auto;
+}
 
-  .chat-window-surface [data-chat-project-skills],
-  .chat-window-surface [data-chat-file-references] {
-    flex: 0 0 auto !important;
-    width: 100%;
-    max-width: 100% !important;
-    max-height: 26px !important;
-    flex-wrap: nowrap !important;
-    overflow-x: auto !important;
-    overflow-y: hidden !important;
-    scrollbar-width: none;
-  }
-
-  .chat-window-surface [data-chat-project-skills] {
-    padding-right: 0 !important;
-    -webkit-mask-image: none !important;
-    mask-image: none !important;
-  }
-
-  .chat-window-surface [data-chat-file-references] {
-    margin-left: 0 !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    justify-content: flex-start !important;
-  }
-
-  .chat-window-surface [data-chat-project-skills]::-webkit-scrollbar,
-  .chat-window-surface [data-chat-file-references]::-webkit-scrollbar {
-    display: none;
-  }
-
-  .chat-window-surface [data-chat-file-reference-primary],
-  .chat-window-surface [data-chat-context-chip] {
-    flex: 0 0 auto;
-  }
+.chat-window-surface [data-chat-file-reference-primary] > [data-chat-context-chip] {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -210,4 +210,25 @@ html.dark :is(.chat-window-surface, .chat-session-frame) {
     animation: none;
     transition: none;
   }
+}
+
+/* Keep hidden skills measurable so they reappear when sufficient width returns. */
+.chat-window-surface [data-chat-project-skills][data-overflow-hidden="true"] {
+  height: 0;
+  max-height: 0 !important;
+  visibility: hidden;
+  overflow: hidden !important;
+}
+
+.chat-window-surface [data-chat-context-reveal][data-skills-hidden="true"] {
+  height: 0;
+  visibility: hidden;
+  animation: none;
+}
+
+.chat-window-surface [data-chat-project-skills] {
+  flex-wrap: nowrap !important;
+  overflow: hidden !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
 }

@@ -230,6 +230,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const skillRowRef = useRef<HTMLDivElement>(null);
+  const projectSkillsRef = useRef<HTMLDivElement>(null);
+  const [visibleProjectSkillCount, setVisibleProjectSkillCount] = useState(0);
+  const projectSkillsFit = visibleProjectSkillCount > 0;
   useAutoGrowTextarea(textareaRef, value);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
@@ -1012,6 +1015,49 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
 
 
+  useEffect(() => {
+    const row = projectSkillsRef.current;
+    if (!row) return;
+    const measure = () => {
+      const style = getComputedStyle(row);
+      const children = Array.from(row.children) as HTMLElement[];
+      const available = row.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const gap = parseFloat(style.columnGap);
+      let required = 0;
+      let visibleCount = 0;
+      for (const [index, child] of children.entries()) {
+        const childStyle = getComputedStyle(child);
+        required += child.getBoundingClientRect().width
+          + parseFloat(childStyle.marginLeft) + parseFloat(childStyle.marginRight)
+          + (index > 0 ? gap : 0);
+        if (required > available) break;
+        // The first child is the section label, followed by skills in list order.
+        if (index > 0) visibleCount++;
+      }
+      setVisibleProjectSkillCount(visibleCount);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(row);
+    Array.from(row.children).forEach((child) => observer.observe(child));
+    measure();
+    return () => observer.disconnect();
+  }, [commonProjectSkills, hasFileReferences]);
+
+  useEffect(() => {
+    const input = dropZoneRef.current;
+    const surface = input?.closest<HTMLElement>(".chat-window-surface");
+    const row = input?.querySelector<HTMLElement>("[data-chat-context-reveal]");
+    if (!surface || !row) return;
+    const update = () => surface.style.setProperty("--chat-context-height", `${row.getBoundingClientRect().height}px`);
+    const observer = new ResizeObserver(update);
+    observer.observe(row);
+    update();
+    return () => {
+      observer.disconnect();
+      surface.style.removeProperty("--chat-context-height");
+    };
+  }, [commonProjectSkills.length, hasFileReferences, dropZoneRef]);
+
   return (
     <div
       ref={dropZoneRef}
@@ -1343,7 +1389,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
         {/* Input context row: project skills on the left, file references on the right */}
         {(commonProjectSkills.length > 0 || hasFileReferences) && (
-          <div data-chat-context-reveal>
+          <div data-chat-context-reveal data-skills-hidden={!projectSkillsFit && !hasFileReferences ? "true" : undefined}>
             <div
               ref={skillRowRef}
               data-chat-skill-row
@@ -1358,7 +1404,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               }}
             >
             <div
+              ref={projectSkillsRef}
               data-chat-project-skills
+              data-overflow-hidden={!projectSkillsFit ? "true" : undefined}
+              aria-hidden={!projectSkillsFit}
+              inert={!projectSkillsFit}
               style={{
                 flex: "1 1 0",
                 minWidth: 0,
@@ -1366,9 +1416,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 alignItems: "center",
                 gap: 6,
                 overflowX: "hidden",
-                overflowY: "auto",
-                flexWrap: "wrap",
-                maxHeight: 64,
+                overflowY: "hidden",
+                flexWrap: "nowrap",
+                maxHeight: 26,
                 paddingRight: hasFileReferences ? 18 : 0,
                 scrollbarWidth: "none",
                 WebkitMaskImage: hasFileReferences
@@ -1391,21 +1441,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   >
                     项目技能
                   </span>
-                  {commonProjectSkills.map((skill) => (
+                  {commonProjectSkills.map((skill, index) => (
                     <button
                       key={skill.name}
                       type="button"
+                      aria-hidden={index >= visibleProjectSkillCount}
+                      inert={index >= visibleProjectSkillCount}
                       onMouseDown={(e) => {
                         e.preventDefault();
                       }}
                       onClick={() => selectSkill(skill)}
                       title={skill.description ? `${skill.name} — ${skill.description}` : skill.name}
                       style={{
+                        visibility: index >= visibleProjectSkillCount ? "hidden" : undefined,
                         flexShrink: 0,
                         display: "inline-flex",
                         alignItems: "center",
                         gap: 5,
-                        maxWidth: "min(180px, 100%)",
+                        whiteSpace: "nowrap",
                         height: 26,
                         padding: "0 9px",
                         borderRadius: "var(--radius-small)",
@@ -1437,13 +1490,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <div
                 data-chat-file-references
                 style={{
-                  flex: "0 1 38%",
+                  flex: "0 1 auto",
                   minWidth: 0,
-                  maxWidth: "38%",
+                  maxWidth: "60%",
                   marginLeft: 10,
                   display: "flex",
-                  flexDirection: "column-reverse",
-                  alignItems: "flex-end",
+                  flexDirection: "row",
+                  flexWrap: "wrap-reverse",
+                  alignItems: "center",
                   justifyContent: "flex-end",
                   gap: 6,
                   overflow: "visible",
@@ -1460,7 +1514,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           display: "inline-flex",
                           alignItems: "center",
                           gap: 5,
-                          maxWidth: 180,
+                          maxWidth: "min(180px, 100%)",
                           height: 24,
                           padding: "0 6px 0 8px",
                           borderRadius: "var(--radius-small)",

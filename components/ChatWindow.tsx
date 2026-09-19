@@ -2,6 +2,7 @@
 
 import { WindowWeChatButton } from "./WindowWeChatButton";
 import { AppIcon } from "./AppIcon";
+import { SelectionExplainOverlay } from "./SelectionExplainOverlay";
 import FallingText from "./FallingText";
 import "./chat-surface.css";
 import { useChatSelectAll } from "@/hooks/useChatSelectAll";
@@ -1540,6 +1541,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
 
   return (
     <AiFileLinkMenu cwd={session?.cwd ?? newSessionCwd}>
+    <SelectionExplainOverlay sessionId={session?.id}>
     <div
       className="chat-window-wrap chat-window-surface relative flex h-full flex-col overflow-hidden"
       style={{ overflowY: "auto" }}
@@ -1744,6 +1746,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         <div
           ref={scrollContainerRef}
           data-chat-messages
+          data-chat-scroll-area
           onPointerDown={cancelPromptScroll}
           onKeyDown={(event) => {
             if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) cancelPromptScroll();
@@ -1752,7 +1755,7 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
           className="flex-1 overflow-y-auto scrollbar-none [scrollbar-width:none]"
           style={{ overflowX: "hidden", overflowAnchor: shouldAutoScroll ? "none" : "auto" }}
         >
-          <div ref={scrollContentRef} className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingTop: 18, paddingBottom: compact ? 12 : 18 }}>
+          <div ref={scrollContentRef} className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingTop: 18, paddingBottom: `calc(${compact ? 12 : 18}px + var(--chat-context-height, 0px))` }}>
 
             {/* TODO 3 — first-paint pagination: older messages were truncated. */}
             {hasOlderMessages && session?.id && (
@@ -2029,12 +2032,13 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
         )}
       </div>
 
-      <div className="relative" style={{ flexShrink: 0 }}>
+      <div className="relative" style={{ flexShrink: 0, marginTop: "calc(-1 * var(--chat-context-height, 0px))", pointerEvents: "none" }}>
         {chatInputElement}
       </div>
       </>
       )}
     </div>
+    </SelectionExplainOverlay>
     </AiFileLinkMenu>
   );
 }

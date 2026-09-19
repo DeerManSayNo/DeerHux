@@ -45,6 +45,8 @@ type AutoRecoveryModel = RecoveryFallbackModel | null;
 interface ModelsJson {
   providers?: Record<string, ProviderEntry>;
   autoRecoveryModels?: AutoRecoveryModel[];
+  /** 全局唯一的 Flash 模型，用于解释选中文字等轻量快速任务。 */
+  flashModel?: RecoveryFallbackModel | null;
 }
 
 let cachedModelsConfig: ModelsJson | null = null;
@@ -119,7 +121,8 @@ type ModelTestState =
 type Selection =
   | { type: "provider"; name: string }
   | { type: "model"; providerName: string; index: number }
-  | { type: "recovery" };
+  | { type: "recovery" }
+  | { type: "flash" };
 
 const API_OPTIONS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
 
@@ -743,6 +746,49 @@ function RecoveryFallbackEditor({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+function FlashModelEditor({
+  value,
+  models,
+  onChange,
+}: {
+  value: RecoveryFallbackModel | null | undefined;
+  models: { provider: string; modelId: string; label: string }[];
+  onChange: (v: RecoveryFallbackModel | null) => void;
+}) {
+  const selected = value ? `${value.provider}:${value.modelId}` : "";
+  return (
+    <div className={styles.detailForm}>
+      <div>
+        <SectionTitle>Flash 模型</SectionTitle>
+        <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+          全局唯一的轻量模型，用于解释选中文字这类短任务。留空则沿用当前会话模型。
+        </p>
+      </div>
+      <Field label="模型">
+        <select
+          value={selected}
+          onChange={(e) => {
+            const raw = e.target.value;
+            if (!raw) {
+              onChange(null);
+              return;
+            }
+            const [provider, ...rest] = raw.split(":");
+            onChange({ provider, modelId: rest.join(":") });
+          }}
+          className={styles.input}
+        >
+          <option value="">沿用当前会话模型</option>
+          {models.map((m) => (
+            <option key={`${m.provider}:${m.modelId}`} value={`${m.provider}:${m.modelId}`}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </div>
+  );
+}
 export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSaved?: () => void }) {
   const [config, setConfig] = useState<ModelsJson>(() => cachedModelsConfig ?? { providers: {} });
   const [loading, setLoading] = useState(cachedModelsConfig === null);
@@ -863,6 +909,10 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
     setConfig((prev) => ({ ...prev, autoRecoveryModels: models }));
   }, []);
 
+  const updateFlashModel = useCallback((model: RecoveryFallbackModel | null) => {
+    setConfig((prev) => ({ ...prev, flashModel: model }));
+  }, []);
+
   const selectedProviderName = selection?.type === "provider"
     ? selection.name
     : selection?.type === "model"
@@ -966,6 +1016,15 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
         />
       );
     }
+    if (selection.type === "flash") {
+      return (
+        <FlashModelEditor
+          value={config.flashModel}
+          models={modelOptions}
+          onChange={updateFlashModel}
+        />
+      );
+    }
     if (selection.type === "provider") {
       const provider = config.providers?.[selection.name];
       if (!provider) return null;
@@ -1013,6 +1072,14 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
           >
             <AppIcon name="refresh" size="compact" />
             <span>自动续跑兜底</span>
+          </button>
+          <button
+            type="button"
+            className={`${styles.treeItem} ${selection?.type === "flash" ? styles.treeItemActive : ""}`}
+            onClick={() => setSelection({ type: "flash" })}
+          >
+            <AppIcon name="steer" size="compact" />
+            <span>Flash 模型</span>
           </button>
           {providers.length > 0 && <div className={styles.treeLabel}>供应商</div>}
           {loading ? <div className={styles.loadingText}>加载中…</div> : providers.map(([pName, pData]) => {
