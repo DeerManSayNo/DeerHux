@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>DeerHux D path app icon, light</title>
+  <rect x="32" y="32" width="960" height="960" rx="222" fill="#F7F6F2"/>
+  <path fill="#292A2B" fill-rule="evenodd" d="M260 230h228c187 0 302 108 302 282S675 794 488 794H260V230Zm154 142v280h72c93 0 150-51 150-140s-57-140-150-140h-72Z"/>
+  <path d="M466 512h60m0 0 54-54h48m-102 54 54 54h48" stroke="#B94708" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>DeerHux folded path app icon</title>
+  <rect x="32" y="32" width="960" height="960" rx="222" fill="#151515"/>
+  <path d="M326 342 672 520 326 698" transform="translate(0 24)" stroke="#A93F24" stroke-width="146" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M326 698 672 520" stroke="#FF8A45" stroke-width="132" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M636 538 672 520 633 500" stroke="#ED6534" stroke-width="132" stroke-linecap="butt" stroke-linejoin="round"/>
+  <path d="M326 342 672 520" stroke="#FFB067" stroke-width="132" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

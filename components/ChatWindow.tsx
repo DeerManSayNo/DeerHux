@@ -29,6 +29,7 @@ import { useCodeIndex } from "@/hooks/useCodeIndex";
 import { useAudio } from "@/hooks/useAudio";
 import { useTransientNotice } from "@/hooks/useTransientNotice";
 import { useMinDisplayValue } from "@/hooks/useMinDisplayValue";
+import { useToolTerminalPreference } from "@/hooks/useToolTerminalPreference";
 import { subscribeToAppNotification, notifyApp } from "@/lib/app-notifications";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { needsCompaction, type CompactionModelRef } from "@/lib/compaction-ui";
@@ -486,6 +487,7 @@ const ActiveTurnElapsed = memo(function ActiveTurnElapsed({
 
 
 export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority = "focused", session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, isSessionRunning = false, onSessionForked, modelsRefreshKey, chatInputRef, wechatHeaderTargetId, projectHeaderTargetId, onSessionStatsChange, onContextUsageChange, onOpenFile, onRevealFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession, initialInputState, saveInputState }: Props) {
+  const [toolTerminalEnabled] = useToolTerminalPreference();
   const [liveCollaborationRuns, setLiveCollaborationRuns] = useState<CollaborationRunSnapshot[]>([]);
   const [hasAuthoritativeCollaborationRuns, setHasAuthoritativeCollaborationRuns] = useState(false);
   const liveCollaborationRunsRef = useRef<Map<string, CollaborationRunSnapshot>>(new Map());
@@ -572,6 +574,10 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
   const phaseLabelText = useMinDisplayValue(rawPhaseLabel, PHASE_LABEL_MIN_DISPLAY_MS);
   const streamTextLength = getStreamTextLength(streamState.streamingMessage);
   const showStreamIdleStatus = useStreamIdleStatus(isRunning, streamTextLength);
+  const finalResponseStarted = agentPhase?.kind === "thinking_after_tool"
+    && streamState.streamingMessage?.role === "assistant"
+    && Array.isArray(streamState.streamingMessage.content)
+    && streamState.streamingMessage.content.some((block) => block.type === "text" && Boolean(block.text.trim()));
 
   const commitLiveCollaborationRuns = useCallback((
     updater: (current: Map<string, CollaborationRunSnapshot>) => Map<string, CollaborationRunSnapshot>,
@@ -1470,13 +1476,16 @@ export function ChatWindow({ activeTabId, isFocused = true, streamRenderPriority
           sidePadding={contentSidePadding}
         />
       )}
-      <ActiveToolTerminal
-        key={toolTerminalGeneration}
-        entries={toolTerminalEntries}
-        visible={isRunning && toolTerminalEntries.length > 0}
-        maxWidth={contentMaxWidth}
-        sidePadding={contentSidePadding}
-      />
+      {toolTerminalEnabled && (
+        <ActiveToolTerminal
+          key={toolTerminalGeneration}
+          entries={toolTerminalEntries}
+          visible={isRunning && toolTerminalEntries.length > 0}
+          finalResponseStarted={finalResponseStarted}
+          maxWidth={contentMaxWidth}
+          sidePadding={contentSidePadding}
+        />
+      )}
       <ChatInput
         ref={chatInputRef}
         compact={compact}

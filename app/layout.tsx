@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
+import { DisableNativeContextMenu } from "@/components/DisableNativeContextMenu";
+import { DisableTabNavigation } from "@/components/DisableTabNavigation";
 import "./globals.css";
 import "./design-tokens.css";
 
@@ -37,6 +39,8 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
       </head>
       <body style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+        <DisableNativeContextMenu />
+        <DisableTabNavigation />
         {children}
       </body>
     </html>

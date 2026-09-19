@@ -45,6 +45,7 @@ import {
 } from "@/lib/file-preview-window";
 import { useTheme } from "@/hooks/useTheme";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
+import { useToolTerminalPreference } from "@/hooks/useToolTerminalPreference";
 import type { SessionInfo } from "@/lib/types";
 import { subscribeHostEvents } from "@/lib/agent-event-client";
 import type { ChatInputHandle, ChatInputState } from "./ChatInput";
@@ -183,6 +184,7 @@ export function AppShell() {
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const configurationPanelHostRef = useRef<ConfigurationPanelHostHandle | null>(null);
   const [liveIslandEnabled, setLiveIslandEnabledState] = useState(false);
+  const [toolTerminalEnabled, setToolTerminalEnabled] = useToolTerminalPreference();
   const [shareManagerOpen, setShareManagerOpen] = useState(false);
   const [wechatStatus, setWechatStatus] = useState<{ connected: boolean; polling: boolean; accountId?: string; activeUserCount?: number } | null>(null);
   const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
@@ -1857,6 +1859,55 @@ export function AppShell() {
                 </button>
               ))}
               <div role="separator" style={{ height: 1, margin: "5px 4px", background: "var(--border)" }} />
+              <button
+                role="menuitemcheckbox"
+                aria-checked={toolTerminalEnabled}
+                onClick={() => setToolTerminalEnabled(!toolTerminalEnabled)}
+                style={{
+                  width: "100%",
+                  padding: "8px 9px",
+                  border: "none",
+                  borderRadius: "var(--radius-control)",
+                  background: "transparent",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontSize: 12,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
+              >
+                <span>工具调用终端</span>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    marginLeft: "auto",
+                    width: 28,
+                    height: 16,
+                    flexShrink: 0,
+                    borderRadius: 999,
+                    background: toolTerminalEnabled ? "var(--accent)" : "var(--border)",
+                    position: "relative",
+                    transition: "background 0.15s ease",
+                  }}
+                >
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: 2,
+                      left: toolTerminalEnabled ? 14 : 2,
+                      width: 12,
+                      height: 12,
+                      borderRadius: "50%",
+                      background: "#fff",
+                      transition: "left 0.15s ease",
+                    }}
+                  />
+                </span>
+              </button>
               {/* 灵动岛开关：本地窗口浮层，随 DeerHux 会话状态显示 */}
               <button
                 role="menuitemcheckbox"
@@ -1883,6 +1934,7 @@ export function AppShell() {
                 onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
               >
+                <span>灵动岛</span>
                 <span
                   aria-hidden="true"
                   style={{
@@ -1909,7 +1961,6 @@ export function AppShell() {
                     }}
                   />
                 </span>
-                <span>灵动岛</span>
               </button>
             </div>
           )}

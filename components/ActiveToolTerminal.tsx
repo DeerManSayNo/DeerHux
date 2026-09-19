@@ -68,11 +68,11 @@ export function getActiveToolTerminalContent(tool: AgentPhaseTool): string {
 const MIN_ENTRY_DWELL_MS = 2_000;
 const MIN_SCROLL_DURATION_MS = 1_000;
 const MAX_SCROLL_DURATION_MS = 1_400;
-const COLLAPSE_DELAY_MS = 3_000;
 
-export function ActiveToolTerminal({ entries, visible, maxWidth, sidePadding }: {
+export function ActiveToolTerminal({ entries, visible, finalResponseStarted, maxWidth, sidePadding }: {
   entries: ToolTerminalEntry[];
   visible: boolean;
+  finalResponseStarted: boolean;
   maxWidth: number;
   sidePadding: number;
 }) {
@@ -82,7 +82,7 @@ export function ActiveToolTerminal({ entries, visible, maxWidth, sidePadding }: 
   const scrollAnimationRef = useRef<number | null>(null);
   const [releasedCount, setReleasedCount] = useState(0);
   const [exitReady, setExitReady] = useState(true);
-  const [collapsed, setCollapsed] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -114,7 +114,7 @@ export function ActiveToolTerminal({ entries, visible, maxWidth, sidePadding }: 
   const displayedCount = entries.length === 0 ? 0 : Math.max(1, releasedCount);
   const shownEntries = useMemo(() => entries.slice(0, displayedCount), [displayedCount, entries]);
   const allToolsComplete = entries.length > 0 && entries.every((entry) => entry.status === "complete");
-  const terminalVisible = visible || !exitReady;
+  const terminalVisible = (visible || !exitReady) && !dismissed;
   const showAiOutput = terminalVisible && displayedCount >= entries.length && allToolsComplete;
   const latestShown = shownEntries.at(-1);
   const headerCommand = formatHeaderCommand(latestShown);
@@ -123,22 +123,12 @@ export function ActiveToolTerminal({ entries, visible, maxWidth, sidePadding }: 
 
   useEffect(() => {
     if (!visible) return;
-    const latestCompletedAt = entries.reduce(
-      (latest, entry) => Math.max(latest, entry.completedAt ?? 0),
-      0,
-    );
-    if (!allToolsComplete || displayedCount < entries.length || latestCompletedAt === 0) {
-      setCollapsed(false);
+    if (!allToolsComplete) {
+      setDismissed(false);
       return;
     }
-
-    const collapseAt = Math.max(
-      latestCompletedAt + COLLAPSE_DELAY_MS,
-      lastReleaseAtRef.current + MIN_ENTRY_DWELL_MS,
-    );
-    const timer = setTimeout(() => setCollapsed(true), Math.max(0, collapseAt - Date.now()));
-    return () => clearTimeout(timer);
-  }, [allToolsComplete, displayedCount, entries, visible]);
+    if (finalResponseStarted) setDismissed(true);
+  }, [allToolsComplete, finalResponseStarted, visible]);
 
   useEffect(() => {
     const output = outputRef.current;
@@ -188,7 +178,6 @@ export function ActiveToolTerminal({ entries, visible, maxWidth, sidePadding }: 
     <div
       className={styles.wrap}
       data-visible={terminalVisible ? "true" : "false"}
-      data-collapsed={collapsed ? "true" : "false"}
       aria-hidden={!terminalVisible}
       style={{ maxWidth, width: `calc(100% - ${sidePadding * 2}px)` }}
     >

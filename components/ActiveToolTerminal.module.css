@@ -8,10 +8,6 @@
   transition: height 220ms ease, margin-bottom 180ms ease-in, visibility 0s linear;
 }
 
-.wrap[data-collapsed="true"] {
-  height: 28px;
-}
-
 .wrap[data-visible="false"] {
   height: 0;
   margin-bottom: 0;
@@ -35,10 +31,6 @@
   box-shadow: var(--shadow-control);
   clip-path: inset(0 0 0 0);
   transition: height 220ms ease, clip-path 180ms ease-in;
-}
-
-.wrap[data-collapsed="true"] .panel {
-  height: 28px;
 }
 
 .wrap[data-visible="false"] .panel {

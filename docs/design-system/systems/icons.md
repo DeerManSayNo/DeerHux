@@ -11,8 +11,8 @@
 
 ## 引用
 
-- 品牌采用已选定的 A 方案（橙色曲面鹿形）。浅色、深色母版分别为 `public/brand/deerhux-a-light.png`、`public/brand/deerhux-a-dark.png`；网页图标跟随应用主题。首页空白区不展示图形 Logo，保留文字与新建会话入口。
-- `node scripts/sync-brand-icons.mjs` 从 PNG 母版生成网页缩略图及桌面 PNG／ICNS／ICO。桌面安装包固定使用浅色 A，不随应用主题切换；深色 A 保留用于网页主题适配。旧 v2 SVG 与字标作为历史资产保留，不再作为图标生成输入。
+- 品牌采用 C 折叠路径方案：一条向前折返的连续带状结构表达 Agent 的理解、执行与返回闭环。图形不使用鹿、字母或代码括号等字面元素；空间感仅由三个相邻橙色平面和克制的下沿厚度构成，在 16–32px 小尺寸下仍以单一前进轮廓为第一识别。兼容主题入口分别为 `public/brand/deerhux-c-light.svg`、`public/brand/deerhux-c-dark.svg`，两者有意共享深色底板，保持跨主题品牌一致性。首页空白区不展示图形 Logo，保留文字与新建会话入口。
+- `node scripts/sync-brand-icons.mjs` 从 SVG 母版生成网页缩略图及桌面 PNG／ICNS／ICO。桌面安装包和网页均使用深色底板；旧 A 位图、D 路径、v2 SVG 与字标作为历史资产保留，不再作为图标生成输入。
 
 - 实现：`components/AppIcon.tsx`。
 - 依赖：`lucide-react`，版本以 `package.json` 为准。

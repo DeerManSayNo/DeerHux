@@ -79,7 +79,7 @@ function applyTheme(theme: Theme) {
   // Follow the app preference, which may intentionally differ from the OS theme.
   const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
   if (icon) {
-    icon.href = `/brand/deerhux-a-${theme}-256.png`;
+    icon.href = `/brand/deerhux-c-${theme}-256.png`;
     icon.type = "image/png";
     icon.sizes.value = "256x256";
   }

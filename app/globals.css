@@ -155,7 +155,6 @@ body {
 /* macOS-style translucent material shared by context menus and assistant surfaces. */
 .context-menu-glass,
 .adaptive-glass-surface {
-  min-width: 180px;
   max-width: calc(100vw - 16px);
   --context-menu-text: #242426;
   --context-menu-muted: #5f6065;
@@ -176,6 +175,14 @@ body {
   text-shadow: none;
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   backdrop-filter: blur(24px) saturate(160%);
+}
+
+.context-menu-glass {
+  width: max-content;
+}
+
+.adaptive-glass-surface {
+  min-width: 180px;
 }
 
 html.dark .context-menu-glass,
@@ -204,6 +211,7 @@ html.dark .adaptive-glass-surface {
   font-size: var(--text-sm);
   font-weight: var(--weight-regular);
   letter-spacing: 0;
+  white-space: nowrap;
   text-shadow: none;
 }
 
